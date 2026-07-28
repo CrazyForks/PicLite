@@ -41,6 +41,7 @@ type WatcherSettings = {
 
 type NativeBridge = {
   platform: string;
+  readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
   selectFolder: (kind: "input" | "output") => Promise<string | null>;
   startWatcher: (settings: WatcherSettings) => Promise<{ ok: boolean; error?: string }>;
   stopWatcher: () => Promise<{ ok: boolean }>;
@@ -485,6 +486,13 @@ export function PicLiteApp() {
 
   const importFromClipboard = useCallback(async () => {
     try {
+      if (nativeBridge) {
+        const nativeImage = await nativeBridge.readClipboardImage();
+        if (nativeImage) {
+          await addFiles([new File([new Uint8Array(nativeImage.data)], `clipboard-${Date.now()}.png`, { type: "image/png" })]);
+          return;
+        }
+      }
       const clipboardItems = await navigator.clipboard.read();
       const files: File[] = [];
       for (const clipboardItem of clipboardItems) {
@@ -497,7 +505,7 @@ export function PicLiteApp() {
     } catch {
       showToast("请直接按 Ctrl + V 粘贴剪贴板图片");
     }
-  }, [addFiles, showToast]);
+  }, [addFiles, nativeBridge, showToast]);
 
   const handleComparePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const box = compareRef.current?.getBoundingClientRect();

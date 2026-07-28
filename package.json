@@ -1,6 +1,8 @@
 {
   "name": "piclite",
   "version": "0.1.0",
+  "description": "本地优先的网页与 Windows 图片压缩工作台",
+  "author": "PicLite contributors",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -52,6 +54,7 @@
     "appId": "com.piclite.desktop",
     "productName": "PicLite",
     "artifactName": "PicLite-${version}-${arch}.${ext}",
+    "icon": "build/icon.png",
     "asar": true,
     "directories": {
       "output": "release"

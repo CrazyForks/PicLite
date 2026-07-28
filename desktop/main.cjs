@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- Electron loads this main process as CommonJS. */
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
@@ -217,6 +217,10 @@ ipcMain.handle("dialog:select-folder", async (_event, kind) => {
   const folder = path.resolve(result.filePaths[0]);
   if (kind === "input" || kind === "output") selectedFolders[kind] = folder;
   return folder;
+});
+ipcMain.handle("clipboard:read-image", () => {
+  const image = clipboard.readImage();
+  return image.isEmpty() ? null : { data: image.toPNG() };
 });
 ipcMain.handle("watcher:start", async (_event, settings) => {
   try { return await startWatcher(settings); }

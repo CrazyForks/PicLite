@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("picLite", {
   platform: process.platform,
+  readClipboardImage: () => ipcRenderer.invoke("clipboard:read-image"),
   selectFolder: (kind) => ipcRenderer.invoke("dialog:select-folder", kind),
   startWatcher: (settings) => ipcRenderer.invoke("watcher:start", settings),
   stopWatcher: () => ipcRenderer.invoke("watcher:stop"),
