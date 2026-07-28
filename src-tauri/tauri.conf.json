@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PicLite",
+  "version": "0.5.0",
+  "identifier": "com.piclite.desktop",
+  "build": {
+    "beforeDevCommand": "npm run desktop:renderer:dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run desktop:renderer",
+    "frontendDist": "../desktop-dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PicLite 图轻",
+        "width": 1480,
+        "height": 940,
+        "minWidth": 980,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "backgroundColor": "#eef2ed"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "本地优先的图片与 GIF 压缩工作台",
+    "longDescription": "支持实时体积预估、无级尺寸与画质、动态 GIF、水印和本地文件夹自动监测。",
+    "copyright": "Copyright © PicLite contributors",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
+  }
+}

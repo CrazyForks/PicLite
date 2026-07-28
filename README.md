@@ -5,6 +5,7 @@
 [![Build desktop apps](https://github.com/amiaoapp/PicLite/actions/workflows/release-desktop.yml/badge.svg)](https://github.com/amiaoapp/PicLite/actions/workflows/release-desktop.yml)
 [![GitHub release](https://img.shields.io/github/v/release/amiaoapp/PicLite?display_name=tag)](https://github.com/amiaoapp/PicLite/releases)
 [![Node.js](https://img.shields.io/badge/Node.js-22.13%2B-43853d)](https://nodejs.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2.11-24C8DB)](https://v2.tauri.app/)
 
 PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，支持 Web、Windows、macOS 和 Linux。它可以在执行前实时预估输出体积，并用连续的画质和尺寸控制把文件压到你需要的大小。
 
@@ -20,9 +21,12 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 - 动态 GIF 逐帧压缩，保留动画并连续控制色板质量和尺寸
 - 0.1–100% 等比例缩放、继续减半、最大宽高和禁止放大小图
 - 每次滑动都从原图重新试压，在执行前显示真实输出体积、像素和前后画质对比
+- 对比 / 原图 / 结果三种预览，可滚轮缩放、拖拽、适应窗口和 1:1 实际像素检查
+- 智能防增大：未改变尺寸、格式或水印时，候选结果更大就自动保留原图
 - 文字水印：本地字体、角度、字号、透明度、缩放、密度、全屏平铺、自由位置和阴影
 - 下载、覆盖源文件、同文件夹重命名、固定文件夹四种导出模式
-- 桌面端持续监测本地文件夹，新图片自动用 Sharp / jpegtran 压缩
+- 桌面端使用 Tauri 2 + Rust，原生处理文件选择、剪贴板、导出和文件夹监测
+- 桌面专属应用设置：默认输出规则、固定目录、后缀、覆盖确认和关于页面
 - Docker 自托管和 GitHub Actions 跨平台自动构建
 
 图片处理在浏览器或桌面客户端本地完成，不会把原图上传到 PicLite 服务器。网页端受浏览器权限限制，持续文件夹监测只在桌面客户端提供。
@@ -33,13 +37,15 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 
 | 系统 | 架构 | 文件 |
 | --- | --- | --- |
-| Windows | x64 | 安装版 `.exe` 或便携版 `.exe` |
+| Windows | x64 | NSIS 安装版 `.exe` 或 `.msi` |
 | macOS | Apple Silicon（M1/M2/M3/M4…） | `arm64.dmg` |
 | macOS | Intel | `x64.dmg` |
 | Linux | x64 | `x86_64.AppImage` 或 `amd64.deb` |
 | Linux | arm64 | `arm64.AppImage` 或 `arm64.deb` |
 
-当前 macOS 包没有 Apple 开发者签名。首次打开时，如果系统提示无法验证开发者，请在“系统设置 → 隐私与安全性”中确认打开。正式公开分发建议配置 Apple Developer ID 签名与公证。
+桌面版基于 Tauri，不再打包完整 Chromium；Windows 使用系统 WebView2，macOS 使用 WebKit，Linux 使用 WebKitGTK。本机实测 macOS `.app` 约 4.3 MB，具体安装包大小会随平台格式变化。
+
+当前 macOS 包使用 ad-hoc 签名，没有 Apple Developer ID 公证。首次打开时，如果系统提示无法验证开发者，请在“系统设置 → 隐私与安全性”中确认打开。正式公开分发建议配置 Apple Developer ID 签名与公证。
 
 ## 在服务器上部署
 
@@ -204,13 +210,14 @@ npm run dev
 
 ## 本地运行桌面端
 
-先保持网页开发服务运行，再打开第二个终端：
+先安装 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/) 和 Rust。Windows 需要 Microsoft C++ Build Tools 与 WebView2，Linux 需要 WebKitGTK；macOS 需要 Xcode Command Line Tools。然后执行：
 
 ```bash
+npm ci
 npm run desktop:dev
 ```
 
-开发模式连接本机网页服务，通过隔离的 preload bridge 提供本地文件夹选择和监测。正式安装包内置同一套界面，可以离线启动。
+Tauri 会自动启动专用 Vite 渲染器和 Rust 后端。正式安装包内置界面，可以离线启动；不需要另开网页开发服务。
 
 ## 构建 Windows、macOS 和 Linux
 
@@ -223,45 +230,40 @@ npm ci
 然后在对应系统运行：
 
 ```bash
-# Windows：安装版 + 便携版
+# Windows：NSIS 安装版 + MSI
 npm run desktop:build:win
 
-# macOS：当前机器架构，输出 DMG + ZIP
-npm run desktop:build:mac
-
-# macOS：指定架构
+# macOS：指定架构，输出 DMG
 npm run desktop:build:mac:arm64
 npm run desktop:build:mac:x64
-
-# Linux：当前机器架构，输出 AppImage + deb
-npm run desktop:build:linux
 
 # Linux：指定架构
 npm run desktop:build:linux:arm64
 npm run desktop:build:linux:x64
 ```
 
-产物位于 `release/`。含原生依赖的桌面应用最好在目标操作系统构建；仓库的 GitHub Actions 会分别使用 Windows、macOS 和 Linux 原生 runner。
+当前系统默认架构也可以直接运行 `npm run desktop:build`。产物位于 `src-tauri/target/<target>/release/bundle/`。桌面应用应在目标操作系统构建；仓库的 GitHub Actions 使用 Windows、macOS 和 Linux 原生 runner。
 
 ### 自动生成 GitHub Release
 
 推送版本标签后，GitHub Actions 会构建五组桌面产物，并自动创建 Release：
 
 ```bash
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 只想测试构建、不发布版本时，在 GitHub 的 `Actions → Build desktop apps → Run workflow` 手动运行。手动运行的文件会保存在该次工作流的 Artifacts 中。
 
 ## 压缩策略
 
-- **无损优先**：JPG 使用 jpegtran 优化编码并保留像素；PNG 使用最高无损压缩；WebP / AVIF 使用 lossless 编码。
+- **无损优先**：优先清理可安全移除的元数据，并在没有视觉变换时只接受更小的结果；否则保留原文件。
 - **智能平衡**：适合日常照片和网页素材，兼顾清晰度与体积。
 - **更小体积**：降低质量或使用 PNG 调色板，适合缩略图和加载性能敏感场景。
 - **连续试压**：画质最低 1%，尺寸最低 0.1%（最终不少于 1 × 1 像素）。每次都从原始文件重新编码，避免重复压缩造成累积损伤。
-- **PNG 画质**：网页端通过颜色量化让画质滑块真实影响 PNG 体积，并保留透明通道；自动监测使用 Sharp 调色板量化。
-- **GIF 画质**：网页端逐帧重新生成 2–256 色色板；桌面自动监测通过 Sharp 控制色板、抖动和帧间误差。
+- **PNG 画质**：通过颜色量化让画质滑块真实影响 PNG 体积，并保留透明通道。
+- **GIF 画质**：手动工作台逐帧重新生成 2–256 色色板；Rust 自动监测也会保留动画、调整尺寸并量化颜色。
+- **预览清晰度**：尺寸缩小不会额外改变编码质量。对比模式为了对齐会把结果显示为相同视觉尺寸；切换“结果”并点击 1:1，可按真实像素检查缩小图。
 
 ## 导出说明
 
@@ -275,8 +277,9 @@ git push origin v0.4.1
 ## 项目结构
 
 ```text
-app/                         Web 与桌面共享界面、浏览器压缩逻辑
-desktop/                     Electron、Sharp 压缩器、文件夹监听
+app/                         Web 界面与本地实时压缩逻辑
+desktop/                     Tauri 专用渲染入口与类型安全桥接
+src-tauri/                   Rust 后端、文件夹监听、系统集成与打包配置
 deploy/nginx/                Nginx 反向代理模板
 deploy/systemd/              Node.js systemd 服务模板
 .github/workflows/           跨平台构建、Release、服务器部署
@@ -286,4 +289,4 @@ docker-compose.yml           自托管启动与健康检查
 
 ## 隐私说明
 
-Web 版通过浏览器的 Canvas、WebCodecs 和文件系统能力本地处理图片；服务器只提供静态资源和应用代码。桌面版同样在设备本地处理，不内置图片上传接口。
+Web 版通过浏览器的 Canvas、WebCodecs 和文件系统能力本地处理图片；服务器只提供静态资源和应用代码。桌面版通过系统 WebView 与 Rust 后端在设备本地处理，不内置图片上传接口。

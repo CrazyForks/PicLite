@@ -1,6 +1,6 @@
 {
   "name": "piclite",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "本地优先、可自托管的跨平台图片与 GIF 压缩工作台",
   "author": {
     "name": "PicLite contributors",
@@ -20,25 +20,19 @@
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release --ignore-pattern src-tauri/target",
     "db:generate": "drizzle-kit generate",
-    "desktop:dev": "node desktop/dev.mjs",
+    "desktop:dev": "tauri dev",
+    "desktop:renderer:dev": "vite --config vite.desktop.config.ts",
     "desktop:renderer": "vite build --config vite.desktop.config.ts",
-    "desktop:build:win": "npm run desktop:renderer && electron-builder --win nsis portable",
-    "desktop:build:mac": "npm run desktop:renderer && electron-builder --mac dmg zip",
-    "desktop:build:mac:arm64": "npm run desktop:renderer && electron-builder --mac dmg zip --arm64",
-    "desktop:build:mac:x64": "npm run desktop:renderer && electron-builder --mac dmg zip --x64",
-    "desktop:build:linux": "npm run desktop:renderer && electron-builder --linux AppImage deb",
-    "desktop:build:linux:arm64": "npm run desktop:renderer && electron-builder --linux AppImage deb --arm64",
-    "desktop:build:linux:x64": "npm run desktop:renderer && electron-builder --linux AppImage deb --x64",
-    "desktop:unpacked": "npm run desktop:renderer && electron-builder --dir"
+    "desktop:build": "tauri build",
+    "desktop:build:win": "tauri build --target x86_64-pc-windows-msvc",
+    "desktop:build:mac:arm64": "tauri build --target aarch64-apple-darwin",
+    "desktop:build:mac:x64": "tauri build --target x86_64-apple-darwin",
+    "desktop:build:linux:arm64": "tauri build --target aarch64-unknown-linux-gnu",
+    "desktop:build:linux:x64": "tauri build --target x86_64-unknown-linux-gnu"
   },
-  "main": "desktop/main.cjs",
-  "dependencies": {
-    "chokidar": "5.0.0",
-    "jpegtran-bin": "7.0.0",
-    "sharp": "0.35.3"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
     "@tailwindcss/postcss": "4.2.1",
@@ -49,8 +43,8 @@
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
     "drizzle-orm": "0.45.2",
-    "electron": "43.2.0",
-    "electron-builder": "26.15.3",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/cli": "^2.11.0",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "gifenc": "1.0.3",
@@ -64,68 +58,5 @@
     "vite": "8.0.13",
     "wrangler": "4.92.0"
   },
-  "type": "module",
-  "build": {
-    "appId": "com.piclite.desktop",
-    "productName": "PicLite",
-    "artifactName": "PicLite-${version}-${arch}.${ext}",
-    "icon": "build/icon.png",
-    "asar": true,
-    "directories": {
-      "output": "release"
-    },
-    "asarUnpack": [
-      "node_modules/sharp/**/*",
-      "node_modules/@img/**/*",
-      "node_modules/jpegtran-bin/**/*"
-    ],
-    "files": [
-      "desktop/**/*",
-      "desktop-dist/**/*",
-      "package.json"
-    ],
-    "win": {
-      "icon": "build/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "mac": {
-      "icon": "build/icon.icns",
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.graphics-design"
-    },
-    "linux": {
-      "icon": "build/icons",
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "Graphics",
-      "synopsis": "本地优先的图片与 GIF 压缩工作台",
-      "maintainer": "PicLite contributors <amiaoapp@users.noreply.github.com>",
-      "vendor": "PicLite"
-    },
-    "nsis": {
-      "artifactName": "PicLite-${version}-${arch}-setup.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    },
-    "portable": {
-      "artifactName": "PicLite-${version}-${arch}-portable.${ext}"
-    },
-    "appImage": {
-      "artifactName": "PicLite-${version}-${arch}.${ext}"
-    },
-    "deb": {
-      "artifactName": "PicLite-${version}-${arch}.${ext}",
-      "priority": "optional"
-    }
-  }
+  "type": "module"
 }

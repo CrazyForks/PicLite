@@ -1,3 +1,4 @@
+import "./tauri-bridge";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { PicLiteApp } from "../app/piclite-app";

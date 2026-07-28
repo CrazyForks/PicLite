@@ -6,6 +6,7 @@ import {
   CSSProperties,
   DragEvent,
   PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -16,7 +17,8 @@ import { applyPalette, GIFEncoder, quantize } from "gifenc";
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
-type ViewName = "workspace" | "watcher";
+type ViewName = "workspace" | "watcher" | "preferences";
+type PreviewMode = "compare" | "original" | "result";
 type ItemStatus = "ready" | "processing" | "done" | "error";
 type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
 type WatermarkLayout = "tile" | "single";
@@ -64,6 +66,7 @@ type WatcherSettings = {
   maxWidth: number;
   maxHeight: number;
   stripMetadata: boolean;
+  preventLarger: boolean;
 };
 
 type NativeBridge = {
@@ -71,7 +74,7 @@ type NativeBridge = {
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
   selectImages: () => Promise<NativeImage[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
-  exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
+  exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; fixedFolder?: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
   startWatcher: (settings: WatcherSettings) => Promise<{ ok: boolean; error?: string }>;
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
@@ -104,6 +107,7 @@ type ImageItem = {
   outputHeight?: number;
   status: ItemStatus;
   error?: string;
+  keptOriginal?: boolean;
   fileHandle?: FileHandleLike;
   sourcePath?: string;
 };
@@ -135,7 +139,16 @@ type CompressionSettings = {
   height: number;
   lockRatio: boolean;
   stripMetadata: boolean;
+  preventLarger: boolean;
   watermark: WatermarkSettings;
+};
+
+type DesktopPreferences = {
+  exportMode: Exclude<ExportMode, "download">;
+  exportSuffix: string;
+  exportFolder: string;
+  confirmOverwrite: boolean;
+  preventLarger: boolean;
 };
 
 const DEFAULT_SETTINGS: CompressionSettings = {
@@ -148,6 +161,7 @@ const DEFAULT_SETTINGS: CompressionSettings = {
   height: 1080,
   lockRatio: true,
   stripMetadata: true,
+  preventLarger: true,
   watermark: {
     enabled: false,
     text: "PicLite",
@@ -166,6 +180,14 @@ const DEFAULT_SETTINGS: CompressionSettings = {
   },
 };
 
+const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
+  exportMode: "same-folder",
+  exportSuffix: "-piclite",
+  exportFolder: "",
+  confirmOverwrite: true,
+  preventLarger: true,
+};
+
 const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
   inputFolder: "",
   outputFolder: "",
@@ -177,6 +199,7 @@ const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
   maxWidth: 2560,
   maxHeight: 2560,
   stripMetadata: true,
+  preventLarger: true,
 };
 
 function uid() {
@@ -197,7 +220,14 @@ function formatBytes(bytes = 0) {
 
 function savedPercent(original = 0, output = 0) {
   if (!original || !output) return 0;
-  return Math.max(0, Math.round((1 - output / original) * 100));
+  return Math.round((1 - output / original) * 100);
+}
+
+function sizeChangeLabel(original = 0, output = 0) {
+  const saved = savedPercent(original, output);
+  if (saved > 0) return `−${saved}%`;
+  if (saved < 0) return `+${Math.abs(saved)}%`;
+  return "0%";
 }
 
 function modeFromQuality(quality: number): CompressionMode {
@@ -516,9 +546,20 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   return { blob: result, width, height };
 }
 
-function compressImage(item: ImageItem, settings: CompressionSettings) {
-  if (item.type === "image/gif" && settings.format === "keep") return animatedGifCompress(item, settings);
-  return canvasCompress(item, settings);
+type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean };
+
+async function compressImage(item: ImageItem, settings: CompressionSettings): Promise<CompressionResult> {
+  const candidate = item.type === "image/gif" && settings.format === "keep"
+    ? await animatedGifCompress(item, settings)
+    : await canvasCompress(item, settings);
+  const hasVisualTransform = candidate.width !== item.width
+    || candidate.height !== item.height
+    || settings.format !== "keep"
+    || settings.watermark.enabled;
+  if (settings.preventLarger && !hasVisualTransform && candidate.blob.size >= item.originalBytes) {
+    return { blob: item.file, width: item.width, height: item.height, keptOriginal: true };
+  }
+  return candidate;
 }
 
 async function createDemoFile() {
@@ -562,10 +603,15 @@ export function PicLiteApp() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settings, setSettings] = useState<CompressionSettings>(DEFAULT_SETTINGS);
   const [compare, setCompare] = useState(52);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("compare");
+  const [previewZoom, setPreviewZoom] = useState(100);
+  const [previewFit, setPreviewFit] = useState(true);
+  const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [processingAll, setProcessingAll] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [exportMode, setExportMode] = useState<ExportMode>("download");
+  const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(DEFAULT_DESKTOP_PREFERENCES);
+  const [exportMode, setExportMode] = useState<ExportMode>(() => typeof window !== "undefined" && window.picLite ? DEFAULT_DESKTOP_PREFERENCES.exportMode : "download");
   const [exportSuffix, setExportSuffix] = useState("-piclite");
   const [exportFolderName, setExportFolderName] = useState("");
   const [localFonts, setLocalFonts] = useState<string[]>(["Microsoft YaHei", "PingFang SC", "Arial", "SimSun"]);
@@ -577,8 +623,10 @@ export function PicLiteApp() {
   const fontInputRef = useRef<HTMLInputElement>(null);
   const exportDirectoryRef = useRef<DirectoryHandleLike | null>(null);
   const compareRef = useRef<HTMLDivElement>(null);
+  const previewDragRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
   const itemsRef = useRef<ImageItem[]>([]);
   const settingsReadyRef = useRef(false);
+  const desktopPreferencesReadyRef = useRef(false);
   const livePreviewGenerationRef = useRef(0);
   const nativeBridge = typeof window !== "undefined" ? window.picLite : undefined;
   const desktopPlatform = nativeBridge
@@ -624,6 +672,38 @@ export function PicLiteApp() {
     itemsRef.current = items;
   }, [items]);
 
+  useEffect(() => {
+    if (!nativeBridge) return;
+    try {
+      const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
+      const next = saved ? { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences : DEFAULT_DESKTOP_PREFERENCES;
+      setDesktopPreferences(next);
+      setExportMode(next.exportMode);
+      setExportSuffix(next.exportSuffix);
+      setExportFolderName(next.exportFolder);
+      setSettings((current) => ({ ...current, preventLarger: next.preventLarger }));
+    } catch {
+      setDesktopPreferences(DEFAULT_DESKTOP_PREFERENCES);
+    } finally {
+      desktopPreferencesReadyRef.current = true;
+    }
+  }, [nativeBridge]);
+
+  useEffect(() => {
+    if (!nativeBridge || !desktopPreferencesReadyRef.current) return;
+    window.localStorage.setItem("piclite.desktopPreferences.v1", JSON.stringify(desktopPreferences));
+    setExportMode(desktopPreferences.exportMode);
+    setExportSuffix(desktopPreferences.exportSuffix);
+    setExportFolderName(desktopPreferences.exportFolder);
+    setSettings((current) => current.preventLarger === desktopPreferences.preventLarger ? current : { ...current, preventLarger: desktopPreferences.preventLarger });
+  }, [desktopPreferences, nativeBridge]);
+
+  useEffect(() => {
+    setPreviewPan({ x: 0, y: 0 });
+    setPreviewZoom(100);
+    setPreviewFit(true);
+  }, [selectedId, previewMode]);
+
   useEffect(() => () => {
     itemsRef.current.forEach((item) => {
       URL.revokeObjectURL(item.sourceUrl);
@@ -638,7 +718,7 @@ export function PicLiteApp() {
     }
     setItems((current) => current.map((item) => {
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
-      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, status: "ready", error: undefined };
+      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, status: "ready", error: undefined };
     }));
   }, [settings]);
 
@@ -665,6 +745,7 @@ export function PicLiteApp() {
             outputType: result.blob.type || candidate.type,
             outputWidth: result.width,
             outputHeight: result.height,
+            keptOriginal: result.keptOriginal,
             status: "done",
           };
         }));
@@ -715,7 +796,7 @@ export function PicLiteApp() {
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
-        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, status: "done" };
+        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, status: "done" };
       }));
     } catch (error) {
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "压缩失败" } : candidate));
@@ -751,7 +832,7 @@ export function PicLiteApp() {
       setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", error: undefined } : candidate));
       const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
-      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, status: "done" as const };
+      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, status: "done" as const };
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== item.id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
@@ -768,6 +849,7 @@ export function PicLiteApp() {
         const folder = await nativeBridge.selectFolder("export");
         if (!folder) return false;
         setExportFolderName(folder);
+        setDesktopPreferences((current) => ({ ...current, exportFolder: folder }));
         return true;
       }
       if (!window.showDirectoryPicker) {
@@ -791,7 +873,7 @@ export function PicLiteApp() {
       showToast("覆盖源文件时请将输出格式设为“保持原格式”");
       return;
     }
-    if (exportMode === "overwrite" && !window.confirm("确认覆盖源图片？该操作无法在 PicLite 中撤销。")) return;
+    if (exportMode === "overwrite" && (!nativeBridge || desktopPreferences.confirmOverwrite) && !window.confirm("确认覆盖源图片？该操作无法在 PicLite 中撤销。")) return;
 
     setExporting(true);
     try {
@@ -821,7 +903,7 @@ export function PicLiteApp() {
         for (const { item, blob } of prepared) {
           payloadItems.push({ sourcePath: item.sourcePath, outputName: outputName(item, suffix), data: new Uint8Array(await blob.arrayBuffer()) });
         }
-        const result = await nativeBridge.exportImages({ mode: exportMode, suffix, items: payloadItems });
+        const result = await nativeBridge.exportImages({ mode: exportMode, suffix, fixedFolder: exportFolderName || undefined, items: payloadItems });
         if (!result.ok) throw new Error(result.error || "导出失败");
         showToast(`已写入 ${result.paths?.length || prepared.length} 个文件`);
         return;
@@ -850,7 +932,7 @@ export function PicLiteApp() {
     } finally {
       setExporting(false);
     }
-  }, [chooseExportFolder, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, settings.format, showToast]);
+  }, [chooseExportFolder, desktopPreferences.confirmOverwrite, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, settings.format, showToast]);
 
   const removeItem = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -959,6 +1041,34 @@ export function PicLiteApp() {
     setCompare(Math.max(0, Math.min(100, ((event.clientX - box.left) / box.width) * 100)));
   }, []);
 
+  const setZoom = useCallback((next: number) => {
+    setPreviewFit(false);
+    setPreviewZoom(Math.max(10, Math.min(800, Math.round(next))));
+  }, []);
+
+  const startPreviewPan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest(".compare-handle")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPan.x, panY: previewPan.y };
+  }, [previewPan]);
+
+  const movePreviewPan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = previewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPreviewPan({ x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y });
+  }, []);
+
+  const stopPreviewPan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (previewDragRef.current?.pointerId === event.pointerId) previewDragRef.current = null;
+  }, []);
+
+  const zoomPreviewWithWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    if (!selected) return;
+    event.preventDefault();
+    setZoom(previewZoom * (event.deltaY > 0 ? 0.9 : 1.1));
+  }, [previewZoom, selected, setZoom]);
+
   const chooseFolder = useCallback(async (kind: "input" | "output") => {
     if (!nativeBridge) return;
     const folder = await nativeBridge.selectFolder(kind);
@@ -995,7 +1105,7 @@ export function PicLiteApp() {
 
   return (
     <main
-      className="app-shell"
+      className={`app-shell ${nativeBridge ? "desktop-app" : "web-app"}`}
       onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
@@ -1010,11 +1120,12 @@ export function PicLiteApp() {
           <span><strong>PicLite</strong><small>图轻</small></span>
         </button>
         <nav className="main-nav" aria-label="主要功能">
-          <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>压缩工作台</button>
+          <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{nativeBridge ? "工作台" : "压缩工作台"}</button>
           <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>文件夹监测{watcherActive && <span className="live-dot" aria-label="监测中" />}</button>
+          {nativeBridge && <button className={view === "preferences" ? "active" : ""} type="button" onClick={() => setView("preferences")}>应用设置</button>}
         </nav>
         <div className="topbar-actions">
-          <span className="privacy-badge"><i /> 本地处理，图片不上传</span>
+          <span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : "本地处理，图片不上传"}</span>
           <IconButton label="帮助" symbol="?" onClick={() => showToast("支持 JPG、PNG、WebP、动态 GIF；可拖入或按 Ctrl + V")} />
         </div>
       </header>
@@ -1047,7 +1158,7 @@ export function PicLiteApp() {
                       {item.status === "processing" && "正在实时试压…"}
                       {item.status === "ready" && "等待实时试压"}
                       {item.status === "error" && (item.error || "处理失败")}
-                      {item.status === "done" && <><b>−{savedPercent(item.originalBytes, item.outputBytes)}%</b> {formatBytes(item.outputBytes)}</>}
+                      {item.status === "done" && <><b className={savedPercent(item.originalBytes, item.outputBytes) < 0 ? "larger" : ""}>{sizeChangeLabel(item.originalBytes, item.outputBytes)}</b> {item.keptOriginal ? "已保留原图" : formatBytes(item.outputBytes)}</>}
                     </span>
                   </span>
                   <span className="remove-item" role="button" aria-label={`移除 ${item.name}`} onClick={(event) => { event.stopPropagation(); removeItem(item.id); }}>×</span>
@@ -1064,25 +1175,64 @@ export function PicLiteApp() {
           <section className="preview-panel">
             <div className="preview-toolbar">
               <div><span className="eyebrow">画质对比</span><strong>{selected?.name || "导入一张图片开始"}</strong></div>
-              {selected && <div className="preview-meta"><span>{selected.width} × {selected.height}{selected.outputWidth ? ` → ${selected.outputWidth} × ${selected.outputHeight}` : ""} px</span><span>{(selected.outputType || selected.type).replace("image/", "").toUpperCase()}</span></div>}
+              {selected && <>
+                <div className="preview-mode-tabs" aria-label="预览方式">
+                  <button className={previewMode === "compare" ? "active" : ""} type="button" onClick={() => setPreviewMode("compare")}>对比</button>
+                  <button className={previewMode === "original" ? "active" : ""} type="button" onClick={() => setPreviewMode("original")}>原图</button>
+                  <button className={previewMode === "result" ? "active" : ""} type="button" onClick={() => setPreviewMode("result")}>结果</button>
+                </div>
+                <div className="preview-tools">
+                  <button type="button" aria-label="缩小预览" onClick={() => setZoom(previewZoom / 1.25)}>−</button>
+                  <button className="zoom-readout" type="button" aria-label="切换 1:1 实际像素" title="按实际像素查看" onClick={() => { setPreviewFit(false); setPreviewZoom(100); setPreviewPan({ x: 0, y: 0 }); }}>{previewFit ? "适应" : `${previewZoom}%`}</button>
+                  <button type="button" aria-label="放大预览" onClick={() => setZoom(previewZoom * 1.25)}>＋</button>
+                  <button className="fit-button" type="button" onClick={() => { setPreviewFit(true); setPreviewZoom(100); setPreviewPan({ x: 0, y: 0 }); }}>适应</button>
+                </div>
+              </>}
             </div>
 
-            <div className="preview-stage">
+            <div
+              className={`preview-stage ${previewDragRef.current ? "is-panning" : ""}`}
+              onPointerDown={startPreviewPan}
+              onPointerMove={movePreviewPan}
+              onPointerUp={stopPreviewPan}
+              onPointerCancel={stopPreviewPan}
+              onWheel={zoomPreviewWithWheel}
+            >
               {selected ? (
-                <div
-                  ref={compareRef}
-                  className="compare-canvas"
-                  onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); handleComparePointer(event); }}
-                  onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) handleComparePointer(event); }}
-                  aria-label="拖动查看压缩前后对比"
-                >
-                  <img className="compare-after" src={selected.outputUrl || selected.sourceUrl} alt="优化后预览" />
-                  <div className="compare-before" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={selected.sourceUrl} alt="原图预览" /></div>
-                  <span className="compare-label before-label">原图 · {formatBytes(selected.originalBytes)}</span>
-                  <span className="compare-label after-label">实时结果 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "计算中"}</span>
-                  <div className="compare-handle" style={{ left: `${compare}%` }}><span>‹ ›</span></div>
-                  {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
-                </div>
+                previewMode === "compare" ? (
+                  <div ref={compareRef} className="compare-canvas" aria-label="拖动中线查看压缩前后对比">
+                    <div className={`preview-pan-layer ${previewFit ? "fit" : "actual"}`} style={{ transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0) scale(${previewZoom / 100})` }}>
+                      <img className="compare-after" src={selected.outputUrl || selected.sourceUrl} alt="优化后预览" />
+                      <div className="compare-before" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={selected.sourceUrl} alt="原图预览" /></div>
+                    </div>
+                    <span className="compare-label before-label">原图 · {formatBytes(selected.originalBytes)}</span>
+                    <span className="compare-label after-label">实时结果 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "计算中"}</span>
+                    <div
+                      className="compare-handle"
+                      style={{ left: `${compare}%` }}
+                      onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); handleComparePointer(event); }}
+                      onPointerMove={(event) => { event.stopPropagation(); if (event.currentTarget.hasPointerCapture(event.pointerId)) handleComparePointer(event); }}
+                    ><span>‹ ›</span></div>
+                    {selected.outputWidth && (selected.outputWidth !== selected.width || selected.outputHeight !== selected.height) && <div className="preview-scale-note">对比模式会对齐显示尺寸；切到“结果”查看缩小后的真实比例</div>}
+                    {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
+                  </div>
+                ) : (
+                  <div className="image-inspector" aria-label={previewMode === "original" ? "原图预览" : "结果预览"}>
+                    <div className={`actual-image-layer ${previewFit ? "fit" : "actual"}`} style={{ transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0) scale(${previewZoom / 100})` }}>
+                      <img
+                        src={previewMode === "original" ? selected.sourceUrl : selected.outputUrl || selected.sourceUrl}
+                        alt={previewMode === "original" ? "原图预览" : "优化结果预览"}
+                        style={previewFit ? undefined : {
+                          width: `${previewMode === "original" ? selected.width : selected.outputWidth || selected.width}px`,
+                          height: `${previewMode === "original" ? selected.height : selected.outputHeight || selected.height}px`,
+                        }}
+                      />
+                    </div>
+                    <span className="actual-size-badge">{previewMode === "original" ? "原图" : "结果"} · {previewMode === "original" ? `${selected.width} × ${selected.height}` : `${selected.outputWidth || selected.width} × ${selected.outputHeight || selected.height}`} px</span>
+                    {!previewFit && previewZoom === 100 && <span className="pixel-badge">1:1 · 一个图像像素对应一个屏幕像素</span>}
+                    {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
+                  </div>
+                )
               ) : (
                 <button className="hero-dropzone" type="button" onClick={importImages}>
                   <span className="drop-visual" aria-hidden="true"><i className="drop-card one" /><i className="drop-card two" /><i className="drop-card three" /><b>＋</b></span>
@@ -1096,7 +1246,7 @@ export function PicLiteApp() {
               <div><span>原始体积</span><strong>{formatBytes(totals.original)}</strong></div>
               <span className="result-arrow">→</span>
               <div><span>当前实时结果</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
-              <div className="savings-pill"><span>共节省</span><strong>{totals.saved}%</strong></div>
+              <div className={`savings-pill ${totals.saved < 0 ? "larger" : ""}`}><span>{totals.saved < 0 ? "体积增加" : "共节省"}</span><strong>{sizeChangeLabel(totals.original, totals.output)}</strong></div>
               <button className="export-button" type="button" disabled={!items.length || exporting} onClick={exportAll}><span>↓</span> {exporting ? "正在导出" : "导出全部"}</button>
             </div>
           </section>
@@ -1139,9 +1289,9 @@ export function PicLiteApp() {
               <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
                 <span><i /> 实时试压结果</span>
                 <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
-                <small>{selected?.outputBytes ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 节省 ${savedPercent(selected.originalBytes, selected.outputBytes)}%` : "显示的是浏览器实际编码后的文件大小"}</small>
+                <small>{selected?.outputBytes ? selected.keptOriginal ? "候选文件更大，智能保留原图" : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
               </div>
-              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板，都会显示真实文件大小。</p>
+              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。若没有尺寸、格式或水印变化且候选文件更大，会自动保留原图。</p>
             </div>
 
             <div className="setting-section slider-section">
@@ -1214,9 +1364,10 @@ export function PicLiteApp() {
 
             <div className="setting-section compact">
               <label className="check-row"><input type="checkbox" checked={settings.stripMetadata} onChange={(event) => setSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span><strong>移除隐私元数据</strong><small>删除位置、相机与拍摄信息</small></span></label>
+              {!nativeBridge && <label className="check-row secondary-check"><input type="checkbox" checked={settings.preventLarger} onChange={(event) => setSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span><strong>智能保留较小文件</strong><small>没有视觉变换时不输出更大的候选文件</small></span></label>}
             </div>
 
-            <div className="setting-section export-settings">
+            <div className={`setting-section export-settings ${nativeBridge ? "desktop-hidden-setting" : ""}`}>
               <label className="setting-label" htmlFor="export-mode">导出位置</label>
               <div className="select-wrap"><select id="export-mode" value={exportMode} onChange={(event) => setExportMode(event.target.value as ExportMode)}><option value="download">浏览器下载</option><option value="overwrite">覆盖源文件</option><option value="same-folder">原文件夹重命名</option><option value="fixed-folder">固定文件夹</option></select></div>
               {exportMode !== "overwrite" && <label className="suffix-input">文件名后缀<input value={exportSuffix} onChange={(event) => setExportSuffix(event.target.value)} placeholder="-piclite" /></label>}
@@ -1229,7 +1380,7 @@ export function PicLiteApp() {
             <button className="compress-button" type="button" disabled={!items.length || processingAll} onClick={processAll}><span>{processingAll ? "···" : "✦"}</span>{processingAll ? "正在应用到全部" : `按此参数应用到全部${items.length ? ` · ${items.length} 张` : ""}`}</button>
           </aside>
         </section>
-      ) : (
+      ) : view === "watcher" ? (
         <section className="watcher-page">
           <div className="watcher-intro">
             <span className="section-index">02 / AUTO FLOW</span>
@@ -1266,6 +1417,7 @@ export function PicLiteApp() {
               }} /></label>
               <label className="watcher-range"><span>等比例尺寸 <b>{formatScale(watcherSettings.scale)}</b></span><input type="range" min="0.1" max="100" step="0.1" value={watcherSettings.scale} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, scale: Number(event.target.value) }))} /></label>
               <label className="watcher-check"><input type="checkbox" checked={watcherSettings.stripMetadata} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span>移除隐私元数据</span></label>
+              <label className="watcher-check"><input type="checkbox" checked={watcherSettings.preventLarger} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span>候选更大时保留原图</span></label>
               <label className="watcher-check"><input type="checkbox" checked={watcherSettings.resize} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, resize: event.target.checked }))} /><span>限制最大像素尺寸</span></label>
               {watcherSettings.resize && <div className="watcher-dimensions"><label>宽 <input type="number" min="1" value={watcherSettings.maxWidth} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, maxWidth: Number(event.target.value) }))} /></label><span>×</span><label>高 <input type="number" min="1" value={watcherSettings.maxHeight} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, maxHeight: Number(event.target.value) }))} /></label><small>px</small></div>}
             </div>
@@ -1279,9 +1431,56 @@ export function PicLiteApp() {
               <div className="log-row" key={event.id}>
                 <span className={`log-icon ${event.type}`}>{event.type === "success" ? "✓" : event.type === "error" ? "!" : "•"}</span>
                 <span><strong>{event.file || event.message || (event.type === "started" ? "文件夹监测已启动" : "文件夹监测已停止")}</strong><small>{new Date(event.time).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}{event.originalBytes && event.outputBytes ? ` · ${formatBytes(event.originalBytes)} → ${formatBytes(event.outputBytes)}` : ""}</small></span>
-                {event.originalBytes && event.outputBytes ? <b>−{savedPercent(event.originalBytes, event.outputBytes)}%</b> : null}
+                {event.originalBytes && event.outputBytes ? <b className={savedPercent(event.originalBytes, event.outputBytes) < 0 ? "larger" : ""}>{sizeChangeLabel(event.originalBytes, event.outputBytes)}</b> : null}
               </div>
             )) : <div className="log-empty"><span>⌁</span><p>启动监测后，处理记录会出现在这里</p></div>}
+          </div>
+        </section>
+      ) : (
+        <section className="preferences-page" aria-label="PicLite 应用设置">
+          <aside className="preferences-aside">
+            <span className="section-index">03 / PREFERENCES</span>
+            <h1>像软件一样，<br />安静地<span>工作。</span></h1>
+            <p>这些是桌面客户端的全局设置。压缩参数仍放在工作台，只在当前任务中调整。</p>
+            <div className="native-stack"><i>R</i><span><strong>Rust native core</strong><small>Tauri 2 · 使用系统 WebView，不再打包 Chromium</small></span></div>
+          </aside>
+
+          <div className="preferences-content">
+            <section className="preference-card">
+              <div className="preference-card-heading"><span>导出</span><small>默认保存规则</small></div>
+              <div className="preference-row column">
+                <div><strong>默认导出方式</strong><small>每次点击“导出全部”时使用</small></div>
+                <div className="preference-segments">
+                  <button className={desktopPreferences.exportMode === "same-folder" ? "active" : ""} type="button" onClick={() => setDesktopPreferences((current) => ({ ...current, exportMode: "same-folder" }))}>源文件旁重命名</button>
+                  <button className={desktopPreferences.exportMode === "fixed-folder" ? "active" : ""} type="button" onClick={() => setDesktopPreferences((current) => ({ ...current, exportMode: "fixed-folder" }))}>固定文件夹</button>
+                  <button className={desktopPreferences.exportMode === "overwrite" ? "danger active" : "danger"} type="button" onClick={() => setDesktopPreferences((current) => ({ ...current, exportMode: "overwrite" }))}>覆盖源文件</button>
+                </div>
+              </div>
+              {desktopPreferences.exportMode !== "overwrite" && <div className="preference-row">
+                <div><strong>文件名后缀</strong><small>例如 photo-piclite.jpg</small></div>
+                <input className="preference-input" value={desktopPreferences.exportSuffix} onChange={(event) => setDesktopPreferences((current) => ({ ...current, exportSuffix: event.target.value }))} />
+              </div>}
+              {desktopPreferences.exportMode === "fixed-folder" && <div className="preference-row">
+                <div><strong>固定输出文件夹</strong><small>{desktopPreferences.exportFolder || "尚未选择"}</small></div>
+                <button className="preference-action" type="button" onClick={chooseExportFolder}>选择文件夹</button>
+              </div>}
+              {desktopPreferences.exportMode === "overwrite" && <label className="preference-row clickable"><div><strong>覆盖前再次确认</strong><small>建议保持开启，覆盖操作无法撤销</small></div><button className={`switch ${desktopPreferences.confirmOverwrite ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.confirmOverwrite} onClick={() => setDesktopPreferences((current) => ({ ...current, confirmOverwrite: !current.confirmOverwrite }))}><i /></button></label>}
+            </section>
+
+            <section className="preference-card">
+              <div className="preference-card-heading"><span>压缩行为</span><small>全局保护策略</small></div>
+              <label className="preference-row clickable">
+                <div><strong>智能保留较小文件</strong><small>未改变尺寸、格式或水印时，如果候选文件更大就保留原图</small></div>
+                <button className={`switch ${desktopPreferences.preventLarger ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.preventLarger} onClick={() => setDesktopPreferences((current) => ({ ...current, preventLarger: !current.preventLarger }))}><i /></button>
+              </label>
+            </section>
+
+            <section className="preference-card about-card">
+              <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.5.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.5.0 · Tauri 2 + Rust")}>版本信息</button></div>
+            </section>
           </div>
         </section>
       )}
