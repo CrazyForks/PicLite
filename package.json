@@ -1,6 +1,6 @@
 {
   "name": "piclite",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "本地优先的网页与 Windows 图片压缩工作台",
   "author": "PicLite contributors",
   "private": true,

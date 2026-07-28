@@ -286,6 +286,21 @@ function getTargetDimensions(item: Pick<ImageItem, "width" | "height">, settings
   };
 }
 
+function quantizePngPixels(context: CanvasRenderingContext2D, width: number, height: number, quality: number) {
+  if (quality >= 100) return;
+  const normalized = Math.min(1, Math.max(0, (quality - 1) / 99));
+  const levels = Math.max(2, Math.round(2 + 254 * normalized ** 3));
+  const step = 255 / (levels - 1);
+  const imageData = context.getImageData(0, 0, width, height);
+  const pixels = imageData.data;
+  for (let index = 0; index < pixels.length; index += 4) {
+    pixels[index] = Math.round(pixels[index] / step) * step;
+    pixels[index + 1] = Math.round(pixels[index + 1] / step) * step;
+    pixels[index + 2] = Math.round(pixels[index + 2] / step) * step;
+  }
+  context.putImageData(imageData, 0, 0);
+}
+
 async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   const bitmap = await createImageBitmap(item.file);
   const { width, height } = getTargetDimensions(item, settings);
@@ -315,6 +330,7 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   bitmap.close();
 
   const quality = Math.min(1, Math.max(0.01, settings.quality / 100));
+  if (outputType === "image/png") quantizePngPixels(context, width, height, settings.quality);
   const result = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
   if (!result) throw new Error("当前浏览器不支持所选输出格式");
   if (settings.quality >= 100 && settings.format === "keep" && sameSize && result.size >= item.originalBytes) {
@@ -766,7 +782,7 @@ export function PicLiteApp() {
                 <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
                 <small>{selected?.outputBytes ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 节省 ${savedPercent(selected.originalBytes, selected.outputBytes)}%` : "显示的是浏览器实际编码后的文件大小"}</small>
               </div>
-              <p className="setting-hint"><i /> JPG / WebP 的画质滑块最明显；PNG 可配合尺寸比例，或转为 WebP。</p>
+              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 会减少颜色级数并保留透明通道。</p>
             </div>
 
             <div className="setting-section slider-section">

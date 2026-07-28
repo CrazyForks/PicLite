@@ -117,7 +117,7 @@ async function optimizeWithSharp(inputPath, temporaryPath, settings) {
   if ([".jpg", ".jpeg"].includes(outputExtension)) {
     pipeline = pipeline.jpeg({ quality, mozjpeg: true, progressive: true, chromaSubsampling: quality >= 95 ? "4:4:4" : "4:2:0" });
   } else if (outputExtension === ".png") {
-    pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true, palette: quality < 75, quality, effort: 10 });
+    pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true, palette: quality < 100, quality, effort: 10 });
   } else if (outputExtension === ".webp") {
     pipeline = pipeline.webp(quality >= 100 ? { lossless: true, effort: 6 } : { quality, smartSubsample: true, effort: 6 });
   } else if (outputExtension === ".avif") {
