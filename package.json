@@ -1,8 +1,16 @@
 {
   "name": "piclite",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "本地优先、可自托管的跨平台图片与 GIF 压缩工作台",
-  "author": "PicLite contributors",
+  "author": {
+    "name": "PicLite contributors",
+    "email": "amiaoapp@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/amiaoapp/PicLite",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amiaoapp/PicLite.git"
+  },
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -77,6 +85,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -91,19 +100,32 @@
       "category": "public.app-category.graphics-design"
     },
     "linux": {
-      "icon": "build/icon.png",
+      "icon": "build/icons",
       "target": [
         "AppImage",
         "deb"
       ],
       "category": "Graphics",
-      "synopsis": "本地优先的图片与 GIF 压缩工作台"
+      "synopsis": "本地优先的图片与 GIF 压缩工作台",
+      "maintainer": "PicLite contributors <amiaoapp@users.noreply.github.com>",
+      "vendor": "PicLite"
     },
     "nsis": {
+      "artifactName": "PicLite-${version}-${arch}-setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "PicLite-${version}-${arch}-portable.${ext}"
+    },
+    "appImage": {
+      "artifactName": "PicLite-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "artifactName": "PicLite-${version}-${arch}.${ext}",
+      "priority": "optional"
     }
   }
 }
