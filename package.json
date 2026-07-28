@@ -1,7 +1,7 @@
 {
   "name": "piclite",
-  "version": "0.3.0",
-  "description": "本地优先的网页与 Windows 图片压缩工作台",
+  "version": "0.4.0",
+  "description": "本地优先、可自托管的跨平台图片与 GIF 压缩工作台",
   "author": "PicLite contributors",
   "private": true,
   "engines": {
@@ -12,22 +12,23 @@
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release",
     "db:generate": "drizzle-kit generate",
     "desktop:dev": "node desktop/dev.mjs",
     "desktop:renderer": "vite build --config vite.desktop.config.ts",
     "desktop:build:win": "npm run desktop:renderer && electron-builder --win nsis portable",
+    "desktop:build:mac": "npm run desktop:renderer && electron-builder --mac dmg zip",
+    "desktop:build:mac:arm64": "npm run desktop:renderer && electron-builder --mac dmg zip --arm64",
+    "desktop:build:mac:x64": "npm run desktop:renderer && electron-builder --mac dmg zip --x64",
+    "desktop:build:linux": "npm run desktop:renderer && electron-builder --linux AppImage deb",
+    "desktop:build:linux:arm64": "npm run desktop:renderer && electron-builder --linux AppImage deb --arm64",
+    "desktop:build:linux:x64": "npm run desktop:renderer && electron-builder --linux AppImage deb --x64",
     "desktop:unpacked": "npm run desktop:renderer && electron-builder --dir"
   },
   "main": "desktop/main.cjs",
   "dependencies": {
     "chokidar": "5.0.0",
-    "drizzle-orm": "0.45.2",
-    "gifenc": "1.0.3",
     "jpegtran-bin": "7.0.0",
-    "next": "16.2.6",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
     "sharp": "0.35.3"
   },
   "devDependencies": {
@@ -39,10 +40,15 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "drizzle-orm": "0.45.2",
     "electron": "43.2.0",
     "electron-builder": "26.15.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "gifenc": "1.0.3",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
@@ -75,6 +81,23 @@
         "nsis",
         "portable"
       ]
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.graphics-design"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Graphics",
+      "synopsis": "本地优先的图片与 GIF 压缩工作台"
     },
     "nsis": {
       "oneClick": false,

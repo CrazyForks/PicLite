@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.vinext
+.wrangler
+desktop-dist
+docs
+node_modules
+outputs
+release
+work
+*.log
+.DS_Store

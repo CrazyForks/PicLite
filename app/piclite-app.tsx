@@ -431,7 +431,7 @@ type GifDecoderConstructor = new (options: { data: ArrayBuffer; type: string }) 
 
 async function animatedGifCompress(item: ImageItem, settings: CompressionSettings) {
   const Decoder = (window as unknown as { ImageDecoder?: GifDecoderConstructor }).ImageDecoder;
-  if (!Decoder) throw new Error("动态 GIF 实时压缩需要最新版 Chrome、Edge 或 Windows 客户端");
+  if (!Decoder) throw new Error("动态 GIF 实时压缩需要最新版 Chrome、Edge 或桌面客户端");
 
   const { width, height } = getTargetDimensions(item, settings);
   const decoder = new Decoder({ data: await item.file.arrayBuffer(), type: "image/gif" });
@@ -581,6 +581,9 @@ export function PicLiteApp() {
   const settingsReadyRef = useRef(false);
   const livePreviewGenerationRef = useRef(0);
   const nativeBridge = typeof window !== "undefined" ? window.picLite : undefined;
+  const desktopPlatform = nativeBridge
+    ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
+    : "桌面";
 
   const selected = useMemo(() => items.find((item) => item.id === selectedId) || items[0] || null, [items, selectedId]);
   const selectedTarget = useMemo(() => selected ? getTargetDimensions(selected, settings) : null, [selected, settings]);
@@ -1232,12 +1235,12 @@ export function PicLiteApp() {
             <span className="section-index">02 / AUTO FLOW</span>
             <h1>放进文件夹，<br />自动<span>变轻。</span></h1>
             <p>PicLite 会静默监测新图片，完成无损优化后写入指定位置。源文件默认保持不变。</p>
-            <div className="watcher-platform"><span className={nativeBridge ? "available" : ""}>{nativeBridge ? "● Windows 客户端已连接" : "◫ 需要 Windows 客户端"}</span><small>网页端受浏览器安全限制，无法持续读取本地文件夹</small></div>
+            <div className="watcher-platform"><span className={nativeBridge ? "available" : ""}>{nativeBridge ? `● ${desktopPlatform} 客户端已连接` : "◫ 需要桌面客户端"}</span><small>网页端受浏览器安全限制，无法持续读取本地文件夹</small></div>
           </div>
 
           <div className={`watcher-console ${!nativeBridge ? "locked" : ""}`}>
             {!nativeBridge && (
-              <div className="console-lock"><span>▣</span><strong>在 Windows 客户端中启用</strong><p>网页端的压缩工作台仍可完整使用。文件夹监测需要安装桌面版。</p></div>
+              <div className="console-lock"><span>▣</span><strong>在桌面客户端中启用</strong><p>网页端的压缩工作台仍可完整使用。文件夹监测需要安装桌面版。</p></div>
             )}
             <div className="console-header"><div><i className={watcherActive ? "active" : ""} /><span>{watcherActive ? "MONITORING" : "READY"}</span></div><small>本地自动化</small></div>
             <div className="folder-route">
