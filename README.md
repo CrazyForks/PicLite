@@ -34,7 +34,7 @@ npm run dev
 npm run desktop:dev
 ```
 
-桌面壳默认连接 `http://localhost:3000`，通过隔离的 preload bridge 提供本地文件夹选择和监测能力。
+开发模式连接 `http://localhost:3000`，通过隔离的 preload bridge 提供本地文件夹选择和监测能力。正式安装包会内置同一套界面，可离线启动。
 
 ## 构建 Windows 版本
 
@@ -44,7 +44,7 @@ npm run desktop:dev
 npm run desktop:build:win
 ```
 
-安装包和便携版输出到 `release/`。正式发布前，请把 `desktop/main.cjs` 中的 `DEFAULT_WEB_URL` 更新为已部署的网页地址。
+安装包和便携版输出到 `release/`。构建过程会先生成桌面端内置界面，因此不依赖在线网页地址。
 
 ## 压缩策略
 
@@ -60,4 +60,3 @@ npm run desktop:build:win
 - `desktop/`：Electron 主进程、Sharp 压缩器、文件夹监听
 - `.github/workflows/build-windows.yml`：Windows 构建工作流
 - `.openai/hosting.json`：网页部署配置
-

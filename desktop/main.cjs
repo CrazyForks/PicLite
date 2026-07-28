@@ -7,7 +7,6 @@ const sharp = require("sharp");
 const jpegtranBinary = import("jpegtran-bin").then((module) => module.default);
 
 const IMAGE_PATTERN = /\.(?:jpe?g|png|webp|avif|tiff?|gif)$/i;
-const DEFAULT_WEB_URL = "https://piclite.pages.dev";
 
 let mainWindow = null;
 let activeWatcher = null;
@@ -180,7 +179,7 @@ async function startWatcher(settings) {
 }
 
 function createWindow() {
-  const webUrl = process.env.PICLITE_WEB_URL || DEFAULT_WEB_URL;
+  const webUrl = process.env.PICLITE_WEB_URL || "http://localhost:3000";
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
@@ -196,8 +195,12 @@ function createWindow() {
       sandbox: true,
     },
   });
-  mainWindow.loadURL(webUrl);
-  const allowedOrigin = new URL(webUrl).origin;
+  if (app.isPackaged) {
+    mainWindow.loadFile(path.join(__dirname, "..", "desktop-dist", "index.html"));
+  } else {
+    mainWindow.loadURL(webUrl);
+  }
+  const allowedOrigin = app.isPackaged ? "null" : new URL(webUrl).origin;
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (["https:", "mailto:"].includes(new URL(url).protocol)) void shell.openExternal(url);
     return { action: "deny" };

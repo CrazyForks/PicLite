@@ -13,8 +13,9 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "desktop:dev": "node desktop/dev.mjs",
-    "desktop:build:win": "electron-builder --win nsis portable",
-    "desktop:unpacked": "electron-builder --dir"
+    "desktop:renderer": "vite build --config vite.desktop.config.ts",
+    "desktop:build:win": "npm run desktop:renderer && electron-builder --win nsis portable",
+    "desktop:unpacked": "npm run desktop:renderer && electron-builder --dir"
   },
   "main": "desktop/main.cjs",
   "dependencies": {
@@ -62,6 +63,7 @@
     ],
     "files": [
       "desktop/**/*",
+      "desktop-dist/**/*",
       "package.json"
     ],
     "win": {
