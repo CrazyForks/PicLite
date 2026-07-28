@@ -12,7 +12,8 @@ let mainWindow = null;
 let activeWatcher = null;
 let activeSettings = null;
 const processing = new Set();
-const selectedFolders = { input: "", output: "" };
+const selectedFolders = { input: "", output: "", export: "" };
+const selectedSourceFiles = new Set();
 
 function sendWatcherEvent(event) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -45,6 +46,51 @@ function extensionFor(inputPath, format) {
   if (format === "image/png") return ".png";
   if (format === "image/webp") return ".webp";
   return path.extname(inputPath).toLowerCase();
+}
+
+function mimeFor(inputPath) {
+  const extension = path.extname(inputPath).toLowerCase();
+  if ([".jpg", ".jpeg"].includes(extension)) return "image/jpeg";
+  if (extension === ".png") return "image/png";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".avif") return "image/avif";
+  if ([".tif", ".tiff"].includes(extension)) return "image/tiff";
+  return "application/octet-stream";
+}
+
+async function availableManualPath(directory, requestedName) {
+  const safeName = path.basename(requestedName).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-");
+  const extension = path.extname(safeName);
+  const base = path.basename(safeName, extension) || "piclite";
+  let candidate = path.join(directory, `${base}${extension}`);
+  let counter = 2;
+  while (true) {
+    try {
+      await fs.access(candidate);
+      candidate = path.join(directory, `${base}-${counter}${extension}`);
+      counter += 1;
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+async function writeExportFile(targetPath, data, replace) {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  const temporaryPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.${process.pid}.${Date.now()}.piclite-tmp`);
+  try {
+    await fs.writeFile(temporaryPath, Buffer.from(data));
+    if (replace) {
+      await fs.copyFile(temporaryPath, targetPath);
+      await fs.unlink(temporaryPath);
+    } else {
+      await fs.rename(temporaryPath, targetPath);
+    }
+  } catch (error) {
+    await fs.unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
 }
 
 async function availableOutputPath(inputPath, settings) {
@@ -125,7 +171,15 @@ async function optimizeWithSharp(inputPath, temporaryPath, settings) {
   } else if ([".tif", ".tiff"].includes(outputExtension)) {
     pipeline = pipeline.tiff({ compression: "lzw", quality });
   } else if (outputExtension === ".gif") {
-    pipeline = pipeline.gif({ effort: 10, reuse: true });
+    const colours = Math.max(2, Math.min(256, Math.round(2 + 254 * (quality / 100) ** 1.45)));
+    pipeline = pipeline.gif({
+      effort: 10,
+      colours,
+      dither: Math.max(0, Math.min(1, quality / 100)),
+      reuse: true,
+      interFrameMaxError: Math.round((100 - quality) * 0.32),
+      interPaletteMaxError: Math.round((100 - quality) * 2.56),
+    });
   } else {
     pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
   }
@@ -236,8 +290,50 @@ ipcMain.handle("dialog:select-folder", async (_event, kind) => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory", "createDirectory"] });
   if (result.canceled) return null;
   const folder = path.resolve(result.filePaths[0]);
-  if (kind === "input" || kind === "output") selectedFolders[kind] = folder;
+  if (kind === "input" || kind === "output" || kind === "export") selectedFolders[kind] = folder;
   return folder;
+});
+ipcMain.handle("dialog:select-images", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "图片", extensions: ["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"] }],
+  });
+  if (result.canceled) return [];
+  const images = [];
+  for (const filePath of result.filePaths) {
+    const resolved = path.resolve(filePath);
+    if (!IMAGE_PATTERN.test(resolved)) continue;
+    selectedSourceFiles.add(resolved);
+    images.push({ name: path.basename(resolved), type: mimeFor(resolved), path: resolved, data: await fs.readFile(resolved) });
+  }
+  return images;
+});
+ipcMain.handle("export:images", async (_event, payload) => {
+  try {
+    const mode = payload?.mode;
+    if (!["overwrite", "same-folder", "fixed-folder"].includes(mode)) throw new Error("不支持的导出方式");
+    if (!Array.isArray(payload.items) || !payload.items.length) throw new Error("没有可导出的图片");
+    if (mode === "fixed-folder" && !selectedFolders.export) throw new Error("请先选择固定输出文件夹");
+    const paths = [];
+    for (const item of payload.items) {
+      const sourcePath = item.sourcePath ? path.resolve(item.sourcePath) : "";
+      if ((mode === "overwrite" || mode === "same-folder") && (!sourcePath || !selectedSourceFiles.has(sourcePath))) {
+        throw new Error("源文件没有经过文件选择器授权");
+      }
+      let targetPath;
+      if (mode === "overwrite") {
+        targetPath = sourcePath;
+      } else {
+        const directory = mode === "same-folder" ? path.dirname(sourcePath) : selectedFolders.export;
+        targetPath = await availableManualPath(directory, item.outputName);
+      }
+      await writeExportFile(targetPath, item.data, mode === "overwrite");
+      paths.push(targetPath);
+    }
+    return { ok: true, paths };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "导出失败" };
+  }
 });
 ipcMain.handle("clipboard:read-image", () => {
   const image = clipboard.readImage();

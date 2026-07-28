@@ -287,6 +287,32 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .check-row > span { display: flex; flex-direction: column; gap: 3px; }
 .check-row strong { font-size: 10px; }
 .check-row small { font-size: 8px; color: #94a098; }
+.watermark-controls { display: flex; flex-direction: column; gap: 11px; margin-top: 14px; }
+.watermark-text-input, .suffix-input input { width: 100%; height: 36px; border: 1px solid #dce3de; border-radius: 9px; background: #fafbf9; padding: 0 10px; color: #38483f; font-size: 10px; font-weight: 650; }
+.segmented-control { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border-radius: 9px; background: #edf1ee; }
+.segmented-control button { height: 29px; border: 0; border-radius: 7px; background: transparent; color: #78877f; font-size: 9px; font-weight: 750; cursor: pointer; }
+.segmented-control button.active { background: #fff; color: var(--deep); box-shadow: 0 2px 7px rgba(30,54,43,.1); }
+.font-picker-row { display: grid; grid-template-columns: 1fr 62px 62px; gap: 5px; }
+.font-picker-row .select-wrap select { height: 34px; }
+.font-picker-row button, .folder-picker-button { border: 1px solid #dce3de; border-radius: 8px; background: #fff; color: #53665c; font-size: 8px; font-weight: 750; cursor: pointer; }
+.font-picker-row button:hover, .folder-picker-button:hover { border-color: #9eb4a7; background: #f5f8f5; }
+.mini-range { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mini-range > span { display: flex; justify-content: space-between; color: #89958f; font-size: 8px; }
+.mini-range b { color: var(--deep); }
+.mini-range input[type="range"] { width: 100%; margin: 0; accent-color: var(--deep); }
+.watermark-color-row { display: grid; grid-template-columns: 73px 1fr; gap: 10px; align-items: end; }
+.watermark-color-row > label:first-child { display: flex; flex-direction: column; gap: 4px; color: #89958f; font-size: 8px; }
+.watermark-color-row input[type="color"], .shadow-row input[type="color"] { width: 100%; height: 26px; padding: 2px; border: 1px solid #dce3de; border-radius: 7px; background: #fff; }
+.shadow-row { display: grid; grid-template-columns: auto 34px 1fr; gap: 8px; align-items: center; color: #68776f; font-size: 9px; }
+.shadow-row > label:first-child { white-space: nowrap; }
+.shadow-row input[type="checkbox"] { accent-color: var(--deep); }
+.suffix-input { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; color: #89958f; font-size: 8px; }
+.suffix-input input { height: 34px; }
+.folder-picker-button { width: 100%; min-height: 39px; margin-top: 10px; padding: 0 9px; display: grid; grid-template-columns: 22px minmax(0,1fr) auto; align-items: center; gap: 6px; text-align: left; }
+.folder-picker-button span { font-size: 17px; color: #5f7a6c; }
+.folder-picker-button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-picker-button b { color: #3c725e; font-size: 8px; }
+.setting-hint.warning { color: #a04949; }
 .settings-spacer { flex: 1; min-height: 8px; }
 .action-summary { margin: 0 19px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .action-summary > div { border: 1px solid #e5e9e6; border-radius: 9px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }

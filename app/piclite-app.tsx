@@ -12,11 +12,35 @@ import {
   useRef,
   useState,
 } from "react";
+import { applyPalette, GIFEncoder, quantize } from "gifenc";
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
 type ViewName = "workspace" | "watcher";
 type ItemStatus = "ready" | "processing" | "done" | "error";
+type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
+type WatermarkLayout = "tile" | "single";
+
+type WritableFileLike = {
+  write: (data: Blob) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type FileHandleLike = {
+  name: string;
+  getFile: () => Promise<File>;
+  createWritable: () => Promise<WritableFileLike>;
+  requestPermission?: (options: { mode: "readwrite" }) => Promise<"granted" | "denied" | "prompt">;
+};
+
+type DirectoryHandleLike = {
+  name: string;
+  getFileHandle: (name: string, options: { create: boolean }) => Promise<FileHandleLike>;
+};
+
+type NativeImage = { name: string; type: string; path: string; data: Uint8Array };
+type NativeExportItem = { sourcePath?: string; outputName: string; data: Uint8Array };
+type ImageSourceInput = { file: File; fileHandle?: FileHandleLike; sourcePath?: string };
 
 type WatcherEvent = {
   id: string;
@@ -45,7 +69,9 @@ type WatcherSettings = {
 type NativeBridge = {
   platform: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
-  selectFolder: (kind: "input" | "output") => Promise<string | null>;
+  selectImages: () => Promise<NativeImage[]>;
+  selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
+  exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
   startWatcher: (settings: WatcherSettings) => Promise<{ ok: boolean; error?: string }>;
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
@@ -55,6 +81,9 @@ type NativeBridge = {
 declare global {
   interface Window {
     picLite?: NativeBridge;
+    showOpenFilePicker?: (options: { multiple: boolean; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<FileHandleLike[]>;
+    showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<DirectoryHandleLike>;
+    queryLocalFonts?: () => Promise<Array<{ family: string; fullName: string; postscriptName: string }>>;
   }
 }
 
@@ -75,6 +104,25 @@ type ImageItem = {
   outputHeight?: number;
   status: ItemStatus;
   error?: string;
+  fileHandle?: FileHandleLike;
+  sourcePath?: string;
+};
+
+type WatermarkSettings = {
+  enabled: boolean;
+  text: string;
+  layout: WatermarkLayout;
+  fontFamily: string;
+  fontScale: number;
+  color: string;
+  opacity: number;
+  rotation: number;
+  density: number;
+  positionX: number;
+  positionY: number;
+  shadow: boolean;
+  shadowBlur: number;
+  shadowColor: string;
 };
 
 type CompressionSettings = {
@@ -87,6 +135,7 @@ type CompressionSettings = {
   height: number;
   lockRatio: boolean;
   stripMetadata: boolean;
+  watermark: WatermarkSettings;
 };
 
 const DEFAULT_SETTINGS: CompressionSettings = {
@@ -99,6 +148,22 @@ const DEFAULT_SETTINGS: CompressionSettings = {
   height: 1080,
   lockRatio: true,
   stripMetadata: true,
+  watermark: {
+    enabled: false,
+    text: "PicLite",
+    layout: "tile",
+    fontFamily: "Microsoft YaHei",
+    fontScale: 4.5,
+    color: "#ffffff",
+    opacity: 28,
+    rotation: -28,
+    density: 55,
+    positionX: 82,
+    positionY: 88,
+    shadow: true,
+    shadowBlur: 7,
+    shadowColor: "#000000",
+  },
 };
 
 const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
@@ -158,12 +223,19 @@ function mimeFromName(name: string) {
   if (extension === "png") return "image/png";
   if (extension === "webp") return "image/webp";
   if (extension === "avif") return "image/avif";
+  if (extension === "gif") return "image/gif";
   return "application/octet-stream";
 }
 
-function outputName(item: ImageItem) {
+function outputName(item: ImageItem, suffix = "-piclite") {
   const base = item.name.replace(/\.[^.]+$/, "");
-  return `${base}-piclite.${outputExtension(item.outputType || item.type, item.name)}`;
+  return `${base}${suffix}.${outputExtension(item.outputType || item.type, item.name)}`;
+}
+
+function cleanSuffix(value: string) {
+  const safe = value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\.+$/g, "");
+  if (!safe) return "-piclite";
+  return safe.startsWith("-") || safe.startsWith("_") ? safe : `-${safe}`;
 }
 
 async function getDimensions(file: File) {
@@ -301,12 +373,115 @@ function quantizePngPixels(context: CanvasRenderingContext2D, width: number, hei
   context.putImageData(imageData, 0, 0);
 }
 
+function applyWatermark(context: CanvasRenderingContext2D, width: number, height: number, watermark: WatermarkSettings) {
+  const text = watermark.text.trim();
+  if (!watermark.enabled || !text) return;
+
+  const fontSize = Math.max(8, Math.min(width, height) * (watermark.fontScale / 100));
+  context.save();
+  context.globalAlpha = Math.min(1, Math.max(0.01, watermark.opacity / 100));
+  context.fillStyle = watermark.color;
+  context.font = `700 ${fontSize}px "${watermark.fontFamily.replaceAll('"', "")}", sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  if (watermark.shadow) {
+    context.shadowColor = watermark.shadowColor;
+    context.shadowBlur = watermark.shadowBlur;
+    context.shadowOffsetX = Math.max(1, watermark.shadowBlur * 0.2);
+    context.shadowOffsetY = Math.max(1, watermark.shadowBlur * 0.2);
+  }
+
+  const angle = watermark.rotation * Math.PI / 180;
+  if (watermark.layout === "single") {
+    context.translate(width * watermark.positionX / 100, height * watermark.positionY / 100);
+    context.rotate(angle);
+    context.fillText(text, 0, 0);
+  } else {
+    const diagonal = Math.hypot(width, height);
+    const measured = Math.max(fontSize * 2, context.measureText(text).width);
+    const density = Math.min(1, Math.max(0, watermark.density / 100));
+    const stepX = measured + fontSize * (3.2 - density * 2.2);
+    const stepY = fontSize * (4.6 - density * 3.15);
+    context.translate(width / 2, height / 2);
+    context.rotate(angle);
+    let row = 0;
+    for (let y = -diagonal; y <= diagonal; y += stepY) {
+      const offset = row % 2 ? stepX / 2 : 0;
+      for (let x = -diagonal - offset; x <= diagonal; x += stepX) context.fillText(text, x + offset, y);
+      row += 1;
+    }
+  }
+  context.restore();
+}
+
+type DecodedGifFrame = {
+  image: {
+    duration?: number | null;
+    close: () => void;
+  };
+};
+
+type GifDecoder = {
+  tracks: { ready: Promise<void>; selectedTrack?: { frameCount?: number } | null };
+  decode: (options: { frameIndex: number }) => Promise<DecodedGifFrame>;
+  close: () => void;
+};
+
+type GifDecoderConstructor = new (options: { data: ArrayBuffer; type: string }) => GifDecoder;
+
+async function animatedGifCompress(item: ImageItem, settings: CompressionSettings) {
+  const Decoder = (window as unknown as { ImageDecoder?: GifDecoderConstructor }).ImageDecoder;
+  if (!Decoder) throw new Error("动态 GIF 实时压缩需要最新版 Chrome、Edge 或 Windows 客户端");
+
+  const { width, height } = getTargetDimensions(item, settings);
+  const decoder = new Decoder({ data: await item.file.arrayBuffer(), type: "image/gif" });
+  await decoder.tracks.ready;
+  const frameCount = decoder.tracks.selectedTrack?.frameCount || 1;
+  const encoder = GIFEncoder();
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: true, willReadFrequently: true });
+  if (!context) {
+    decoder.close();
+    throw new Error("当前浏览器无法创建 GIF 画布");
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  const colors = Math.max(2, Math.min(256, Math.round(2 + 254 * (settings.quality / 100) ** 1.45)));
+
+  try {
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const { image } = await decoder.decode({ frameIndex });
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image as unknown as CanvasImageSource, 0, 0, width, height);
+      applyWatermark(context, width, height, settings.watermark);
+      const rgba = context.getImageData(0, 0, width, height).data;
+      const palette = quantize(rgba, colors, { format: "rgba4444", oneBitAlpha: true });
+      const indexed = applyPalette(rgba, palette, "rgba4444");
+      const transparentIndex = palette.findIndex((color) => color[3] === 0);
+      encoder.writeFrame(indexed, width, height, {
+        palette,
+        delay: Math.max(20, Math.round((image.duration || 100_000) / 1000)),
+        repeat: 0,
+        transparent: transparentIndex >= 0,
+        transparentIndex: Math.max(0, transparentIndex),
+      });
+      image.close();
+    }
+    encoder.finish();
+    return { blob: new Blob([new Uint8Array(encoder.bytes())], { type: "image/gif" }), width, height };
+  } finally {
+    decoder.close();
+  }
+}
+
 async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   const bitmap = await createImageBitmap(item.file);
   const { width, height } = getTargetDimensions(item, settings);
 
   const sameSize = width === item.width && height === item.height;
-  if (settings.quality >= 100 && settings.format === "keep" && sameSize) {
+  if (settings.quality >= 100 && settings.format === "keep" && sameSize && !settings.watermark.enabled) {
     bitmap.close();
     const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
     return { blob, width, height };
@@ -328,16 +503,22 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   }
   context.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
+  applyWatermark(context, width, height, settings.watermark);
 
   const quality = Math.min(1, Math.max(0.01, settings.quality / 100));
   if (outputType === "image/png") quantizePngPixels(context, width, height, settings.quality);
   const result = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
   if (!result) throw new Error("当前浏览器不支持所选输出格式");
-  if (settings.quality >= 100 && settings.format === "keep" && sameSize && result.size >= item.originalBytes) {
+  if (settings.quality >= 100 && settings.format === "keep" && sameSize && !settings.watermark.enabled && result.size >= item.originalBytes) {
     const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
     return { blob, width, height };
   }
   return { blob: result, width, height };
+}
+
+function compressImage(item: ImageItem, settings: CompressionSettings) {
+  if (item.type === "image/gif" && settings.format === "keep") return animatedGifCompress(item, settings);
+  return canvasCompress(item, settings);
 }
 
 async function createDemoFile() {
@@ -383,11 +564,18 @@ export function PicLiteApp() {
   const [compare, setCompare] = useState(52);
   const [dragging, setDragging] = useState(false);
   const [processingAll, setProcessingAll] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportMode, setExportMode] = useState<ExportMode>("download");
+  const [exportSuffix, setExportSuffix] = useState("-piclite");
+  const [exportFolderName, setExportFolderName] = useState("");
+  const [localFonts, setLocalFonts] = useState<string[]>(["Microsoft YaHei", "PingFang SC", "Arial", "SimSun"]);
   const [toast, setToast] = useState<string | null>(null);
   const [watcherSettings, setWatcherSettings] = useState<WatcherSettings>(DEFAULT_WATCHER_SETTINGS);
   const [watcherActive, setWatcherActive] = useState(false);
   const [watcherEvents, setWatcherEvents] = useState<WatcherEvent[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fontInputRef = useRef<HTMLInputElement>(null);
+  const exportDirectoryRef = useRef<DirectoryHandleLike | null>(null);
   const compareRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<ImageItem[]>([]);
   const settingsReadyRef = useRef(false);
@@ -407,16 +595,16 @@ export function PicLiteApp() {
     window.setTimeout(() => setToast(null), 2600);
   }, []);
 
-  const addFiles = useCallback(async (files: File[]) => {
-    const imageFiles = files.filter((file) => file.type.startsWith("image/") || /\.(?:jpe?g|png|webp|avif)$/i.test(file.name));
-    if (!imageFiles.length) {
+  const addSources = useCallback(async (sources: ImageSourceInput[]) => {
+    const imageSources = sources.filter(({ file }) => file.type.startsWith("image/") || /\.(?:jpe?g|png|webp|avif|gif)$/i.test(file.name));
+    if (!imageSources.length) {
       showToast("没有找到可处理的图片");
       return;
     }
-    const nextItems = await Promise.all(imageFiles.map(async (file): Promise<ImageItem | null> => {
+    const nextItems = await Promise.all(imageSources.map(async ({ file, fileHandle, sourcePath }): Promise<ImageItem | null> => {
       try {
         const dimensions = await getDimensions(file);
-        return { id: uid(), file, name: file.name || `clipboard-${Date.now()}.png`, type: file.type || mimeFromName(file.name), width: dimensions.width, height: dimensions.height, originalBytes: file.size, sourceUrl: URL.createObjectURL(file), status: "ready" };
+        return { id: uid(), file, name: file.name || `clipboard-${Date.now()}.png`, type: file.type || mimeFromName(file.name), width: dimensions.width, height: dimensions.height, originalBytes: file.size, sourceUrl: URL.createObjectURL(file), status: "ready", fileHandle, sourcePath };
       } catch {
         return null;
       }
@@ -426,6 +614,8 @@ export function PicLiteApp() {
     if (!selectedId && validItems[0]) setSelectedId(validItems[0].id);
     showToast(`已加入 ${validItems.length} 张图片`);
   }, [selectedId, showToast]);
+
+  const addFiles = useCallback((files: File[]) => addSources(files.map((file) => ({ file }))), [addSources]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -458,7 +648,7 @@ export function PicLiteApp() {
       if (!item) return;
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
       try {
-        const result = await canvasCompress(item, settings);
+        const result = await compressImage(item, settings);
         if (generation !== livePreviewGenerationRef.current) return;
         const outputUrl = URL.createObjectURL(result.blob);
         setItems((current) => current.map((candidate) => {
@@ -479,7 +669,7 @@ export function PicLiteApp() {
         if (generation !== livePreviewGenerationRef.current) return;
         setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "预览失败" } : candidate));
       }
-    }, 220);
+    }, itemsRef.current.find((item) => item.id === id)?.type === "image/gif" ? 420 : 220);
 
     return () => {
       window.clearTimeout(timer);
@@ -517,7 +707,7 @@ export function PicLiteApp() {
     if (!item) return;
     setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
     try {
-      const result = await canvasCompress(item, settings);
+      const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
@@ -538,19 +728,126 @@ export function PicLiteApp() {
     showToast("全部图片已处理完成");
   }, [items, processOne, showToast]);
 
-  const downloadItem = useCallback((item: ImageItem) => {
-    if (!item.outputUrl) return;
+  const downloadItem = useCallback((item: ImageItem, blob = item.outputBlob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
-    anchor.href = item.outputUrl;
-    anchor.download = outputName(item);
+    anchor.href = url;
+    anchor.download = outputName(item, cleanSuffix(exportSuffix));
     anchor.click();
-  }, []);
+    window.setTimeout(() => URL.revokeObjectURL(url), 3000);
+  }, [exportSuffix]);
 
-  const downloadAll = useCallback(() => {
-    const completeItems = items.filter((item) => item.outputUrl);
-    completeItems.forEach((item, index) => window.setTimeout(() => downloadItem(item), index * 160));
-    showToast(`正在导出 ${completeItems.length} 张图片`);
-  }, [downloadItem, items, showToast]);
+  const prepareAllForExport = useCallback(async () => {
+    const prepared: Array<{ item: ImageItem; blob: Blob }> = [];
+    for (const item of itemsRef.current) {
+      if (item.outputBlob) {
+        prepared.push({ item, blob: item.outputBlob });
+        continue;
+      }
+      setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", error: undefined } : candidate));
+      const result = await compressImage(item, settings);
+      const outputUrl = URL.createObjectURL(result.blob);
+      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, status: "done" as const };
+      setItems((current) => current.map((candidate) => {
+        if (candidate.id !== item.id) return candidate;
+        if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
+        return completed;
+      }));
+      prepared.push({ item: completed, blob: result.blob });
+    }
+    return prepared;
+  }, [settings]);
+
+  const chooseExportFolder = useCallback(async () => {
+    try {
+      if (nativeBridge) {
+        const folder = await nativeBridge.selectFolder("export");
+        if (!folder) return false;
+        setExportFolderName(folder);
+        return true;
+      }
+      if (!window.showDirectoryPicker) {
+        showToast("当前浏览器不支持文件夹写入，请使用 Chrome、Edge 或下载模式");
+        return false;
+      }
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      exportDirectoryRef.current = handle;
+      setExportFolderName(handle.name);
+      return true;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return false;
+      showToast("没有获得文件夹写入权限");
+      return false;
+    }
+  }, [nativeBridge, showToast]);
+
+  const exportAll = useCallback(async () => {
+    if (!itemsRef.current.length || exporting) return;
+    if (exportMode === "overwrite" && settings.format !== "keep") {
+      showToast("覆盖源文件时请将输出格式设为“保持原格式”");
+      return;
+    }
+    if (exportMode === "overwrite" && !window.confirm("确认覆盖源图片？该操作无法在 PicLite 中撤销。")) return;
+
+    setExporting(true);
+    try {
+      if (!nativeBridge && exportMode === "overwrite") {
+        const handles = itemsRef.current.map((item) => item.fileHandle);
+        if (handles.some((handle) => !handle)) throw new Error("覆盖需要通过“添加图片”重新选择源文件并授权写入");
+        for (const handle of handles) {
+          if (handle?.requestPermission && await handle.requestPermission({ mode: "readwrite" }) !== "granted") throw new Error("没有获得源文件写入权限");
+        }
+      }
+      if (!nativeBridge && (exportMode === "same-folder" || exportMode === "fixed-folder") && !exportDirectoryRef.current && !(await chooseExportFolder())) return;
+      if (nativeBridge && exportMode === "fixed-folder" && !exportFolderName && !(await chooseExportFolder())) return;
+
+      const prepared = await prepareAllForExport();
+      const suffix = cleanSuffix(exportSuffix);
+      if (exportMode === "download") {
+        prepared.forEach(({ item, blob }, index) => window.setTimeout(() => downloadItem(item, blob), index * 160));
+        showToast(`正在下载 ${prepared.length} 张图片`);
+        return;
+      }
+
+      if (nativeBridge) {
+        if ((exportMode === "overwrite" || exportMode === "same-folder") && prepared.some(({ item }) => !item.sourcePath)) {
+          throw new Error("有图片不是通过“添加图片”导入，无法定位源文件夹");
+        }
+        const payloadItems: NativeExportItem[] = [];
+        for (const { item, blob } of prepared) {
+          payloadItems.push({ sourcePath: item.sourcePath, outputName: outputName(item, suffix), data: new Uint8Array(await blob.arrayBuffer()) });
+        }
+        const result = await nativeBridge.exportImages({ mode: exportMode, suffix, items: payloadItems });
+        if (!result.ok) throw new Error(result.error || "导出失败");
+        showToast(`已写入 ${result.paths?.length || prepared.length} 个文件`);
+        return;
+      }
+
+      if (exportMode === "overwrite") {
+        if (prepared.some(({ item }) => !item.fileHandle)) throw new Error("覆盖需要通过“添加图片”重新选择源文件并授权写入");
+        for (const { item, blob } of prepared) {
+          const writable = await item.fileHandle!.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        }
+      } else {
+        const directory = exportDirectoryRef.current;
+        if (!directory) throw new Error("请选择输出文件夹");
+        for (const { item, blob } of prepared) {
+          const handle = await directory.getFileHandle(outputName(item, suffix), { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        }
+      }
+      showToast(`已写入 ${prepared.length} 个文件`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }, [chooseExportFolder, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, settings.format, showToast]);
 
   const removeItem = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -594,6 +891,64 @@ export function PicLiteApp() {
       showToast("请直接按 Ctrl + V 粘贴剪贴板图片");
     }
   }, [addFiles, nativeBridge, showToast]);
+
+  const importImages = useCallback(async () => {
+    try {
+      if (nativeBridge) {
+        const nativeImages = await nativeBridge.selectImages();
+        await addSources(nativeImages.map((image) => ({
+          file: new File([new Uint8Array(image.data)], image.name, { type: image.type || mimeFromName(image.name) }),
+          sourcePath: image.path,
+        })));
+        return;
+      }
+      if (window.showOpenFilePicker) {
+        const handles = await window.showOpenFilePicker({
+          multiple: true,
+          types: [{ description: "图片", accept: { "image/*": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"] } }],
+        });
+        const sources = await Promise.all(handles.map(async (fileHandle) => ({ file: await fileHandle.getFile(), fileHandle })));
+        await addSources(sources);
+        return;
+      }
+      fileInputRef.current?.click();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      fileInputRef.current?.click();
+    }
+  }, [addSources, nativeBridge]);
+
+  const loadSystemFonts = useCallback(async () => {
+    if (!window.queryLocalFonts) {
+      showToast("当前浏览器不支持读取系统字体，可直接导入字体文件");
+      return;
+    }
+    try {
+      const fonts = await window.queryLocalFonts();
+      const families = Array.from(new Set(fonts.map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+      setLocalFonts((current) => Array.from(new Set([...current, ...families])));
+      showToast(`已读取 ${families.length} 个本地字体`);
+    } catch {
+      showToast("没有获得本地字体读取权限");
+    }
+  }, [showToast]);
+
+  const onFontSelected = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const family = `PicLite ${file.name.replace(/\.[^.]+$/, "")}`;
+      const font = new FontFace(family, await file.arrayBuffer());
+      await font.load();
+      document.fonts.add(font);
+      setLocalFonts((current) => Array.from(new Set([...current, family])));
+      setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
+      showToast(`已载入字体：${file.name}`);
+    } catch {
+      showToast("字体文件无法读取，请使用 TTF、OTF、WOFF 或 WOFF2");
+    }
+  }, [showToast]);
 
   const handleComparePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const box = compareRef.current?.getBoundingClientRect();
@@ -644,6 +999,7 @@ export function PicLiteApp() {
       onDrop={onDrop}
     >
       <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={onFilesSelected} />
+      <input ref={fontInputRef} className="visually-hidden" type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={onFontSelected} />
 
       <header className="topbar">
         <button className="brand" type="button" onClick={() => setView("workspace")}>
@@ -656,7 +1012,7 @@ export function PicLiteApp() {
         </nav>
         <div className="topbar-actions">
           <span className="privacy-badge"><i /> 本地处理，图片不上传</span>
-          <IconButton label="帮助" symbol="?" onClick={() => showToast("支持 JPG、PNG、WebP；可直接拖入或按 Ctrl + V")} />
+          <IconButton label="帮助" symbol="?" onClick={() => showToast("支持 JPG、PNG、WebP、动态 GIF；可拖入或按 Ctrl + V")} />
         </div>
       </header>
 
@@ -668,7 +1024,7 @@ export function PicLiteApp() {
               {items.length > 0 && <button className="text-button" type="button" onClick={clearAll}>清空</button>}
             </div>
 
-            <button className="import-button" type="button" onClick={() => fileInputRef.current?.click()}><span aria-hidden="true">＋</span> 添加图片</button>
+            <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> 添加图片</button>
 
             <div className="queue-list">
               {items.length === 0 ? (
@@ -725,10 +1081,10 @@ export function PicLiteApp() {
                   {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
                 </div>
               ) : (
-                <button className="hero-dropzone" type="button" onClick={() => fileInputRef.current?.click()}>
+                <button className="hero-dropzone" type="button" onClick={importImages}>
                   <span className="drop-visual" aria-hidden="true"><i className="drop-card one" /><i className="drop-card two" /><i className="drop-card three" /><b>＋</b></span>
                   <span className="hero-copy"><span className="hero-kicker">DROP · PASTE · COMPRESS</span><strong>把图片放轻一点</strong><p>拖入图片，或点击选择本地文件</p></span>
-                  <span className="supported-formats">JPG&nbsp;&nbsp; PNG&nbsp;&nbsp; WebP</span>
+                  <span className="supported-formats">JPG&nbsp;&nbsp; PNG&nbsp;&nbsp; WebP&nbsp;&nbsp; GIF</span>
                 </button>
               )}
             </div>
@@ -738,7 +1094,7 @@ export function PicLiteApp() {
               <span className="result-arrow">→</span>
               <div><span>当前实时结果</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
               <div className="savings-pill"><span>共节省</span><strong>{totals.saved}%</strong></div>
-              <button className="export-button" type="button" disabled={!items.some((item) => item.outputUrl)} onClick={downloadAll}><span>↓</span> 导出全部</button>
+              <button className="export-button" type="button" disabled={!items.length || exporting} onClick={exportAll}><span>↓</span> {exporting ? "正在导出" : "导出全部"}</button>
             </div>
           </section>
 
@@ -782,7 +1138,7 @@ export function PicLiteApp() {
                 <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
                 <small>{selected?.outputBytes ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 节省 ${savedPercent(selected.originalBytes, selected.outputBytes)}%` : "显示的是浏览器实际编码后的文件大小"}</small>
               </div>
-              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 会减少颜色级数并保留透明通道。</p>
+              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板，都会显示真实文件大小。</p>
             </div>
 
             <div className="setting-section slider-section">
@@ -829,8 +1185,40 @@ export function PicLiteApp() {
               <p className="setting-hint">会与上方比例同时生效，且不会放大小图；开启 ↕ 时保持原始宽高比。</p>
             </div>
 
+            <div className="setting-section watermark-section">
+              <div className="label-row"><label className="setting-label" htmlFor="watermark-toggle">文字水印</label><button id="watermark-toggle" className={`switch ${settings.watermark.enabled ? "on" : ""}`} type="button" role="switch" aria-checked={settings.watermark.enabled} onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, enabled: !current.watermark.enabled } }))}><i /></button></div>
+              {settings.watermark.enabled && <div className="watermark-controls">
+                <input className="watermark-text-input" aria-label="水印文字" value={settings.watermark.text} placeholder="输入水印文字" onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, text: event.target.value } }))} />
+                <div className="segmented-control" aria-label="水印铺设方式">
+                  <button className={settings.watermark.layout === "tile" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "tile" } }))}>全屏重复</button>
+                  <button className={settings.watermark.layout === "single" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "single" } }))}>单点定位</button>
+                </div>
+                <div className="font-picker-row">
+                  <div className="select-wrap"><select aria-label="水印字体" value={settings.watermark.fontFamily} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: event.target.value } }))}>{localFonts.map((font) => <option value={font} key={font}>{font}</option>)}</select></div>
+                  <button type="button" onClick={loadSystemFonts}>系统字体</button>
+                  <button type="button" onClick={() => fontInputRef.current?.click()}>导入字体</button>
+                </div>
+                <label className="mini-range"><span>字号 <b>{settings.watermark.fontScale.toFixed(1)}%</b></span><input type="range" min="1" max="20" step="0.5" value={settings.watermark.fontScale} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontScale: Number(event.target.value) } }))} /></label>
+                <label className="mini-range"><span>方向 <b>{settings.watermark.rotation}°</b></span><input type="range" min="-180" max="180" step="1" value={settings.watermark.rotation} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, rotation: Number(event.target.value) } }))} /></label>
+                {settings.watermark.layout === "tile" ? <label className="mini-range"><span>铺设密度 <b>{settings.watermark.density}%</b></span><input type="range" min="5" max="100" step="1" value={settings.watermark.density} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, density: Number(event.target.value) } }))} /></label> : <>
+                  <label className="mini-range"><span>水平位置 <b>{settings.watermark.positionX}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionX} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionX: Number(event.target.value) } }))} /></label>
+                  <label className="mini-range"><span>垂直位置 <b>{settings.watermark.positionY}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionY} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionY: Number(event.target.value) } }))} /></label>
+                </>}
+                <div className="watermark-color-row"><label>文字色 <input type="color" value={settings.watermark.color} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, color: event.target.value } }))} /></label><label className="mini-range"><span>透明度 <b>{settings.watermark.opacity}%</b></span><input type="range" min="1" max="100" step="1" value={settings.watermark.opacity} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, opacity: Number(event.target.value) } }))} /></label></div>
+                <div className="shadow-row"><label><input type="checkbox" checked={settings.watermark.shadow} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadow: event.target.checked } }))} /> 阴影</label>{settings.watermark.shadow && <><input aria-label="阴影颜色" type="color" value={settings.watermark.shadowColor} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowColor: event.target.value } }))} /><label className="mini-range"><span>模糊 <b>{settings.watermark.shadowBlur}px</b></span><input type="range" min="0" max="40" step="1" value={settings.watermark.shadowBlur} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowBlur: Number(event.target.value) } }))} /></label></> }</div>
+              </div>}
+            </div>
+
             <div className="setting-section compact">
               <label className="check-row"><input type="checkbox" checked={settings.stripMetadata} onChange={(event) => setSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span><strong>移除隐私元数据</strong><small>删除位置、相机与拍摄信息</small></span></label>
+            </div>
+
+            <div className="setting-section export-settings">
+              <label className="setting-label" htmlFor="export-mode">导出位置</label>
+              <div className="select-wrap"><select id="export-mode" value={exportMode} onChange={(event) => setExportMode(event.target.value as ExportMode)}><option value="download">浏览器下载</option><option value="overwrite">覆盖源文件</option><option value="same-folder">原文件夹重命名</option><option value="fixed-folder">固定文件夹</option></select></div>
+              {exportMode !== "overwrite" && <label className="suffix-input">文件名后缀<input value={exportSuffix} onChange={(event) => setExportSuffix(event.target.value)} placeholder="-piclite" /></label>}
+              {(exportMode === "fixed-folder" || (!nativeBridge && exportMode === "same-folder")) && <button className="folder-picker-button" type="button" onClick={chooseExportFolder}><span>⌑</span><strong>{exportFolderName || (exportMode === "same-folder" ? "授权原文件夹" : "选择固定文件夹")}</strong><b>选择</b></button>}
+              <p className={`setting-hint ${exportMode === "overwrite" ? "warning" : ""}`}>{exportMode === "download" && "使用浏览器下载，不需要文件夹权限。"}{exportMode === "overwrite" && "会直接替换原图且无法撤销；仅支持保持原格式，并要求从“添加图片”导入。"}{exportMode === "same-folder" && (nativeBridge ? "桌面端会在每张源图旁输出重命名文件。" : "网页无法自动获知父文件夹，需要手动授权一次目标文件夹。")}{exportMode === "fixed-folder" && "所有处理结果写入指定文件夹。"}</p>
             </div>
 
             <div className="settings-spacer" />
