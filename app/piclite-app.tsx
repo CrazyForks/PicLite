@@ -3,6 +3,7 @@
 
 import {
   ChangeEvent,
+  CSSProperties,
   DragEvent,
   PointerEvent as ReactPointerEvent,
   useCallback,
@@ -32,6 +33,8 @@ type WatcherSettings = {
   inputFolder: string;
   outputFolder: string;
   mode: CompressionMode;
+  quality: number;
+  scale: number;
   format: OutputFormat;
   resize: boolean;
   maxWidth: number;
@@ -68,12 +71,16 @@ type ImageItem = {
   outputBlob?: Blob;
   outputBytes?: number;
   outputType?: string;
+  outputWidth?: number;
+  outputHeight?: number;
   status: ItemStatus;
   error?: string;
 };
 
 type CompressionSettings = {
   mode: CompressionMode;
+  quality: number;
+  scale: number;
   format: OutputFormat;
   resize: boolean;
   width: number;
@@ -84,6 +91,8 @@ type CompressionSettings = {
 
 const DEFAULT_SETTINGS: CompressionSettings = {
   mode: "lossless",
+  quality: 100,
+  scale: 100,
   format: "keep",
   resize: false,
   width: 1920,
@@ -96,6 +105,8 @@ const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
   inputFolder: "",
   outputFolder: "",
   mode: "lossless",
+  quality: 100,
+  scale: 100,
   format: "keep",
   resize: false,
   maxWidth: 2560,
@@ -122,6 +133,16 @@ function formatBytes(bytes = 0) {
 function savedPercent(original = 0, output = 0) {
   if (!original || !output) return 0;
   return Math.max(0, Math.round((1 - output / original) * 100));
+}
+
+function modeFromQuality(quality: number): CompressionMode {
+  if (quality >= 100) return "lossless";
+  if (quality >= 55) return "balanced";
+  return "small";
+}
+
+function formatScale(scale: number) {
+  return `${scale < 1 ? scale.toFixed(1) : Math.round(scale)}%`;
 }
 
 function outputExtension(type: string, originalName: string) {
@@ -244,27 +265,36 @@ async function optimizeLosslessly(file: File) {
   return file;
 }
 
-async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
-  const bitmap = await createImageBitmap(item.file);
-  let width = item.width;
-  let height = item.height;
-  if (settings.resize) {
+function getTargetDimensions(item: Pick<ImageItem, "width" | "height">, settings: CompressionSettings) {
+  let ratio = Math.min(1, Math.max(0.001, settings.scale / 100));
+  if (settings.resize && settings.lockRatio) {
     const maxWidth = Math.max(1, settings.width || item.width);
     const maxHeight = Math.max(1, settings.height || item.height);
-    if (settings.lockRatio) {
-      const ratio = Math.min(maxWidth / item.width, maxHeight / item.height, 1);
-      width = Math.max(1, Math.round(item.width * ratio));
-      height = Math.max(1, Math.round(item.height * ratio));
-    } else {
-      width = Math.min(maxWidth, item.width);
-      height = Math.min(maxHeight, item.height);
-    }
+    ratio = Math.min(ratio, maxWidth / item.width, maxHeight / item.height);
   }
 
+  if (settings.resize && !settings.lockRatio) {
+    return {
+      width: Math.max(1, Math.round(Math.min(item.width * ratio, settings.width || item.width))),
+      height: Math.max(1, Math.round(Math.min(item.height * ratio, settings.height || item.height))),
+    };
+  }
+
+  return {
+    width: Math.max(1, Math.round(item.width * ratio)),
+    height: Math.max(1, Math.round(item.height * ratio)),
+  };
+}
+
+async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
+  const bitmap = await createImageBitmap(item.file);
+  const { width, height } = getTargetDimensions(item, settings);
+
   const sameSize = width === item.width && height === item.height;
-  if (settings.mode === "lossless" && settings.format === "keep" && sameSize) {
+  if (settings.quality >= 100 && settings.format === "keep" && sameSize) {
     bitmap.close();
-    return settings.stripMetadata ? optimizeLosslessly(item.file) : item.file;
+    const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
+    return { blob, width, height };
   }
 
   const canvas = document.createElement("canvas");
@@ -284,13 +314,14 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   context.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
 
-  const quality = settings.mode === "lossless" ? 0.98 : settings.mode === "balanced" ? 0.86 : 0.7;
+  const quality = Math.min(1, Math.max(0.01, settings.quality / 100));
   const result = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
   if (!result) throw new Error("当前浏览器不支持所选输出格式");
-  if (settings.format === "keep" && sameSize && result.size >= item.originalBytes) {
-    return settings.stripMetadata ? optimizeLosslessly(item.file) : item.file;
+  if (settings.quality >= 100 && settings.format === "keep" && sameSize && result.size >= item.originalBytes) {
+    const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
+    return { blob, width, height };
   }
-  return result;
+  return { blob: result, width, height };
 }
 
 async function createDemoFile() {
@@ -344,9 +375,11 @@ export function PicLiteApp() {
   const compareRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<ImageItem[]>([]);
   const settingsReadyRef = useRef(false);
+  const livePreviewGenerationRef = useRef(0);
   const nativeBridge = typeof window !== "undefined" ? window.picLite : undefined;
 
   const selected = useMemo(() => items.find((item) => item.id === selectedId) || items[0] || null, [items, selectedId]);
+  const selectedTarget = useMemo(() => selected ? getTargetDimensions(selected, settings) : null, [selected, settings]);
   const totals = useMemo(() => {
     const original = items.reduce((sum, item) => sum + item.originalBytes, 0);
     const output = items.reduce((sum, item) => sum + (item.outputBytes ?? item.originalBytes), 0);
@@ -396,9 +429,47 @@ export function PicLiteApp() {
     }
     setItems((current) => current.map((item) => {
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
-      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, status: "ready", error: undefined };
+      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, status: "ready", error: undefined };
     }));
   }, [settings]);
+
+  useEffect(() => {
+    const id = selectedId || itemsRef.current[0]?.id;
+    if (!id) return;
+    const generation = ++livePreviewGenerationRef.current;
+    const timer = window.setTimeout(async () => {
+      const item = itemsRef.current.find((candidate) => candidate.id === id);
+      if (!item) return;
+      setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
+      try {
+        const result = await canvasCompress(item, settings);
+        if (generation !== livePreviewGenerationRef.current) return;
+        const outputUrl = URL.createObjectURL(result.blob);
+        setItems((current) => current.map((candidate) => {
+          if (candidate.id !== id) return candidate;
+          if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
+          return {
+            ...candidate,
+            outputBlob: result.blob,
+            outputUrl,
+            outputBytes: result.blob.size,
+            outputType: result.blob.type || candidate.type,
+            outputWidth: result.width,
+            outputHeight: result.height,
+            status: "done",
+          };
+        }));
+      } catch (error) {
+        if (generation !== livePreviewGenerationRef.current) return;
+        setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "预览失败" } : candidate));
+      }
+    }, 220);
+
+    return () => {
+      window.clearTimeout(timer);
+      if (livePreviewGenerationRef.current === generation) livePreviewGenerationRef.current += 1;
+    };
+  }, [selectedId, settings]);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -416,7 +487,7 @@ export function PicLiteApp() {
     if (!nativeBridge) return;
     void nativeBridge.getWatcherState().then((state) => {
       setWatcherActive(state.active);
-      if (state.settings) setWatcherSettings(state.settings);
+      if (state.settings) setWatcherSettings({ ...DEFAULT_WATCHER_SETTINGS, ...state.settings });
     });
     return nativeBridge.onWatcherEvent((event) => {
       setWatcherEvents((current) => [event, ...current].slice(0, 30));
@@ -426,24 +497,25 @@ export function PicLiteApp() {
   }, [nativeBridge]);
 
   const processOne = useCallback(async (id: string) => {
-    const item = items.find((candidate) => candidate.id === id);
+    const item = itemsRef.current.find((candidate) => candidate.id === id);
     if (!item) return;
     setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
     try {
-      const outputBlob = await canvasCompress(item, settings);
-      const outputUrl = URL.createObjectURL(outputBlob);
+      const result = await canvasCompress(item, settings);
+      const outputUrl = URL.createObjectURL(result.blob);
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
-        return { ...candidate, outputBlob, outputUrl, outputBytes: outputBlob.size, outputType: outputBlob.type || candidate.type, status: "done" };
+        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, status: "done" };
       }));
     } catch (error) {
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "压缩失败" } : candidate));
     }
-  }, [items, settings]);
+  }, [settings]);
 
   const processAll = useCallback(async () => {
     if (!items.length) return;
+    livePreviewGenerationRef.current += 1;
     setProcessingAll(true);
     for (const item of items) await processOne(item.id);
     setProcessingAll(false);
@@ -597,8 +669,8 @@ export function PicLiteApp() {
                     <strong>{item.name}</strong>
                     <small>{item.width} × {item.height} · {formatBytes(item.originalBytes)}</small>
                     <span className={`item-status ${item.status}`}>
-                      {item.status === "processing" && "正在优化…"}
-                      {item.status === "ready" && "等待处理"}
+                      {item.status === "processing" && "正在实时试压…"}
+                      {item.status === "ready" && "等待实时试压"}
                       {item.status === "error" && (item.error || "处理失败")}
                       {item.status === "done" && <><b>−{savedPercent(item.originalBytes, item.outputBytes)}%</b> {formatBytes(item.outputBytes)}</>}
                     </span>
@@ -617,7 +689,7 @@ export function PicLiteApp() {
           <section className="preview-panel">
             <div className="preview-toolbar">
               <div><span className="eyebrow">画质对比</span><strong>{selected?.name || "导入一张图片开始"}</strong></div>
-              {selected && <div className="preview-meta"><span>{selected.width} × {selected.height} px</span><span>{selected.type.replace("image/", "").toUpperCase()}</span></div>}
+              {selected && <div className="preview-meta"><span>{selected.width} × {selected.height}{selected.outputWidth ? ` → ${selected.outputWidth} × ${selected.outputHeight}` : ""} px</span><span>{(selected.outputType || selected.type).replace("image/", "").toUpperCase()}</span></div>}
             </div>
 
             <div className="preview-stage">
@@ -632,9 +704,9 @@ export function PicLiteApp() {
                   <img className="compare-after" src={selected.outputUrl || selected.sourceUrl} alt="优化后预览" />
                   <div className="compare-before" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={selected.sourceUrl} alt="原图预览" /></div>
                   <span className="compare-label before-label">原图 · {formatBytes(selected.originalBytes)}</span>
-                  <span className="compare-label after-label">优化后 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "等待处理"}</span>
+                  <span className="compare-label after-label">实时结果 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "计算中"}</span>
                   <div className="compare-handle" style={{ left: `${compare}%` }}><span>‹ ›</span></div>
-                  {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在像素级优化</strong></div>}
+                  {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
                 </div>
               ) : (
                 <button className="hero-dropzone" type="button" onClick={() => fileInputRef.current?.click()}>
@@ -648,29 +720,75 @@ export function PicLiteApp() {
             <div className="result-strip">
               <div><span>原始体积</span><strong>{formatBytes(totals.original)}</strong></div>
               <span className="result-arrow">→</span>
-              <div><span>优化后</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
+              <div><span>当前实时结果</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
               <div className="savings-pill"><span>共节省</span><strong>{totals.saved}%</strong></div>
               <button className="export-button" type="button" disabled={!items.some((item) => item.outputUrl)} onClick={downloadAll}><span>↓</span> 导出全部</button>
             </div>
           </section>
 
           <aside className="settings-panel">
-            <div className="panel-heading"><div><span className="eyebrow">压缩设置</span><strong>输出方案</strong></div><button className="reset-button" type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>重置</button></div>
+            <div className="panel-heading"><div><span className="eyebrow">实时试压</span><strong>滑动即预览体积</strong></div><button className="reset-button" type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>重置</button></div>
 
             <div className="setting-section">
-              <label className="setting-label">压缩强度</label>
+              <label className="setting-label">快速方案</label>
               <div className="mode-grid">
                 {([
-                  ["lossless", "无损优先", "像素不变", "◌"],
-                  ["balanced", "智能平衡", "推荐", "◐"],
-                  ["small", "更小体积", "适合网页", "●"],
-                ] as const).map(([value, label, note, icon]) => (
-                  <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => setSettings((current) => ({ ...current, mode: value }))}>
+                  ["lossless", 100, "无损优先", "100%", "◌"],
+                  ["balanced", 82, "智能平衡", "82%", "◐"],
+                  ["small", 45, "更小体积", "45%", "●"],
+                ] as const).map(([value, quality, label, note, icon]) => (
+                  <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => setSettings((current) => ({ ...current, mode: value, quality }))}>
                     <span>{icon}</span><strong>{label}</strong><small>{note}</small>
                   </button>
                 ))}
               </div>
-              {settings.mode === "lossless" && <p className="setting-hint"><i /> JPG / PNG 会优先移除冗余元数据，不改变图像像素。</p>}
+            </div>
+
+            <div className="setting-section slider-section">
+              <div className="slider-heading"><label className="setting-label" htmlFor="quality-range">画质 / 编码质量</label><output htmlFor="quality-range">{settings.quality}%</output></div>
+              <input
+                id="quality-range"
+                className="compression-range"
+                type="range"
+                min="1"
+                max="100"
+                step="1"
+                value={settings.quality}
+                style={{ "--range-progress": `${settings.quality}%` } as CSSProperties}
+                onChange={(event) => {
+                  const quality = Number(event.target.value);
+                  setSettings((current) => ({ ...current, quality, mode: modeFromQuality(quality) }));
+                }}
+              />
+              <div className="range-labels"><span>更小文件</span><span>更多细节</span></div>
+              <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
+                <span><i /> 实时试压结果</span>
+                <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
+                <small>{selected?.outputBytes ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 节省 ${savedPercent(selected.originalBytes, selected.outputBytes)}%` : "显示的是浏览器实际编码后的文件大小"}</small>
+              </div>
+              <p className="setting-hint"><i /> JPG / WebP 的画质滑块最明显；PNG 可配合尺寸比例，或转为 WebP。</p>
+            </div>
+
+            <div className="setting-section slider-section">
+              <div className="slider-heading"><label className="setting-label" htmlFor="scale-range">等比例尺寸</label><output htmlFor="scale-range">{formatScale(settings.scale)}</output></div>
+              <input
+                id="scale-range"
+                className="compression-range scale-range"
+                type="range"
+                min="0.1"
+                max="100"
+                step="0.1"
+                value={settings.scale}
+                style={{ "--range-progress": `${settings.scale}%` } as CSSProperties}
+                onChange={(event) => setSettings((current) => ({ ...current, scale: Number(event.target.value) }))}
+              />
+              <div className="range-labels"><span>0.1% · 极小</span><span>100% · 原尺寸</span></div>
+              <div className="scale-presets">
+                {[100, 50, 25, 10].map((scale) => <button className={settings.scale === scale ? "active" : ""} type="button" key={scale} onClick={() => setSettings((current) => ({ ...current, scale }))}>{scale}%</button>)}
+                <button type="button" onClick={() => setSettings((current) => ({ ...current, scale: Math.max(0.1, Math.round(current.scale * 5) / 10) }))}>继续减半</button>
+              </div>
+              <div className="dimension-preview"><span>预计像素</span><strong>{selectedTarget ? `${selectedTarget.width} × ${selectedTarget.height} px` : "导入图片后显示"}</strong></div>
+              <p className="setting-hint">可反复继续减半，始终从原图生成；最小会收敛到 1 × 1 像素。</p>
             </div>
 
             <div className="setting-section">
@@ -686,13 +804,13 @@ export function PicLiteApp() {
             </div>
 
             <div className="setting-section">
-              <div className="label-row"><label className="setting-label" htmlFor="resize-toggle">调整像素尺寸</label><button id="resize-toggle" className={`switch ${settings.resize ? "on" : ""}`} type="button" role="switch" aria-checked={settings.resize} onClick={() => setSettings((current) => ({ ...current, resize: !current.resize }))}><i /></button></div>
+              <div className="label-row"><label className="setting-label" htmlFor="resize-toggle">最大像素边界（可选）</label><button id="resize-toggle" className={`switch ${settings.resize ? "on" : ""}`} type="button" role="switch" aria-checked={settings.resize} onClick={() => setSettings((current) => ({ ...current, resize: !current.resize }))}><i /></button></div>
               <div className={`dimension-grid ${settings.resize ? "" : "disabled"}`}>
                 <label>最大宽度 <span><input type="number" min="1" value={settings.width} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, width: Number(event.target.value) }))} /> px</span></label>
                 <button className={settings.lockRatio ? "locked" : ""} type="button" disabled={!settings.resize} aria-label="锁定宽高比" onClick={() => setSettings((current) => ({ ...current, lockRatio: !current.lockRatio }))}>↕</button>
                 <label>最大高度 <span><input type="number" min="1" value={settings.height} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, height: Number(event.target.value) }))} /> px</span></label>
               </div>
-              <p className="setting-hint">不会放大小图；开启 ↕ 时保持原始宽高比。</p>
+              <p className="setting-hint">会与上方比例同时生效，且不会放大小图；开启 ↕ 时保持原始宽高比。</p>
             </div>
 
             <div className="setting-section compact">
@@ -700,8 +818,8 @@ export function PicLiteApp() {
             </div>
 
             <div className="settings-spacer" />
-            <div className="action-summary"><div><span>待处理</span><strong>{items.filter((item) => item.status !== "done").length} 张</strong></div><div><span>当前方案</span><strong>{settings.mode === "lossless" ? "无损优先" : settings.mode === "balanced" ? "智能平衡" : "更小体积"}</strong></div></div>
-            <button className="compress-button" type="button" disabled={!items.length || processingAll} onClick={processAll}><span>{processingAll ? "···" : "✦"}</span>{processingAll ? "正在批量优化" : `开始压缩${items.length ? ` · ${items.length} 张` : ""}`}</button>
+            <div className="action-summary"><div><span>当前选中</span><strong>{selected?.outputBytes ? formatBytes(selected.outputBytes) : "—"}</strong></div><div><span>输出参数</span><strong>{settings.quality}% · {formatScale(settings.scale)}</strong></div></div>
+            <button className="compress-button" type="button" disabled={!items.length || processingAll} onClick={processAll}><span>{processingAll ? "···" : "✦"}</span>{processingAll ? "正在应用到全部" : `按此参数应用到全部${items.length ? ` · ${items.length} 张` : ""}`}</button>
           </aside>
         </section>
       ) : (
@@ -729,8 +847,17 @@ export function PicLiteApp() {
             </div>
 
             <div className="watcher-options">
-              <label><span>压缩方案</span><select value={watcherSettings.mode} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, mode: event.target.value as CompressionMode }))}><option value="lossless">无损优先</option><option value="balanced">智能平衡</option><option value="small">更小体积</option></select></label>
+              <label><span>压缩方案</span><select value={watcherSettings.mode} disabled={watcherActive} onChange={(event) => {
+                const mode = event.target.value as CompressionMode;
+                const quality = mode === "lossless" ? 100 : mode === "balanced" ? 82 : 45;
+                setWatcherSettings((current) => ({ ...current, mode, quality }));
+              }}><option value="lossless">无损优先</option><option value="balanced">智能平衡</option><option value="small">更小体积</option></select></label>
               <label><span>输出格式</span><select value={watcherSettings.format} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, format: event.target.value as OutputFormat }))}><option value="keep">保持原格式</option><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select></label>
+              <label className="watcher-range"><span>画质 <b>{watcherSettings.quality}%</b></span><input type="range" min="1" max="100" step="1" value={watcherSettings.quality} disabled={watcherActive} onChange={(event) => {
+                const quality = Number(event.target.value);
+                setWatcherSettings((current) => ({ ...current, quality, mode: modeFromQuality(quality) }));
+              }} /></label>
+              <label className="watcher-range"><span>等比例尺寸 <b>{formatScale(watcherSettings.scale)}</b></span><input type="range" min="0.1" max="100" step="0.1" value={watcherSettings.scale} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, scale: Number(event.target.value) }))} /></label>
               <label className="watcher-check"><input type="checkbox" checked={watcherSettings.stripMetadata} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span>移除隐私元数据</span></label>
               <label className="watcher-check"><input type="checkbox" checked={watcherSettings.resize} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, resize: event.target.checked }))} /><span>限制最大像素尺寸</span></label>
               {watcherSettings.resize && <div className="watcher-dimensions"><label>宽 <input type="number" min="1" value={watcherSettings.maxWidth} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, maxWidth: Number(event.target.value) }))} /></label><span>×</span><label>高 <input type="number" min="1" value={watcherSettings.maxHeight} disabled={watcherActive} onChange={(event) => setWatcherSettings((current) => ({ ...current, maxHeight: Number(event.target.value) }))} /></label><small>px</small></div>}

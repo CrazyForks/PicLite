@@ -68,21 +68,42 @@ async function availableOutputPath(inputPath, settings) {
 async function optimizeWithSharp(inputPath, temporaryPath, settings) {
   const sourceExtension = path.extname(inputPath).toLowerCase();
   const outputExtension = extensionFor(inputPath, settings.format);
-  const noResize = !settings.resize;
-  const jpegPassThrough = settings.mode === "lossless"
+  const quality = Math.min(100, Math.max(1, Number(settings.quality) || (settings.mode === "lossless" ? 100 : settings.mode === "balanced" ? 82 : 45)));
+  const scale = Math.min(100, Math.max(0.1, Number(settings.scale) || 100));
+  const noResize = !settings.resize && scale >= 100;
+  const metadata = await sharp(inputPath, { failOn: "none", animated: true }).metadata();
+  const jpegPassThrough = quality >= 100
     && noResize
     && [".jpg", ".jpeg"].includes(sourceExtension)
     && [".jpg", ".jpeg"].includes(outputExtension);
 
   if (jpegPassThrough) {
-    const metadata = await sharp(inputPath).metadata();
     const copyMode = settings.stripMetadata && (!metadata.orientation || metadata.orientation === 1) ? "none" : "all";
     await run(unpackedBinary(await jpegtranBinary), ["-copy", copyMode, "-optimize", "-progressive", "-outfile", temporaryPath, inputPath]);
     return;
   }
 
   let pipeline = sharp(inputPath, { failOn: "none", animated: true }).rotate();
-  if (settings.resize) {
+  const sourceWidth = metadata.width;
+  const sourceHeight = metadata.pageHeight || metadata.height;
+  if (sourceWidth && sourceHeight) {
+    let ratio = Math.min(1, scale / 100);
+    if (settings.resize) {
+      ratio = Math.min(
+        ratio,
+        Math.max(1, Number(settings.maxWidth) || 2560) / sourceWidth,
+        Math.max(1, Number(settings.maxHeight) || 2560) / sourceHeight,
+      );
+    }
+    if (ratio < 1) {
+      pipeline = pipeline.resize({
+        width: Math.max(1, Math.round(sourceWidth * ratio)),
+        height: Math.max(1, Math.round(sourceHeight * ratio)),
+        fit: "fill",
+        kernel: sharp.kernel.lanczos3,
+      });
+    }
+  } else if (settings.resize) {
     pipeline = pipeline.resize({
       width: Math.max(1, Number(settings.maxWidth) || 2560),
       height: Math.max(1, Number(settings.maxHeight) || 2560),
@@ -94,16 +115,15 @@ async function optimizeWithSharp(inputPath, temporaryPath, settings) {
   if (!settings.stripMetadata) pipeline = pipeline.keepMetadata();
 
   if ([".jpg", ".jpeg"].includes(outputExtension)) {
-    const quality = settings.mode === "lossless" ? 100 : settings.mode === "balanced" ? 88 : 74;
-    pipeline = pipeline.jpeg({ quality, mozjpeg: true, progressive: true, chromaSubsampling: settings.mode === "lossless" ? "4:4:4" : "4:2:0" });
+    pipeline = pipeline.jpeg({ quality, mozjpeg: true, progressive: true, chromaSubsampling: quality >= 95 ? "4:4:4" : "4:2:0" });
   } else if (outputExtension === ".png") {
-    pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true, palette: settings.mode === "small", quality: settings.mode === "small" ? 84 : 100, effort: 10 });
+    pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true, palette: quality < 75, quality, effort: 10 });
   } else if (outputExtension === ".webp") {
-    pipeline = pipeline.webp(settings.mode === "lossless" ? { lossless: true, effort: 6 } : { quality: settings.mode === "balanced" ? 84 : 70, smartSubsample: true, effort: 6 });
+    pipeline = pipeline.webp(quality >= 100 ? { lossless: true, effort: 6 } : { quality, smartSubsample: true, effort: 6 });
   } else if (outputExtension === ".avif") {
-    pipeline = pipeline.avif(settings.mode === "lossless" ? { lossless: true, effort: 9 } : { quality: settings.mode === "balanced" ? 68 : 52, effort: 8 });
+    pipeline = pipeline.avif(quality >= 100 ? { lossless: true, effort: 9 } : { quality, effort: 8 });
   } else if ([".tif", ".tiff"].includes(outputExtension)) {
-    pipeline = pipeline.tiff({ compression: "lzw", quality: settings.mode === "small" ? 78 : 100 });
+    pipeline = pipeline.tiff({ compression: "lzw", quality });
   } else if (outputExtension === ".gif") {
     pipeline = pipeline.gif({ effort: 10, reuse: true });
   } else {
@@ -123,7 +143,8 @@ async function processWatchedFile(inputPath, settings) {
     const original = await fs.stat(inputPath);
     await optimizeWithSharp(inputPath, temporaryPath, settings);
     const candidate = await fs.stat(temporaryPath);
-    if (!settings.resize && settings.format === "keep" && candidate.size >= original.size) {
+    const preservesPixels = !settings.resize && (Number(settings.scale) || 100) >= 100 && (Number(settings.quality) || 100) >= 100;
+    if (preservesPixels && settings.format === "keep" && candidate.size >= original.size) {
       await fs.copyFile(inputPath, temporaryPath);
     }
     await fs.rename(temporaryPath, outputPath);
