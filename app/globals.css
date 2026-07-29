@@ -441,62 +441,133 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .log-row small { font-size: 8px; color: #929f98; }
 .log-row > b { font-size: 10px; color: var(--success); }
 
-.desktop-app { --paper: #eef2ed; --desktop-bar: 56px; }
-.desktop-app .topbar { height: var(--desktop-bar); padding-inline: 16px; grid-template-columns: 218px 1fr 218px; background: rgba(250,252,249,.94); box-shadow: 0 7px 25px rgba(30,50,42,.035); }
+.desktop-app { --paper: #eef2ed; --desktop-bar: clamp(60px, 5vw, 72px); }
+.desktop-app .topbar { height: var(--desktop-bar); padding-inline: clamp(18px, 1.8vw, 30px); grid-template-columns: clamp(218px, 18vw, 300px) 1fr clamp(218px, 18vw, 300px); background: rgba(250,252,249,.94); box-shadow: 0 7px 25px rgba(30,50,42,.035); }
 .desktop-app .brand { gap: 8px; }
-.desktop-app .brand-mark { width: 27px; height: 27px; border-radius: 8px; }
-.desktop-app .brand strong { font-size: 17px; }
-.desktop-app .brand small { font-size: 10px; }
-.desktop-app .main-nav { gap: 21px; }
-.desktop-app .main-nav button { font-size: 11px; }
-.desktop-app .privacy-badge { padding: 5px 9px; font-size: 9px; }
-.desktop-app .icon-button { width: 28px; height: 28px; font-size: 11px; }
-.desktop-app .workspace { min-height: calc(100vh - var(--desktop-bar)); max-width: none; grid-template-columns: 218px minmax(360px, 1fr) 286px; }
+.desktop-app .brand-mark { width: clamp(29px, 2.2vw, 36px); height: clamp(29px, 2.2vw, 36px); border-radius: 9px; }
+.desktop-app .brand strong { font-size: clamp(18px, 1.25vw, 22px); }
+.desktop-app .brand small { font-size: clamp(10px, .7vw, 12px); }
+.desktop-app .main-nav { gap: clamp(21px, 2.2vw, 38px); }
+.desktop-app .main-nav button { font-size: clamp(12px, .82vw, 15px); }
+.desktop-app .privacy-badge { padding: 6px 10px; font-size: clamp(10px, .68vw, 12px); }
+.desktop-app .icon-button { width: clamp(30px, 2.1vw, 36px); height: clamp(30px, 2.1vw, 36px); font-size: clamp(12px, .8vw, 14px); }
+.desktop-app .workspace { min-height: calc(100vh - var(--desktop-bar)); max-width: none; grid-template-columns: clamp(218px, 17vw, 300px) minmax(420px, 1fr) clamp(286px, 21vw, 370px); }
 .desktop-app .queue-panel, .desktop-app .settings-panel { background: rgba(252,253,251,.96); }
 .desktop-app .settings-panel { top: var(--desktop-bar); height: calc(100vh - var(--desktop-bar)); padding-bottom: 12px; }
-.desktop-app .panel-heading { min-height: 61px; padding: 12px 15px 10px; }
-.desktop-app .panel-heading strong { font-size: 12px; }
-.desktop-app .import-button { min-height: 35px; margin: 11px 13px 9px; border-radius: 8px; font-size: 10px; }
+.desktop-app .panel-heading { min-height: clamp(64px, 5vw, 76px); padding: 13px clamp(15px, 1.2vw, 21px) 11px; }
+.desktop-app .panel-heading strong { font-size: clamp(13px, .85vw, 16px); }
+.desktop-app .eyebrow { font-size: clamp(9px, .62vw, 11px); }
+.desktop-app .import-button { min-height: 39px; margin: 12px 14px 10px; border-radius: 9px; font-size: clamp(11px, .72vw, 13px); }
 .desktop-app .queue-list { min-height: 180px; padding-inline: 6px; }
 .desktop-app .queue-empty { min-height: 220px; }
 .desktop-app .queue-item { min-height: 68px; grid-template-columns: 44px minmax(0,1fr) 17px; gap: 8px; padding: 7px; border-radius: 9px; }
 .desktop-app .queue-item > img { width: 44px; height: 44px; border-radius: 7px; }
-.desktop-app .queue-copy > strong { font-size: 9px; }
-.desktop-app .queue-copy small, .desktop-app .item-status { font-size: 8px; }
+.desktop-app .queue-copy > strong { font-size: clamp(10px, .68vw, 12px); }
+.desktop-app .queue-copy small, .desktop-app .item-status { font-size: clamp(9px, .6vw, 11px); }
 .desktop-app .queue-footer { padding: 10px 13px 12px; }
-.desktop-app .paste-button { height: 31px; font-size: 9px; }
-.desktop-app .preview-panel { grid-template-rows: 61px minmax(330px, 1fr) 65px; background: #e7ece7; }
+.desktop-app .paste-button { height: 35px; font-size: clamp(10px, .68vw, 12px); }
+.desktop-app .queue-footer small { font-size: 9px; }
+.desktop-app .preview-panel { grid-template-rows: clamp(64px, 5vw, 78px) minmax(350px, 1fr) clamp(68px, 5.2vw, 82px); background: #e7ece7; }
 .desktop-app .preview-toolbar { padding-inline: 14px; gap: 9px; grid-template-columns: minmax(100px,1fr) auto minmax(138px,1fr); }
-.desktop-app .preview-toolbar strong { font-size: 11px; }
+.desktop-app .preview-toolbar strong { font-size: clamp(12px, .8vw, 15px); }
+.desktop-app .preview-meta span,
+.desktop-app .preview-mode-tabs button,
+.desktop-app .preview-tools .zoom-readout,
+.desktop-app .preview-tools .fit-button { font-size: clamp(9px, .6vw, 11px); }
 .desktop-app .preview-stage { padding: 17px; }
-.desktop-app .hero-dropzone { width: min(100%, 620px); height: min(100%, 430px); min-height: 300px; border-radius: 18px; }
-.desktop-app .drop-visual { transform: scale(.78); margin: -9px 0 -2px; }
-.desktop-app .hero-copy strong { font-size: clamp(24px, 2.6vw, 34px); }
-.desktop-app .hero-copy p { margin-top: 7px; font-size: 10px; }
+.desktop-app .hero-dropzone { width: min(100%, 820px); height: min(100%, 620px); min-height: 330px; border-radius: 20px; }
+.desktop-app .drop-visual { transform: scale(.86); margin: -5px 0 4px; }
+.desktop-app .hero-copy strong { font-size: clamp(28px, 2.5vw, 44px); }
+.desktop-app .hero-copy p { margin-top: 8px; font-size: clamp(11px, .75vw, 14px); }
+.desktop-app .hero-kicker,
+.desktop-app .supported-formats { font-size: clamp(9px, .58vw, 11px); }
 .desktop-app .supported-formats { bottom: 14px; }
 .desktop-app .result-strip { grid-template-columns: minmax(76px,1fr) 22px minmax(76px,1fr) minmax(86px,1fr) 126px; padding: 9px 13px; }
-.desktop-app .result-strip div strong { font-size: 11px; }
+.desktop-app .result-strip div span { font-size: clamp(9px, .58vw, 11px); }
+.desktop-app .result-strip div strong { font-size: clamp(12px, .8vw, 15px); }
 .desktop-app .savings-pill { padding: 6px 10px; }
-.desktop-app .export-button { height: 36px; border-radius: 8px; font-size: 10px; }
-.desktop-app .setting-section { padding: 13px 15px; }
+.desktop-app .export-button { height: 39px; border-radius: 9px; font-size: clamp(11px, .72vw, 13px); }
+.desktop-app .setting-section { padding: clamp(14px, 1.15vw, 20px) clamp(15px, 1.2vw, 21px); }
 .desktop-app .setting-section.compact { padding-block: 11px; }
-.desktop-app .setting-label { margin-bottom: 8px; font-size: 9px; }
+.desktop-app .setting-label { margin-bottom: 9px; font-size: clamp(10px, .66vw, 12px); }
 .desktop-app .mode-grid button { min-height: 60px; border-radius: 8px; padding-block: 5px; }
 .desktop-app .mode-grid button > span { font-size: 15px; line-height: 17px; }
+.desktop-app .mode-grid button strong,
+.desktop-app .mode-grid button small,
+.desktop-app .setting-hint,
+.desktop-app .range-labels,
+.desktop-app .live-size-card > span,
+.desktop-app .live-size-card > small,
+.desktop-app .dimension-preview span,
+.desktop-app .dimension-preview strong,
+.desktop-app .check-row small,
+.desktop-app .mini-range > span,
+.desktop-app .suffix-input,
+.desktop-app .folder-picker-button,
+.desktop-app .action-summary span,
+.desktop-app .action-summary strong { font-size: clamp(9px, .6vw, 11px); }
+.desktop-app .slider-heading output,
+.desktop-app .select-wrap select,
+.desktop-app .watermark-text-input,
+.desktop-app .suffix-input input,
+.desktop-app .dimension-grid input,
+.desktop-app .check-row strong,
+.desktop-app .segmented-control button { font-size: clamp(10px, .66vw, 12px); }
 .desktop-app .slider-heading { margin-bottom: 8px; }
 .desktop-app .live-size-card { margin-top: 8px; padding: 9px 10px; border-radius: 8px; }
-.desktop-app .live-size-card > strong { font-size: 14px; }
+.desktop-app .live-size-card > strong { font-size: clamp(15px, 1vw, 19px); }
 .desktop-app .scale-presets { margin-top: 8px; }
 .desktop-app .dimension-preview { margin-top: 7px; padding-block: 6px; }
 .desktop-app .action-summary { margin: 0 15px 9px; }
-.desktop-app .compress-button { min-height: 39px; margin-inline: 15px; border-radius: 9px; font-size: 10px; }
+.desktop-app .compress-button { min-height: 43px; margin-inline: 15px; border-radius: 9px; font-size: clamp(11px, .72vw, 13px); }
 .desktop-app .watcher-page, .desktop-app .preferences-page { height: calc(100vh - var(--desktop-bar) - 8px); min-height: 0; overflow-y: auto; }
-.desktop-app .watcher-page { max-width: 1080px; padding: 44px 32px; }
-.desktop-app .watcher-intro h1 { font-size: clamp(40px,4.3vw,58px); }
-.desktop-app .watcher-console { min-height: 420px; padding: 21px; }
-.desktop-app .preferences-page { max-width: 1030px; padding: 40px 32px 58px; gap: 50px; }
+.desktop-app .watcher-page { width: 100%; max-width: 1500px; padding: clamp(44px, 6vh, 80px) clamp(32px, 5vw, 72px); grid-template-columns: minmax(300px,.75fr) minmax(520px,1.35fr); gap: clamp(36px, 5vw, 90px); }
+.desktop-app .watcher-intro h1 { font-size: clamp(48px,4.6vw,78px); }
+.desktop-app .watcher-intro > p { max-width: 460px; font-size: clamp(14px,.9vw,18px); }
+.desktop-app .section-index { font-size: clamp(10px,.65vw,12px); }
+.desktop-app .watcher-platform span { font-size: clamp(11px,.72vw,13px); }
+.desktop-app .watcher-platform small { font-size: clamp(10px,.62vw,12px); }
+.desktop-app .watcher-console { min-height: clamp(460px,62vh,620px); padding: clamp(23px,2vw,34px); }
+.desktop-app .console-header span,
+.desktop-app .console-header small,
+.desktop-app .folder-route button small,
+.desktop-app .folder-route button b,
+.desktop-app .route-line span,
+.desktop-app .watcher-options label > span,
+.desktop-app .watcher-range b,
+.desktop-app .watcher-dimensions label,
+.desktop-app .watcher-dimensions > span,
+.desktop-app .watcher-dimensions small { font-size: clamp(10px,.64vw,12px); }
+.desktop-app .folder-route button strong,
+.desktop-app .watcher-options select,
+.desktop-app .watcher-dimensions input { font-size: clamp(12px,.76vw,14px); }
+.desktop-app .watcher-toggle { min-height: 48px; font-size: clamp(12px,.78vw,14px); }
+.desktop-app .watcher-log-heading span { font-size: clamp(12px,.8vw,15px); }
+.desktop-app .watcher-log-heading small,
+.desktop-app .log-row small,
+.desktop-app .log-empty p { font-size: clamp(10px,.64vw,12px); }
+.desktop-app .log-row strong,
+.desktop-app .log-row > b { font-size: clamp(11px,.72vw,13px); }
+.desktop-app .preferences-page { width: 100%; max-width: 1420px; padding: clamp(44px, 5vh, 72px) clamp(32px, 5vw, 72px) 72px; gap: clamp(50px, 6vw, 96px); }
 .desktop-app .preferences-aside { top: 96px; }
-.desktop-app .preferences-aside h1 { font-size: clamp(36px,4vw,54px); }
+.desktop-app .preferences-aside h1 { font-size: clamp(44px,4.3vw,72px); }
+.desktop-app .preferences-aside > p { font-size: clamp(13px,.84vw,16px); }
+.desktop-app .native-stack strong,
+.desktop-app .preference-row strong { font-size: clamp(12px,.76vw,14px); }
+.desktop-app .native-stack small,
+.desktop-app .preference-card-heading small,
+.desktop-app .preference-row small,
+.desktop-app .about-product small,
+.desktop-app .shortcut-help { font-size: clamp(10px,.64vw,12px); }
+.desktop-app .preference-card-heading span { font-size: clamp(15px,.95vw,18px); }
+.desktop-app .preference-segments button,
+.desktop-app .preference-input,
+.desktop-app .preference-action,
+.desktop-app .shortcut-recorder,
+.desktop-app .about-links a,
+.desktop-app .about-links button { font-size: clamp(11px,.7vw,13px); }
+.desktop-app .about-card > p { font-size: clamp(11px,.7vw,13px); }
+.desktop-app .about-product strong { font-size: clamp(14px,.9vw,17px); }
 
 .preferences-page { min-height: calc(100vh - 70px); max-width: 1180px; margin: 0 auto; padding: 58px 38px 80px; display: grid; grid-template-columns: minmax(260px,.72fr) minmax(520px,1.35fr); gap: 72px; align-items: start; }
 .preferences-aside { position: sticky; top: 128px; }
@@ -698,9 +769,9 @@ html[data-density="compact"] .desktop-app .preview-panel { grid-template-rows: 5
 .desktop-app .watcher-page,
 .desktop-app .preferences-page { height: calc(100vh - var(--desktop-bar)); min-height: 0; overflow-x: hidden; overflow-y: auto; }
 
-@media (max-width: 1040px) {
-  html[data-density] .desktop-app .topbar { grid-template-columns: 170px minmax(0,1fr) 126px; padding-inline: 15px; }
-  html[data-density] .desktop-app .workspace { display: grid; grid-template-columns: 160px minmax(280px,1fr) 230px; padding: 8px; gap: 8px; }
+@media (max-width: 980px) {
+  html[data-density] .desktop-app .topbar { grid-template-columns: 182px minmax(0,1fr) 142px; padding-inline: 15px; }
+  html[data-density] .desktop-app .workspace { display: grid; grid-template-columns: 170px minmax(300px,1fr) 238px; padding: 8px; gap: 8px; }
   .desktop-app .settings-panel { grid-column: auto; display: flex; padding: 0 0 12px; border: 1px solid rgba(70,92,80,.13); }
   .desktop-app .settings-panel > .panel-heading { margin-inline: 0; }
   .desktop-app .settings-panel .setting-section { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -717,7 +788,7 @@ html[data-density="compact"] .desktop-app .preview-panel { grid-template-rows: 5
   .desktop-app .preview-toolbar { grid-template-columns: minmax(0,1fr) auto; }
 }
 
-@media (max-height: 650px) {
+@media (max-height: 560px) {
   html[data-density] .desktop-app .preview-panel { grid-template-rows: 52px minmax(230px,1fr) 58px; }
   .desktop-app .compare-canvas,
   .desktop-app .image-inspector,
@@ -873,17 +944,18 @@ html[data-theme="dark"] .shortcut-recorder.recording { background: #243029; bord
   --dock-border: rgba(164,190,125,.25);
   --dock-muted: #819187;
   position: relative;
-  width: calc(100vw - 10px);
-  height: calc(100vh - 10px);
-  margin: 5px;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
   overflow: hidden;
   display: grid;
   grid-template-rows: 34px minmax(0,1fr) 34px 38px;
   color: #e8f0eb;
   background: radial-gradient(circle at 12% -30%, rgba(146,176,101,.2), transparent 46%), linear-gradient(145deg,#18211c,#0e1411 72%);
   border: 1px solid var(--dock-border);
-  border-radius: 16px;
-  box-shadow: inset 0 1px rgba(255,255,255,.06), 0 10px 28px rgba(0,0,0,.24);
+  border-radius: 14px;
+  clip-path: inset(0 round 14px);
+  box-shadow: inset 0 1px rgba(255,255,255,.06);
   user-select: none;
   animation: dock-in .25s cubic-bezier(.2,.8,.2,1);
 }
@@ -925,12 +997,10 @@ html[data-theme="dark"] .shortcut-recorder.recording { background: #243029; bord
 .drop-dock > footer button { height: 25px; padding: 0 9px; border: 0; border-radius: 7px; background: var(--dock-accent); color: #142119; font-size: 7px; font-weight: 900; cursor: pointer; }
 .drop-dock > footer .dock-further-button { background: rgba(255,255,255,.075); color: #bac8bf; }
 .drop-dock > footer button:disabled { opacity: .42; cursor: default; }
-.dock-resize-handle { position: absolute; z-index: 4; right: 1px; bottom: 1px; width: 21px; height: 21px; padding: 0; border: 0; background: transparent; cursor: nwse-resize; }
-.dock-resize-handle i { position: absolute; right: 4px; bottom: 4px; width: 7px; height: 1px; border-radius: 2px; background: rgba(157,185,109,.48); transform: rotate(-45deg); transform-origin: right center; }
-.dock-resize-handle i:nth-child(2) { width: 11px; bottom: 7px; opacity: .66; }
-.dock-resize-handle i:nth-child(3) { width: 15px; bottom: 10px; opacity: .35; }
+.dock-resize-handle { position: absolute; z-index: 4; right: 0; bottom: 0; width: 22px; height: 22px; padding: 0; border: 0; outline: 0; background: transparent; cursor: nwse-resize; opacity: 0; }
+.dock-resize-handle i { display: none; }
 
-html[data-theme="light"] .drop-dock { --dock-accent: #668457; --dock-border: rgba(62,84,70,.2); --dock-muted: #748078; color: #1c2821; background: radial-gradient(circle at 12% -30%, rgba(151,179,108,.17), transparent 46%), linear-gradient(145deg,#fbfcfa,#eef2ed 72%); box-shadow: inset 0 1px #fff, 0 10px 28px rgba(26,45,35,.16); }
+html[data-theme="light"] .drop-dock { --dock-accent: #668457; --dock-border: rgba(62,84,70,.2); --dock-muted: #748078; color: #1c2821; background: radial-gradient(circle at 12% -30%, rgba(151,179,108,.17), transparent 46%), linear-gradient(145deg,#fbfcfa,#eef2ed 72%); box-shadow: inset 0 1px #fff; }
 html[data-theme="light"] .drop-dock > header,
 html[data-theme="light"] .drop-dock > footer,
 html[data-theme="light"] .dock-controls { border-color: rgba(49,72,59,.1); }
@@ -955,7 +1025,7 @@ html[data-theme="light"] .dock-controls input::-webkit-slider-thumb { border-col
 
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }
-@keyframes dock-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+@keyframes dock-in { from { opacity: 0; } }
 @keyframes lift-in { from { opacity: 0; transform: translateY(9px); } }
 @keyframes hover-float { 50% { transform: translateY(-5px) scale(.78); } }
 @keyframes button-sheen { to { transform: translateX(130%); } }

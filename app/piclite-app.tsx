@@ -1058,7 +1058,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         ? (media.matches ? "dark" : "light")
         : desktopPreferences.theme;
       const resolvedDensity = desktopPreferences.density === "auto"
-        ? (window.innerWidth < 1040 || window.innerHeight < 640 ? "compact" : "comfortable")
+        ? (window.innerWidth <= 860 || window.innerHeight <= 540 ? "compact" : "comfortable")
         : desktopPreferences.density;
       document.documentElement.dataset.theme = resolvedTheme;
       document.documentElement.dataset.density = resolvedDensity;
@@ -2035,7 +2035,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                 </div>
               </div>
               <div className="preference-row column">
-                <div><strong>界面密度</strong><small>自动模式在 125% / 150% 等高 DPI 缩放下会主动收紧界面</small></div>
+                <div><strong>界面密度</strong><small>自动模式优先保证字号清晰，仅在窗口接近最小尺寸时收紧界面</small></div>
                 <div className="preference-segments">
                   {([['auto', '自动'], ['comfortable', '标准'], ['compact', '紧凑']] as const).map(([value, label]) => <button className={desktopPreferences.density === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, density: value }))}>{label}</button>)}
                 </div>
@@ -2069,9 +2069,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.2 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.3 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.2 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.3 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>
