@@ -47,6 +47,7 @@ struct DesktopState {
     source_files: Mutex<HashSet<PathBuf>>,
     processing: Arc<Mutex<HashSet<PathBuf>>>,
     quitting: AtomicBool,
+    tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
 }
 
@@ -59,6 +60,7 @@ impl Default for DesktopState {
             source_files: Mutex::new(HashSet::new()),
             processing: Arc::new(Mutex::new(HashSet::new())),
             quitting: AtomicBool::new(false),
+            tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
         }
     }
@@ -1010,8 +1012,8 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let preferences = MenuItem::with_id(app, "preferences", "应用设置…", true, None::<&str>)?;
     let watcher = MenuItem::with_id(
         app,
-        "toggle_watcher",
-        "开始 / 停止文件夹监测",
+        "watcher_settings",
+        "打开文件夹监测设置…",
         true,
         None::<&str>,
     )?;
@@ -1103,6 +1105,10 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
                 show_window(app, "main");
                 let _ = app.emit("tray:action", "preferences");
             }
+            "watcher_settings" => {
+                show_window(app, "main");
+                let _ = app.emit("tray:action", "watcher_settings");
+            }
             "quit" => {
                 app.state::<DesktopState>()
                     .quitting
@@ -1133,19 +1139,29 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState::default())
         .setup(|app| {
-            create_tray(app)?;
+            match create_tray(app) {
+                Ok(()) => app
+                    .state::<DesktopState>()
+                    .tray_available
+                    .store(true, Ordering::Relaxed),
+                Err(error) => eprintln!("PicLite system tray unavailable: {error}"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             let state = window.state::<DesktopState>();
             match event {
                 WindowEvent::CloseRequested { api, .. }
-                    if !state.quitting.load(Ordering::Relaxed) =>
+                    if state.tray_available.load(Ordering::Relaxed)
+                        && !state.quitting.load(Ordering::Relaxed) =>
                 {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                WindowEvent::Resized(_) if state.minimize_to_tray.load(Ordering::Relaxed) => {
+                WindowEvent::Resized(_)
+                    if state.tray_available.load(Ordering::Relaxed)
+                        && state.minimize_to_tray.load(Ordering::Relaxed) =>
+                {
                     if window.is_minimized().unwrap_or(false) {
                         let _ = window.hide();
                     }
@@ -1173,10 +1189,9 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            if !app_handle
-                .state::<DesktopState>()
-                .quitting
-                .load(Ordering::Relaxed)
+            let state = app_handle.state::<DesktopState>();
+            if state.tray_available.load(Ordering::Relaxed)
+                && !state.quitting.load(Ordering::Relaxed)
             {
                 api.prevent_exit();
             }

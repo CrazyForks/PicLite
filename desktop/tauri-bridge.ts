@@ -22,6 +22,7 @@ function platformName() {
 if ("__TAURI_INTERNALS__" in window) {
   const currentWindow = getCurrentWindow();
   const currentWebview = getCurrentWebview();
+  document.documentElement.classList.add(currentWindow.label === "dropzone" ? "dropzone-root" : "desktop-root");
   window.picLite = {
     platform: platformName(),
     windowLabel: currentWindow.label,
@@ -50,6 +51,8 @@ if ("__TAURI_INTERNALS__" in window) {
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: (theme) => currentWindow.setTheme(theme === "system" ? null : theme),
+    startDragging: () => currentWindow.startDragging(),
+    startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     hideCurrentWindow: () => invoke("hide_current_window"),
@@ -63,6 +66,8 @@ if ("__TAURI_INTERNALS__" in window) {
       }).then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
+      }).catch((error) => {
+        if (!disposed) callback({ type: "error", error: error instanceof Error ? error.message : String(error) });
       });
       return () => {
         disposed = true;

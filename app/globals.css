@@ -18,6 +18,14 @@
 
 html, body { margin: 0; min-height: 100%; }
 
+html.desktop-root,
+html.desktop-root body,
+html.dropzone-root,
+html.dropzone-root body { width: 100%; height: 100%; overflow: hidden; }
+
+html.dropzone-root,
+html.dropzone-root body { background: transparent !important; }
+
 body {
   background: var(--paper);
   color: var(--ink);
@@ -482,7 +490,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .desktop-app .dimension-preview { margin-top: 7px; padding-block: 6px; }
 .desktop-app .action-summary { margin: 0 15px 9px; }
 .desktop-app .compress-button { min-height: 39px; margin-inline: 15px; border-radius: 9px; font-size: 10px; }
-.desktop-app .watcher-page, .desktop-app .preferences-page { min-height: calc(100vh - var(--desktop-bar)); }
+.desktop-app .watcher-page, .desktop-app .preferences-page { height: calc(100vh - var(--desktop-bar) - 8px); min-height: 0; overflow-y: auto; }
 .desktop-app .watcher-page { max-width: 1080px; padding: 44px 32px; }
 .desktop-app .watcher-intro h1 { font-size: clamp(40px,4.3vw,58px); }
 .desktop-app .watcher-console { min-height: 420px; padding: 21px; }
@@ -610,14 +618,19 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 }
 
 /* Desktop 0.6 — high-DPI density, premium surfaces and native dark appearance */
-html[data-density="compact"] .desktop-app {
-  zoom: .88;
-  width: 113.64%;
-  min-height: 113.64vh;
-}
+html[data-density="compact"] .desktop-app { --desktop-bar: 52px; }
+html[data-density="compact"] .desktop-app .topbar { grid-template-columns: 196px 1fr 196px; }
+html[data-density="compact"] .desktop-app .workspace { grid-template-columns: 200px minmax(340px,1fr) 270px; }
+html[data-density="compact"] .desktop-app .queue-item { min-height: 62px; }
+html[data-density="compact"] .desktop-app .panel-heading { min-height: 55px; }
+html[data-density="compact"] .desktop-app .preview-panel { grid-template-rows: 55px minmax(310px,1fr) 59px; }
 
 .desktop-app {
   --paper: #e9eeea;
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   background:
     radial-gradient(circle at 48% -20%, rgba(217,255,116,.24), transparent 38%),
     linear-gradient(135deg, #edf1ee, #e4eae6);
@@ -631,7 +644,8 @@ html[data-density="compact"] .desktop-app {
   box-shadow: 0 12px 34px rgba(27,46,37,.08), inset 0 1px rgba(255,255,255,.8);
 }
 .desktop-app .workspace {
-  min-height: calc(100vh - var(--desktop-bar) - 8px);
+  height: calc(100vh - var(--desktop-bar) - 8px);
+  min-height: 0;
   padding: 10px;
   gap: 10px;
 }
@@ -644,8 +658,10 @@ html[data-density="compact"] .desktop-app {
   box-shadow: 0 16px 44px rgba(29,48,39,.07);
 }
 .desktop-app .settings-panel {
-  top: calc(var(--desktop-bar) + 18px);
-  height: calc(100vh - var(--desktop-bar) - 28px);
+  position: relative;
+  top: auto;
+  align-self: stretch;
+  height: 100%;
 }
 .desktop-app .preview-panel { background: rgba(231,237,232,.82); }
 .desktop-app .preview-stage {
@@ -773,7 +789,7 @@ html[data-theme="dark"] .watcher-page { color: #eef4f0; }
 html[data-theme="dark"] .watcher-log .log-row { border-color: #27332d; }
 html[data-theme="dark"] .log-icon { background: #202b25; color: #a6b8ad; }
 
-.drop-dock { height: 100vh; overflow: hidden; display: grid; grid-template-rows: 42px minmax(0,1fr) 46px; color: #edf5ef; background: radial-gradient(circle at 15% -15%, rgba(217,255,116,.2), transparent 42%), linear-gradient(145deg,#17211c,#0e1411 72%); border: 1px solid rgba(217,255,116,.18); border-radius: 16px; box-shadow: inset 0 1px rgba(255,255,255,.06); user-select: none; animation: dock-in .32s cubic-bezier(.2,.8,.2,1); }
+.drop-dock { position: relative; width: 100vw; height: 100vh; overflow: hidden; display: grid; grid-template-rows: 42px minmax(0,1fr) 46px; color: #edf5ef; background: radial-gradient(circle at 15% -15%, rgba(217,255,116,.2), transparent 42%), linear-gradient(145deg,#17211c,#0e1411 72%); border: 1px solid rgba(217,255,116,.24); border-radius: 22px; box-shadow: inset 0 1px rgba(255,255,255,.08), 0 18px 55px rgba(0,0,0,.28); user-select: none; animation: dock-in .32s cubic-bezier(.2,.8,.2,1); }
 .drop-dock::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit; background: linear-gradient(120deg, transparent 22%, rgba(255,255,255,.035), transparent 72%); }
 .drop-dock > header { padding: 0 12px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,.08); cursor: grab; }
 .dock-brand { display: flex; align-items: center; gap: 8px; font-size: 10px; letter-spacing: .2px; }
@@ -799,11 +815,15 @@ html[data-theme="dark"] .log-icon { background: #202b25; color: #a6b8ad; }
 .dock-results strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .dock-results small { color: #83958b; font-size: 7px; }
 .dock-results > div > b { color: var(--accent); font-size: 8px; }
-.drop-dock > footer { padding: 0 12px 0 15px; border-top: 1px solid rgba(255,255,255,.08); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.drop-dock > footer { padding: 0 27px 0 15px; border-top: 1px solid rgba(255,255,255,.08); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .drop-dock > footer > span { color: #82958a; font-size: 8px; }
 .drop-dock > footer b { color: #c8d5cd; }
 .drop-dock > footer button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--accent); color: #142119; font-size: 8px; font-weight: 900; cursor: pointer; }
 .drop-dock > footer button:disabled { opacity: .45; cursor: default; }
+.dock-resize-handle { position: absolute; z-index: 4; right: 3px; bottom: 3px; width: 23px; height: 23px; padding: 0; border: 0; background: transparent; cursor: nwse-resize; }
+.dock-resize-handle i { position: absolute; right: 4px; bottom: 4px; width: 8px; height: 1px; border-radius: 2px; background: rgba(217,255,116,.52); transform: rotate(-45deg); transform-origin: right center; }
+.dock-resize-handle i:nth-child(2) { width: 13px; bottom: 7px; opacity: .72; }
+.dock-resize-handle i:nth-child(3) { width: 18px; bottom: 10px; opacity: .42; }
 
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }

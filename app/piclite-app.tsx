@@ -85,10 +85,12 @@ type NativeBridge = {
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean }) => Promise<void>;
   setWindowTheme: (theme: ThemeMode) => Promise<void>;
+  startDragging: () => Promise<void>;
+  startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
   hideCurrentWindow: () => Promise<void>;
-  onFileDrop: (callback: (event: { type: "over" | "drop" | "leave"; paths?: string[] }) => void) => () => void;
+  onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
   onWatcherEvent: (callback: (event: WatcherEvent) => void) => () => void;
 };
@@ -233,6 +235,18 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   density: "auto",
   minimizeToTray: true,
 };
+
+function loadStoredDesktopPreferences(): DesktopPreferences {
+  if (typeof window === "undefined") return DEFAULT_DESKTOP_PREFERENCES;
+  try {
+    const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
+    return saved
+      ? { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences
+      : DEFAULT_DESKTOP_PREFERENCES;
+  } catch {
+    return DEFAULT_DESKTOP_PREFERENCES;
+  }
+}
 
 function presetSettings(mode: CompressionMode, quality: number, scale = 100): CompressionSettings {
   return { ...DEFAULT_SETTINGS, mode, quality, scale, watermark: { ...DEFAULT_SETTINGS.watermark } };
@@ -711,6 +725,11 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const [results, setResults] = useState<QuickCompressResult[]>([]);
   const lastPathsRef = useRef<string[]>([]);
 
+  useEffect(() => {
+    document.documentElement.classList.add("dropzone-root");
+    return () => document.documentElement.classList.remove("dropzone-root");
+  }, []);
+
   const runCompression = useCallback(async (paths: string[], nextQuality = quality, nextScale = scale) => {
     if (!paths.length || isProcessing) return;
     lastPathsRef.current = paths;
@@ -741,6 +760,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }, [bridge, initialSettings.format, initialSettings.stripMetadata, isProcessing, quality, scale]);
 
   useEffect(() => bridge.onFileDrop((event) => {
+    if (event.type === "error") {
+      setResults([{ source: "悬浮压缩坞", keptOriginal: false, error: event.error || "文件拖放监听不可用" }]);
+      return;
+    }
     setIsDragging(event.type === "over");
     if (event.type === "drop" && event.paths?.length) void runCompression(event.paths);
   }), [bridge, runCompression]);
@@ -766,10 +789,23 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     void runCompression(lastPathsRef.current, nextQuality, nextScale);
   }, [quality, runCompression, scale]);
 
+  const startDockDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    event.preventDefault();
+    void bridge.startDragging();
+  }, [bridge]);
+
+  const startDockResize = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void bridge.startResizeDragging("SouthEast");
+  }, [bridge]);
+
   return (
     <main className={`drop-dock ${isDragging ? "dragging" : ""}`}>
-      <header data-tauri-drag-region>
-        <span className="dock-brand"><i>✦</i><b>PicLite Drop</b></span>
+      <header data-tauri-drag-region onPointerDown={startDockDrag}>
+        <span className="dock-brand" data-tauri-drag-region><i data-tauri-drag-region>✦</i><b data-tauri-drag-region>PicLite Drop</b></span>
         <span className="dock-actions">
           <button type="button" title="打开主窗口" onClick={() => void bridge.showMainWindow()}>↗</button>
           <button type="button" title="隐藏压缩坞" onClick={() => void bridge.hideCurrentWindow()}>×</button>
@@ -797,6 +833,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         <span><b>{quality}%</b> 画质 · <b>{formatScale(scale)}</b> 尺寸</span>
         <button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={compressFurther}>{isProcessing ? "处理中…" : "继续压小 −22%"}</button>
       </footer>
+      <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
   );
 }
@@ -812,7 +849,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settings, setSettings] = useState<CompressionSettings>(loadStoredSettings);
   const [presets, setPresets] = useState<SavedPreset[]>(loadStoredPresets);
-  const [activePresetId, setActivePresetId] = useState("lossless");
+  const [activePresetId, setActivePresetId] = useState(() => typeof window === "undefined" ? "current" : window.localStorage.getItem("piclite.activePreset.v1") || "current");
   const [presetDialogOpen, setPresetDialogOpen] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [pendingTrayAction, setPendingTrayAction] = useState<string | null>(null);
@@ -824,10 +861,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [dragging, setDragging] = useState(false);
   const [processingAll, setProcessingAll] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(DEFAULT_DESKTOP_PREFERENCES);
-  const [exportMode, setExportMode] = useState<ExportMode>(() => typeof window !== "undefined" && window.picLite ? DEFAULT_DESKTOP_PREFERENCES.exportMode : "download");
-  const [exportSuffix, setExportSuffix] = useState("-piclite");
-  const [exportFolderName, setExportFolderName] = useState("");
+  const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(loadStoredDesktopPreferences);
+  const [exportMode, setExportMode] = useState<ExportMode>(() => typeof window !== "undefined" && window.picLite ? loadStoredDesktopPreferences().exportMode : "download");
+  const [exportSuffix, setExportSuffix] = useState(() => loadStoredDesktopPreferences().exportSuffix);
+  const [exportFolderName, setExportFolderName] = useState(() => loadStoredDesktopPreferences().exportFolder);
   const [localFonts, setLocalFonts] = useState<string[]>(["Microsoft YaHei", "PingFang SC", "Arial", "SimSun"]);
   const [toast, setToast] = useState<string | null>(null);
   const [watcherSettings, setWatcherSettings] = useState<WatcherSettings>(() => {
@@ -853,6 +890,12 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
+
+  useEffect(() => {
+    if (!nativeBridge) return;
+    document.documentElement.classList.add("desktop-root");
+    return () => document.documentElement.classList.remove("desktop-root");
+  }, [nativeBridge]);
 
   const selected = useMemo(() => items.find((item) => item.id === selectedId) || items[0] || null, [items, selectedId]);
   const selectedTarget = useMemo(() => selected ? getTargetDimensions(selected, settings) : null, [selected, settings]);
@@ -895,19 +938,13 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
   useEffect(() => {
     if (!nativeBridge) return;
-    try {
-      const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
-      const next = saved ? { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences : DEFAULT_DESKTOP_PREFERENCES;
-      setDesktopPreferences(next);
-      setExportMode(next.exportMode);
-      setExportSuffix(next.exportSuffix);
-      setExportFolderName(next.exportFolder);
-      setSettings((current) => ({ ...current, preventLarger: next.preventLarger }));
-    } catch {
-      setDesktopPreferences(DEFAULT_DESKTOP_PREFERENCES);
-    } finally {
-      desktopPreferencesReadyRef.current = true;
-    }
+    setExportMode(desktopPreferences.exportMode);
+    setExportSuffix(desktopPreferences.exportSuffix);
+    setExportFolderName(desktopPreferences.exportFolder);
+    setSettings((current) => ({ ...current, preventLarger: desktopPreferences.preventLarger }));
+    desktopPreferencesReadyRef.current = true;
+    // 桌面偏好已经通过 useState 同步初始化，这里只建立原生窗口状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeBridge]);
 
   useEffect(() => {
@@ -933,21 +970,33 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         ? (media.matches ? "dark" : "light")
         : desktopPreferences.theme;
       const resolvedDensity = desktopPreferences.density === "auto"
-        ? (window.devicePixelRatio >= 1.25 ? "compact" : "comfortable")
+        ? (window.innerWidth < 1040 || window.innerHeight < 640 ? "compact" : "comfortable")
         : desktopPreferences.density;
       document.documentElement.dataset.theme = resolvedTheme;
       document.documentElement.dataset.density = resolvedDensity;
       document.documentElement.style.colorScheme = resolvedTheme;
-      if (nativeBridge) void nativeBridge.setWindowTheme(desktopPreferences.theme);
+      if (nativeBridge) void nativeBridge.setWindowTheme(desktopPreferences.theme).catch(() => showToast("系统主题同步失败，已保留应用内主题"));
     };
     applyAppearance();
     media.addEventListener("change", applyAppearance);
-    return () => media.removeEventListener("change", applyAppearance);
-  }, [desktopPreferences.density, desktopPreferences.theme, nativeBridge]);
+    window.addEventListener("resize", applyAppearance);
+    return () => {
+      media.removeEventListener("change", applyAppearance);
+      window.removeEventListener("resize", applyAppearance);
+    };
+  }, [desktopPreferences.density, desktopPreferences.theme, nativeBridge, showToast]);
 
   useEffect(() => {
     window.localStorage.setItem("piclite.customPresets.v1", JSON.stringify(presets.filter((preset) => preset.custom)));
   }, [presets]);
+
+  useEffect(() => {
+    const active = presets.find((preset) => preset.id === activePresetId);
+    if (!active || JSON.stringify(active.settings) !== JSON.stringify(settings)) {
+      if (activePresetId !== "current") setActivePresetId("current");
+    }
+    window.localStorage.setItem("piclite.activePreset.v1", activePresetId);
+  }, [activePresetId, presets, settings]);
 
   useEffect(() => {
     window.localStorage.setItem("piclite.watcherSettings.v1", JSON.stringify(watcherSettings));
@@ -982,6 +1031,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   useEffect(() => {
     if (!nativeBridge) return;
     return nativeBridge.onFileDrop((event) => {
+      if (event.type === "error") {
+        showToast(event.error || "系统文件拖放监听不可用");
+        return;
+      }
       setDragging(event.type === "over");
       if (event.type !== "drop" || !event.paths?.length) return;
       void nativeBridge.readImagesFromPaths(event.paths).then((nativeImages) => addSources(nativeImages.map((image) => ({
@@ -989,7 +1042,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         sourcePath: image.path,
       }))));
     });
-  }, [addSources, nativeBridge]);
+  }, [addSources, nativeBridge, showToast]);
 
   useEffect(() => nativeBridge?.onTrayAction(setPendingTrayAction), [nativeBridge]);
 
@@ -1400,8 +1453,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       setView("preferences");
       return;
     }
-    if (action === "toggle_watcher") {
-      void toggleWatcher();
+    if (action === "watcher_settings") {
+      setView("watcher");
       return;
     }
     if (action.startsWith("theme_")) {
@@ -1425,7 +1478,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     }
     const preset = presets.find((candidate) => candidate.id === presetId);
     if (preset) applyPreset(preset);
-  }, [applyPreset, pendingTrayAction, presets, showToast, toggleWatcher]);
+  }, [applyPreset, pendingTrayAction, presets, showToast]);
 
   const onDrop = useCallback((event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -1595,7 +1648,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               <div className="select-wrap"><select aria-label="压缩预设" value={activePresetId} onChange={(event) => {
                 const preset = presets.find((candidate) => candidate.id === event.target.value);
                 if (preset) applyPreset(preset);
-              }}>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.custom ? `自定义 · ${preset.name}` : preset.name}</option>)}</select></div>
+              }}><option value="current">当前参数（自动保存）</option>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.custom ? `自定义 · ${preset.name}` : preset.name}</option>)}</select></div>
               <button type="button" title="保存当前参数为预设" onClick={() => setPresetDialogOpen(true)}>＋ 保存</button>
               {presets.find((preset) => preset.id === activePresetId)?.custom && <button className="preset-delete" type="button" title="删除当前预设" onClick={deleteActivePreset}>删除</button>}
             </div>
@@ -1849,9 +1902,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.1 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.0 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.1 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>
