@@ -433,11 +433,62 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .log-row small { font-size: 8px; color: #929f98; }
 .log-row > b { font-size: 10px; color: var(--success); }
 
-.desktop-app { --paper: #eef2ed; }
-.desktop-app .topbar { background: rgba(250,252,249,.94); box-shadow: 0 7px 25px rgba(30,50,42,.035); }
-.desktop-app .workspace { max-width: none; }
+.desktop-app { --paper: #eef2ed; --desktop-bar: 56px; }
+.desktop-app .topbar { height: var(--desktop-bar); padding-inline: 16px; grid-template-columns: 218px 1fr 218px; background: rgba(250,252,249,.94); box-shadow: 0 7px 25px rgba(30,50,42,.035); }
+.desktop-app .brand { gap: 8px; }
+.desktop-app .brand-mark { width: 27px; height: 27px; border-radius: 8px; }
+.desktop-app .brand strong { font-size: 17px; }
+.desktop-app .brand small { font-size: 10px; }
+.desktop-app .main-nav { gap: 21px; }
+.desktop-app .main-nav button { font-size: 11px; }
+.desktop-app .privacy-badge { padding: 5px 9px; font-size: 9px; }
+.desktop-app .icon-button { width: 28px; height: 28px; font-size: 11px; }
+.desktop-app .workspace { min-height: calc(100vh - var(--desktop-bar)); max-width: none; grid-template-columns: 218px minmax(360px, 1fr) 286px; }
 .desktop-app .queue-panel, .desktop-app .settings-panel { background: rgba(252,253,251,.96); }
-.desktop-app .preview-panel { background: #e7ece7; }
+.desktop-app .settings-panel { top: var(--desktop-bar); height: calc(100vh - var(--desktop-bar)); padding-bottom: 12px; }
+.desktop-app .panel-heading { min-height: 61px; padding: 12px 15px 10px; }
+.desktop-app .panel-heading strong { font-size: 12px; }
+.desktop-app .import-button { min-height: 35px; margin: 11px 13px 9px; border-radius: 8px; font-size: 10px; }
+.desktop-app .queue-list { min-height: 180px; padding-inline: 6px; }
+.desktop-app .queue-empty { min-height: 220px; }
+.desktop-app .queue-item { min-height: 68px; grid-template-columns: 44px minmax(0,1fr) 17px; gap: 8px; padding: 7px; border-radius: 9px; }
+.desktop-app .queue-item > img { width: 44px; height: 44px; border-radius: 7px; }
+.desktop-app .queue-copy > strong { font-size: 9px; }
+.desktop-app .queue-copy small, .desktop-app .item-status { font-size: 8px; }
+.desktop-app .queue-footer { padding: 10px 13px 12px; }
+.desktop-app .paste-button { height: 31px; font-size: 9px; }
+.desktop-app .preview-panel { grid-template-rows: 61px minmax(330px, 1fr) 65px; background: #e7ece7; }
+.desktop-app .preview-toolbar { padding-inline: 14px; gap: 9px; grid-template-columns: minmax(100px,1fr) auto minmax(138px,1fr); }
+.desktop-app .preview-toolbar strong { font-size: 11px; }
+.desktop-app .preview-stage { padding: 17px; }
+.desktop-app .hero-dropzone { width: min(100%, 620px); height: min(100%, 430px); min-height: 300px; border-radius: 18px; }
+.desktop-app .drop-visual { transform: scale(.78); margin: -9px 0 -2px; }
+.desktop-app .hero-copy strong { font-size: clamp(24px, 2.6vw, 34px); }
+.desktop-app .hero-copy p { margin-top: 7px; font-size: 10px; }
+.desktop-app .supported-formats { bottom: 14px; }
+.desktop-app .result-strip { grid-template-columns: minmax(76px,1fr) 22px minmax(76px,1fr) minmax(86px,1fr) 126px; padding: 9px 13px; }
+.desktop-app .result-strip div strong { font-size: 11px; }
+.desktop-app .savings-pill { padding: 6px 10px; }
+.desktop-app .export-button { height: 36px; border-radius: 8px; font-size: 10px; }
+.desktop-app .setting-section { padding: 13px 15px; }
+.desktop-app .setting-section.compact { padding-block: 11px; }
+.desktop-app .setting-label { margin-bottom: 8px; font-size: 9px; }
+.desktop-app .mode-grid button { min-height: 60px; border-radius: 8px; padding-block: 5px; }
+.desktop-app .mode-grid button > span { font-size: 15px; line-height: 17px; }
+.desktop-app .slider-heading { margin-bottom: 8px; }
+.desktop-app .live-size-card { margin-top: 8px; padding: 9px 10px; border-radius: 8px; }
+.desktop-app .live-size-card > strong { font-size: 14px; }
+.desktop-app .scale-presets { margin-top: 8px; }
+.desktop-app .dimension-preview { margin-top: 7px; padding-block: 6px; }
+.desktop-app .action-summary { margin: 0 15px 9px; }
+.desktop-app .compress-button { min-height: 39px; margin-inline: 15px; border-radius: 9px; font-size: 10px; }
+.desktop-app .watcher-page, .desktop-app .preferences-page { min-height: calc(100vh - var(--desktop-bar)); }
+.desktop-app .watcher-page { max-width: 1080px; padding: 44px 32px; }
+.desktop-app .watcher-intro h1 { font-size: clamp(40px,4.3vw,58px); }
+.desktop-app .watcher-console { min-height: 420px; padding: 21px; }
+.desktop-app .preferences-page { max-width: 1030px; padding: 40px 32px 58px; gap: 50px; }
+.desktop-app .preferences-aside { top: 96px; }
+.desktop-app .preferences-aside h1 { font-size: clamp(36px,4vw,54px); }
 
 .preferences-page { min-height: calc(100vh - 70px); max-width: 1180px; margin: 0 auto; padding: 58px 38px 80px; display: grid; grid-template-columns: minmax(260px,.72fr) minmax(520px,1.35fr); gap: 72px; align-items: start; }
 .preferences-aside { position: sticky; top: 128px; }

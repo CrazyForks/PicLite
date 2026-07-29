@@ -108,6 +108,7 @@ type ImageItem = {
   status: ItemStatus;
   error?: string;
   keptOriginal?: boolean;
+  sizeGuardQuality?: number;
   fileHandle?: FileHandleLike;
   sourcePath?: string;
 };
@@ -546,17 +547,39 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   return { blob: result, width, height };
 }
 
-type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean };
+type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean; sizeGuardQuality?: number };
 
 async function compressImage(item: ImageItem, settings: CompressionSettings): Promise<CompressionResult> {
-  const candidate = item.type === "image/gif" && settings.format === "keep"
-    ? await animatedGifCompress(item, settings)
-    : await canvasCompress(item, settings);
+  const encodeCandidate = (candidateSettings: CompressionSettings) => item.type === "image/gif" && candidateSettings.format === "keep"
+    ? animatedGifCompress(item, candidateSettings)
+    : canvasCompress(item, candidateSettings);
+  const candidate = await encodeCandidate(settings);
   const hasVisualTransform = candidate.width !== item.width
     || candidate.height !== item.height
     || settings.format !== "keep"
     || settings.watermark.enabled;
-  if (settings.preventLarger && !hasVisualTransform && candidate.blob.size >= item.originalBytes) {
+
+  if (settings.preventLarger && candidate.blob.size >= item.originalBytes) {
+    if (hasVisualTransform && settings.quality > 1) {
+      const qualitySteps = Array.from(new Set([
+        settings.quality - 4,
+        settings.quality - 8,
+        settings.quality - 14,
+        settings.quality - 22,
+        settings.quality - 32,
+        settings.quality - 44,
+        settings.quality - 58,
+        settings.quality - 72,
+        1,
+      ].map((quality) => Math.max(1, Math.round(quality))))).filter((quality) => quality < settings.quality);
+
+      for (const quality of qualitySteps) {
+        const guardedCandidate = await encodeCandidate({ ...settings, quality });
+        if (guardedCandidate.blob.size < item.originalBytes) {
+          return { ...guardedCandidate, sizeGuardQuality: quality };
+        }
+      }
+    }
     return { blob: item.file, width: item.width, height: item.height, keptOriginal: true };
   }
   return candidate;
@@ -718,7 +741,7 @@ export function PicLiteApp() {
     }
     setItems((current) => current.map((item) => {
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
-      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, status: "ready", error: undefined };
+      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, sizeGuardQuality: undefined, status: "ready", error: undefined };
     }));
   }, [settings]);
 
@@ -746,6 +769,7 @@ export function PicLiteApp() {
             outputWidth: result.width,
             outputHeight: result.height,
             keptOriginal: result.keptOriginal,
+            sizeGuardQuality: result.sizeGuardQuality,
             status: "done",
           };
         }));
@@ -796,7 +820,7 @@ export function PicLiteApp() {
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
-        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, status: "done" };
+        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" };
       }));
     } catch (error) {
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "压缩失败" } : candidate));
@@ -832,7 +856,7 @@ export function PicLiteApp() {
       setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", error: undefined } : candidate));
       const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
-      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, status: "done" as const };
+      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" as const };
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== item.id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
@@ -1048,10 +1072,10 @@ export function PicLiteApp() {
 
   const startPreviewPan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
-    if (target.closest(".compare-handle")) return;
+    if (!selected || target.closest("button, input, select, a, .compare-handle")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     previewDragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPan.x, panY: previewPan.y };
-  }, [previewPan]);
+  }, [previewPan, selected]);
 
   const movePreviewPan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = previewDragRef.current;
@@ -1289,9 +1313,9 @@ export function PicLiteApp() {
               <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
                 <span><i /> 实时试压结果</span>
                 <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
-                <small>{selected?.outputBytes ? selected.keptOriginal ? "候选文件更大，智能保留原图" : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
+                <small>{selected?.outputBytes ? selected.keptOriginal ? "所有候选都更大，已保留原图" : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 已自动调整编码质量至 ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
               </div>
-              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。若没有尺寸、格式或水印变化且候选文件更大，会自动保留原图。</p>
+              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。开启体积保护时，缩放后若候选变大，会自动寻找不超过原文件的合适编码质量。</p>
             </div>
 
             <div className="setting-section slider-section">
@@ -1364,7 +1388,7 @@ export function PicLiteApp() {
 
             <div className="setting-section compact">
               <label className="check-row"><input type="checkbox" checked={settings.stripMetadata} onChange={(event) => setSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span><strong>移除隐私元数据</strong><small>删除位置、相机与拍摄信息</small></span></label>
-              {!nativeBridge && <label className="check-row secondary-check"><input type="checkbox" checked={settings.preventLarger} onChange={(event) => setSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span><strong>智能保留较小文件</strong><small>没有视觉变换时不输出更大的候选文件</small></span></label>}
+              {!nativeBridge && <label className="check-row secondary-check"><input type="checkbox" checked={settings.preventLarger} onChange={(event) => setSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span><strong>始终避免文件变大</strong><small>必要时自动降低编码质量；仍无法变小时保留原图</small></span></label>}
             </div>
 
             <div className={`setting-section export-settings ${nativeBridge ? "desktop-hidden-setting" : ""}`}>
@@ -1470,16 +1494,16 @@ export function PicLiteApp() {
             <section className="preference-card">
               <div className="preference-card-heading"><span>压缩行为</span><small>全局保护策略</small></div>
               <label className="preference-row clickable">
-                <div><strong>智能保留较小文件</strong><small>未改变尺寸、格式或水印时，如果候选文件更大就保留原图</small></div>
+                <div><strong>始终避免文件变大</strong><small>缩放结果偏大时自动调整编码质量；仍无法变小时保留原图</small></div>
                 <button className={`switch ${desktopPreferences.preventLarger ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.preventLarger} onClick={() => setDesktopPreferences((current) => ({ ...current, preventLarger: !current.preventLarger }))}><i /></button>
               </label>
             </section>
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.5.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.5.1 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.5.0 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.5.1 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>

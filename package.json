@@ -1,6 +1,6 @@
 {
   "name": "piclite",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "本地优先、可自托管的跨平台图片与 GIF 压缩工作台",
   "author": {
     "name": "PicLite contributors",
