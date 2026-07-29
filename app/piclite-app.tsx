@@ -5,6 +5,7 @@ import {
   ChangeEvent,
   CSSProperties,
   DragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
   useCallback,
@@ -14,6 +15,8 @@ import {
   useState,
 } from "react";
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
+import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
+import { register as registerGlobalShortcut, unregisterAll as unregisterAllGlobalShortcuts } from "@tauri-apps/plugin-global-shortcut";
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
@@ -24,6 +27,7 @@ type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
 type WatermarkLayout = "tile" | "single";
 type ThemeMode = "system" | "light" | "dark";
 type UiDensity = "auto" | "comfortable" | "compact";
+type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 
 type WritableFileLike = {
   write: (data: Blob) => Promise<void>;
@@ -165,8 +169,14 @@ type DesktopPreferences = {
   confirmOverwrite: boolean;
   preventLarger: boolean;
   theme: ThemeMode;
+  dockTheme: ThemeMode;
   density: UiDensity;
   minimizeToTray: boolean;
+  launchAtStartup: boolean;
+  shortcutsEnabled: boolean;
+  shortcutShow: string;
+  shortcutPaste: string;
+  shortcutDock: string;
 };
 
 type SavedPreset = {
@@ -232,8 +242,14 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   confirmOverwrite: true,
   preventLarger: true,
   theme: "system",
+  dockTheme: "system",
   density: "auto",
   minimizeToTray: true,
+  launchAtStartup: false,
+  shortcutsEnabled: true,
+  shortcutShow: "CommandOrControl+Alt+P",
+  shortcutPaste: "CommandOrControl+Alt+V",
+  shortcutDock: "CommandOrControl+Alt+D",
 };
 
 function loadStoredDesktopPreferences(): DesktopPreferences {
@@ -246,6 +262,37 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
   }
+}
+
+function resolveTheme(theme: ThemeMode) {
+  return theme === "system"
+    ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+    : theme;
+}
+
+function shortcutFromKeyboardEvent(event: ReactKeyboardEvent<HTMLElement>) {
+  const key = event.key;
+  if (["Control", "Meta", "Alt", "Shift"].includes(key)) return null;
+  if (key === "Escape") return "escape";
+  if (key === "Backspace" || key === "Delete") return "";
+  const modifiers: string[] = [];
+  if (event.metaKey || event.ctrlKey) modifiers.push("CommandOrControl");
+  if (event.altKey) modifiers.push("Alt");
+  if (event.shiftKey) modifiers.push("Shift");
+  if (!modifiers.length) return null;
+  const normalizedKey = key.length === 1 ? key.toUpperCase() : key.replace(/^Arrow/, "");
+  return [...modifiers, normalizedKey].join("+");
+}
+
+function shortcutLabel(value: string, platform: string) {
+  if (!value) return "未设置";
+  const labels = value.split("+").map((part) => {
+    if (part === "CommandOrControl") return platform === "darwin" ? "⌘" : "Ctrl";
+    if (part === "Alt") return platform === "darwin" ? "⌥" : "Alt";
+    if (part === "Shift") return platform === "darwin" ? "⇧" : "Shift";
+    return part;
+  });
+  return labels.join(platform === "darwin" ? "  " : " + ");
 }
 
 function presetSettings(mode: CompressionMode, quality: number, scale = 100): CompressionSettings {
@@ -718,8 +765,10 @@ function fileNameFromPath(path: string) {
 
 function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const initialSettings = useMemo(loadStoredSettings, []);
+  const initialPreferences = useMemo(loadStoredDesktopPreferences, []);
   const [quality, setQuality] = useState(initialSettings.quality);
   const [scale, setScale] = useState(initialSettings.scale);
+  const [dockTheme, setDockTheme] = useState<ThemeMode>(initialPreferences.dockTheme);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<QuickCompressResult[]>([]);
@@ -769,17 +818,42 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }), [bridge, runCompression]);
 
   useEffect(() => {
-    let preferences = DEFAULT_DESKTOP_PREFERENCES;
-    try {
-      const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
-      if (saved) preferences = { ...preferences, ...JSON.parse(saved) };
-    } catch { /* 使用默认主题 */ }
-    const resolvedTheme = preferences.theme === "system"
-      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-      : preferences.theme;
-    document.documentElement.dataset.theme = resolvedTheme;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyDockTheme = () => {
+      document.documentElement.dataset.theme = resolveTheme(dockTheme);
+      document.documentElement.style.colorScheme = resolveTheme(dockTheme);
+    };
+    applyDockTheme();
     document.documentElement.dataset.density = "comfortable";
+    media.addEventListener("change", applyDockTheme);
+    return () => media.removeEventListener("change", applyDockTheme);
+  }, [dockTheme]);
+
+  useEffect(() => {
+    const syncPreferences = (event: StorageEvent) => {
+      if (event.key !== "piclite.desktopPreferences.v1") return;
+      setDockTheme(loadStoredDesktopPreferences().dockTheme);
+    };
+    window.addEventListener("storage", syncPreferences);
+    return () => window.removeEventListener("storage", syncPreferences);
   }, []);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("piclite.compressionSettings.v2");
+      const current = saved ? JSON.parse(saved) as Partial<CompressionSettings> : {};
+      window.localStorage.setItem("piclite.compressionSettings.v2", JSON.stringify({ ...DEFAULT_SETTINGS, ...current, quality, scale, watermark: { ...DEFAULT_SETTINGS.watermark, ...current.watermark } }));
+    } catch { /* 本次悬浮窗仍可继续使用 */ }
+  }, [quality, scale]);
+
+  const toggleDockTheme = useCallback(() => {
+    const next = resolveTheme(dockTheme) === "dark" ? "light" : "dark";
+    setDockTheme(next);
+    try {
+      const preferences = loadStoredDesktopPreferences();
+      window.localStorage.setItem("piclite.desktopPreferences.v1", JSON.stringify({ ...preferences, dockTheme: next }));
+    } catch { /* 主题至少对当前窗口立即生效 */ }
+  }, [dockTheme]);
 
   const compressFurther = useCallback(() => {
     const nextQuality = Math.max(1, Math.round(quality * 0.78));
@@ -807,6 +881,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       <header data-tauri-drag-region onPointerDown={startDockDrag}>
         <span className="dock-brand" data-tauri-drag-region><i data-tauri-drag-region>✦</i><b data-tauri-drag-region>PicLite Drop</b></span>
         <span className="dock-actions">
+          <button type="button" title={resolveTheme(dockTheme) === "dark" ? "切换浅色" : "切换深色"} onClick={toggleDockTheme}>{resolveTheme(dockTheme) === "dark" ? "☀" : "☾"}</button>
           <button type="button" title="打开主窗口" onClick={() => void bridge.showMainWindow()}>↗</button>
           <button type="button" title="隐藏压缩坞" onClick={() => void bridge.hideCurrentWindow()}>×</button>
         </span>
@@ -829,9 +904,12 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
           </div>
         )}
       </section>
+      <div className="dock-controls">
+        <label htmlFor="dock-scale"><span>输出尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onChange={(event) => setScale(Number(event.target.value))} /><b>{formatScale(scale)}</b></label>
+      </div>
       <footer>
-        <span><b>{quality}%</b> 画质 · <b>{formatScale(scale)}</b> 尺寸</span>
-        <button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={compressFurther}>{isProcessing ? "处理中…" : "继续压小 −22%"}</button>
+        <span><b>{quality}%</b> 画质</span>
+        <span className="dock-footer-actions"><button className="dock-further-button" type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={compressFurther}>−22%</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "按参数重压"}</button></span>
       </footer>
       <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
@@ -862,6 +940,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [processingAll, setProcessingAll] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(loadStoredDesktopPreferences);
+  const [recordingShortcut, setRecordingShortcut] = useState<ShortcutPreferenceKey | null>(null);
   const [exportMode, setExportMode] = useState<ExportMode>(() => typeof window !== "undefined" && window.picLite ? loadStoredDesktopPreferences().exportMode : "download");
   const [exportSuffix, setExportSuffix] = useState(() => loadStoredDesktopPreferences().exportSuffix);
   const [exportFolderName, setExportFolderName] = useState(() => loadStoredDesktopPreferences().exportFolder);
@@ -886,6 +965,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const itemsRef = useRef<ImageItem[]>([]);
   const settingsReadyRef = useRef(false);
   const desktopPreferencesReadyRef = useRef(false);
+  const shortcutRegistrationGenerationRef = useRef(0);
+  const importFromClipboardRef = useRef<(() => Promise<void>) | null>(null);
   const livePreviewGenerationRef = useRef(0);
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
@@ -946,6 +1027,13 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     // 桌面偏好已经通过 useState 同步初始化，这里只建立原生窗口状态。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeBridge]);
+
+  useEffect(() => {
+    if (!nativeBridge) return;
+    void isAutostartEnabled()
+      .then((enabled) => setDesktopPreferences((current) => current.launchAtStartup === enabled ? current : { ...current, launchAtStartup: enabled }))
+      .catch(() => showToast("无法读取系统开机启动状态"));
+  }, [nativeBridge, showToast]);
 
   useEffect(() => {
     if (!nativeBridge || !desktopPreferencesReadyRef.current) return;
@@ -1301,6 +1389,67 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       showToast("请直接按 Ctrl + V 粘贴剪贴板图片");
     }
   }, [addFiles, nativeBridge, showToast]);
+
+  useEffect(() => {
+    importFromClipboardRef.current = importFromClipboard;
+  }, [importFromClipboard]);
+
+  const toggleAutostart = useCallback(async () => {
+    if (!nativeBridge) return;
+    const next = !desktopPreferences.launchAtStartup;
+    try {
+      if (next) await enableAutostart();
+      else await disableAutostart();
+      setDesktopPreferences((current) => ({ ...current, launchAtStartup: next }));
+      showToast(next ? "已开启开机自启动，将静默进入系统托盘" : "已关闭开机自启动");
+    } catch {
+      showToast("开机自启动设置失败，请检查系统权限");
+    }
+  }, [desktopPreferences.launchAtStartup, nativeBridge, showToast]);
+
+  const captureShortcut = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, preference: ShortcutPreferenceKey) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const shortcut = shortcutFromKeyboardEvent(event);
+    if (shortcut === null) return;
+    if (shortcut === "escape") {
+      setRecordingShortcut(null);
+      return;
+    }
+    setDesktopPreferences((current) => ({ ...current, [preference]: shortcut }));
+    setRecordingShortcut(null);
+    showToast(shortcut ? "快捷键已更新" : "快捷键已清除");
+  }, [showToast]);
+
+  useEffect(() => {
+    if (!nativeBridge || !desktopPreferences.shortcutsEnabled) return;
+    const generation = ++shortcutRegistrationGenerationRef.current;
+    const shortcuts = [
+      { value: desktopPreferences.shortcutShow, action: () => void nativeBridge.showMainWindow() },
+      { value: desktopPreferences.shortcutPaste, action: () => { void nativeBridge.showMainWindow(); setView("workspace"); void importFromClipboardRef.current?.(); } },
+      { value: desktopPreferences.shortcutDock, action: () => void nativeBridge.showDropzoneWindow() },
+    ].filter((entry, index, entries) => entry.value && entries.findIndex((candidate) => candidate.value === entry.value) === index);
+
+    void (async () => {
+      try {
+        await unregisterAllGlobalShortcuts();
+        if (generation !== shortcutRegistrationGenerationRef.current) return;
+        for (const shortcut of shortcuts) {
+          await registerGlobalShortcut(shortcut.value, (event) => {
+            if (event.state === "Pressed") shortcut.action();
+          });
+          if (generation !== shortcutRegistrationGenerationRef.current) return;
+        }
+      } catch {
+        if (generation === shortcutRegistrationGenerationRef.current) showToast("部分全局快捷键被其他软件占用，请重新设置");
+      }
+    })();
+
+    return () => {
+      if (shortcutRegistrationGenerationRef.current === generation) shortcutRegistrationGenerationRef.current += 1;
+      void unregisterAllGlobalShortcuts();
+    };
+  }, [desktopPreferences.shortcutDock, desktopPreferences.shortcutPaste, desktopPreferences.shortcutShow, desktopPreferences.shortcutsEnabled, nativeBridge, showToast]);
 
   const importImages = useCallback(async () => {
     try {
@@ -1891,20 +2040,38 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                   {([['auto', '自动'], ['comfortable', '标准'], ['compact', '紧凑']] as const).map(([value, label]) => <button className={desktopPreferences.density === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, density: value }))}>{label}</button>)}
                 </div>
               </div>
+              <div className="preference-row column">
+                <div><strong>悬浮压缩坞主题</strong><small>可以独立于主窗口选择浅色、深色或跟随系统</small></div>
+                <div className="preference-segments">
+                  {([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([value, label]) => <button className={desktopPreferences.dockTheme === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, dockTheme: value }))}>{label}</button>)}
+                </div>
+              </div>
             </section>
 
             <section className="preference-card">
               <div className="preference-card-heading"><span>系统托盘</span><small>后台常驻行为</small></div>
-              <div className="preference-row"><div><strong>关闭时留在托盘</strong><small>已固定开启：点关闭按钮只隐藏窗口，文件夹监测继续运行</small></div><span className="always-on-badge">始终开启</span></div>
+              <div className="preference-row"><div><strong>仅在系统托盘 / 菜单栏显示</strong><small>任务栏与 macOS Dock 不保留图标，主窗口关闭后仍在后台运行</small></div><span className="always-on-badge">始终开启</span></div>
+              <label className="preference-row clickable"><div><strong>开机自启动</strong><small>登录系统后静默进入托盘，不主动弹出主窗口</small></div><button className={`switch ${desktopPreferences.launchAtStartup ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.launchAtStartup} onClick={() => void toggleAutostart()}><i /></button></label>
               <label className="preference-row clickable"><div><strong>最小化时留在托盘</strong><small>不占用任务栏；从托盘左键恢复主窗口</small></div><button className={`switch ${desktopPreferences.minimizeToTray ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.minimizeToTray} onClick={() => setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }))}><i /></button></label>
               <div className="preference-row"><div><strong>悬浮压缩坞</strong><small>拖入图片后按上次参数直接输出，不覆盖源图</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>立即打开</button></div>
             </section>
 
+            <section className="preference-card">
+              <div className="preference-card-heading"><span>全局快捷键</span><small>窗口隐藏后仍然有效</small></div>
+              <label className="preference-row clickable"><div><strong>启用全局快捷键</strong><small>如果组合键与其他软件冲突，可以关闭或重新录制</small></div><button className={`switch ${desktopPreferences.shortcutsEnabled ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.shortcutsEnabled} onClick={() => setDesktopPreferences((current) => ({ ...current, shortcutsEnabled: !current.shortcutsEnabled }))}><i /></button></label>
+              {([
+                ["shortcutShow", "显示主窗口", "从任何软件快速唤起 PicLite"],
+                ["shortcutPaste", "导入剪贴板图片", "唤起工作台并读取当前剪贴板图片"],
+                ["shortcutDock", "打开悬浮压缩坞", "直接显示可拖入图片的压缩坞"],
+              ] as const).map(([preference, title, note]) => <div className="preference-row shortcut-row" key={preference}><div><strong>{title}</strong><small>{note}</small></div><button className={`shortcut-recorder ${recordingShortcut === preference ? "recording" : ""}`} type="button" disabled={!desktopPreferences.shortcutsEnabled} onClick={() => setRecordingShortcut(preference)} onBlur={() => setRecordingShortcut((current) => current === preference ? null : current)} onKeyDown={(event) => recordingShortcut === preference && captureShortcut(event, preference)}>{recordingShortcut === preference ? "请按组合键…" : shortcutLabel(desktopPreferences[preference], nativeBridge?.platform || "win32")}</button></div>)}
+              <p className="shortcut-help">点击组合键后直接按新的按键；按 Delete 清除，按 Esc 取消。为避免误触，快捷键必须包含 Ctrl/⌘ 或 Alt。</p>
+            </section>
+
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.1 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.2 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.1 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.2 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>

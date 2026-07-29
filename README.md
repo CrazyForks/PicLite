@@ -27,9 +27,11 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 - 下载、覆盖源文件、同文件夹重命名、固定文件夹四种导出模式
 - 桌面端使用 Tauri 2 + Rust，原生处理文件选择、剪贴板、导出和文件夹监测
 - 紧凑桌面布局，适配 Windows 125% / 150% 显示缩放和常见笔记本分辨率
-- 自动高 DPI 界面密度、浅色 / 深色 / 跟随系统主题
-- 系统托盘常驻：关闭或最小化主窗口后继续监测，托盘右键可切换主题、密度、预设和监测状态
-- 托盘唤起的置顶悬浮压缩坞：拖入图片即按上次参数输出，并可一键“继续压小”
+- 自动高 DPI 界面密度、完整浅色 / 深色 / 跟随系统主题，窄窗口下右侧参数栏仍可独立滚动
+- 仅在系统托盘 / macOS 菜单栏常驻：任务栏与 Dock 不显示图标，关闭或最小化主窗口后继续监测
+- 可选开机自启动；登录系统后静默进入托盘，不主动弹出主窗口
+- 可配置全局快捷键：显示主窗口、导入剪贴板图片、打开悬浮压缩坞
+- 托盘唤起的置顶悬浮压缩坞：支持独立浅色 / 深色主题、窗口缩放和输出尺寸调节
 - 自动恢复上次画质、缩放、水印、监测配置，并支持保存和删除自定义压缩预设
 - 桌面专属应用设置：默认输出规则、固定目录、后缀、覆盖确认、托盘行为和关于页面
 - Docker 自托管和 GitHub Actions 跨平台自动构建
@@ -54,7 +56,7 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 
 ### 托盘与悬浮压缩坞
 
-启动桌面版后，PicLite 会在 Windows 系统托盘、macOS 菜单栏或 Linux 状态区显示图标。左键恢复主窗口，右键可以打开悬浮压缩坞、切换快速预设、主题与界面密度、启动或停止文件夹监测，以及完全退出应用。
+启动桌面版后，PicLite 只在 Windows 系统托盘、macOS 菜单栏或 Linux 状态区显示图标，不在 Windows 任务栏或 macOS Dock 保留图标。左键恢复主窗口，右键可以打开悬浮压缩坞、切换快速预设、主题与界面密度、启动或停止文件夹监测，以及完全退出应用。应用设置中还可以开启开机自启动并录制全局快捷键。
 
 标准系统托盘 API 在 Windows、macOS 和 Linux 上没有统一的文件拖放事件，因此 PicLite 使用托盘菜单唤起一个无任务栏图标、始终置顶的“悬浮压缩坞”。把文件拖到压缩坞即可直接压缩；这比伪装成托盘拖放更可靠，也能显示逐张处理结果和继续压缩操作。悬浮压缩坞始终生成新文件，不会覆盖原图。
 
@@ -64,7 +66,51 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 
 ![PicLite 服务器部署结构](docs/images/deployment.svg)
 
-### 方式一：Docker Compose（推荐）
+### 方式一：`docker run` 单命令部署
+
+适合希望直接用 Docker 命令启动的服务器。仓库目前没有预构建的公共容器镜像，因此先从源码构建一次本地镜像：
+
+```bash
+git clone https://github.com/amiaoapp/PicLite.git /opt/piclite
+cd /opt/piclite
+docker build --pull -t piclite:local .
+docker run -d \
+  --name piclite \
+  --restart unless-stopped \
+  -p 127.0.0.1:3000:3000 \
+  piclite:local
+```
+
+检查状态、健康检查和日志：
+
+```bash
+docker ps --filter name=piclite
+docker inspect --format '{{.State.Health.Status}}' piclite
+docker logs --tail=100 piclite
+curl -I http://127.0.0.1:3000
+```
+
+更新代码并重建容器：
+
+```bash
+cd /opt/piclite
+git pull --ff-only origin main
+docker build --pull -t piclite:local .
+docker rm -f piclite
+docker run -d --name piclite --restart unless-stopped -p 127.0.0.1:3000:3000 piclite:local
+```
+
+停止、重新启动或彻底删除容器：
+
+```bash
+docker stop piclite
+docker start piclite
+docker rm -f piclite
+```
+
+端口只绑定在 `127.0.0.1`，请继续使用下文的 Nginx 和 HTTPS 配置对外提供服务。
+
+### 方式二：Docker Compose（推荐长期维护）
 
 #### 1. 准备服务器
 
@@ -159,7 +205,7 @@ docker compose down
 
 PicLite 不保存用户图片，也没有数据库或持久化目录，因此无需备份图片数据；只需备份你修改过的 Nginx、域名和部署配置。
 
-### 方式二：Node.js + systemd
+### 方式三：Node.js + systemd
 
 不使用 Docker 时，在服务器安装 Node.js 24（最低 22.13），然后执行：
 
@@ -260,8 +306,8 @@ npm run desktop:build:linux:x64
 推送版本标签后，GitHub Actions 会构建五组桌面产物，并自动创建 Release：
 
 ```bash
-git tag v0.6.1
-git push origin v0.6.1
+git tag v0.6.2
+git push origin v0.6.2
 ```
 
 只想测试构建、不发布版本时，在 GitHub 的 `Actions → Build desktop apps → Run workflow` 手动运行。手动运行的文件会保存在该次工作流的 Artifacts 中。

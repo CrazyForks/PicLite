@@ -1136,7 +1136,12 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(DesktopState::default())
         .setup(|app| {
             match create_tray(app) {
@@ -1145,6 +1150,15 @@ pub fn run() {
                     .tray_available
                     .store(true, Ordering::Relaxed),
                 Err(error) => eprintln!("PicLite system tray unavailable: {error}"),
+            }
+            #[cfg(target_os = "macos")]
+            app.handle()
+                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+
+            if std::env::args().any(|argument| argument == "--minimized") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
             }
             Ok(())
         })
