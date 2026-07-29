@@ -27,7 +27,11 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 - 下载、覆盖源文件、同文件夹重命名、固定文件夹四种导出模式
 - 桌面端使用 Tauri 2 + Rust，原生处理文件选择、剪贴板、导出和文件夹监测
 - 紧凑桌面布局，适配 Windows 125% / 150% 显示缩放和常见笔记本分辨率
-- 桌面专属应用设置：默认输出规则、固定目录、后缀、覆盖确认和关于页面
+- 自动高 DPI 界面密度、浅色 / 深色 / 跟随系统主题
+- 系统托盘常驻：关闭或最小化主窗口后继续监测，托盘右键可切换主题、密度、预设和监测状态
+- 托盘唤起的置顶悬浮压缩坞：拖入图片即按上次参数输出，并可一键“继续压小”
+- 自动恢复上次画质、缩放、水印、监测配置，并支持保存和删除自定义压缩预设
+- 桌面专属应用设置：默认输出规则、固定目录、后缀、覆盖确认、托盘行为和关于页面
 - Docker 自托管和 GitHub Actions 跨平台自动构建
 
 图片处理在浏览器或桌面客户端本地完成，不会把原图上传到 PicLite 服务器。网页端受浏览器权限限制，持续文件夹监测只在桌面客户端提供。
@@ -44,9 +48,15 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 | Linux | x64 | `x86_64.AppImage` 或 `amd64.deb` |
 | Linux | arm64 | `arm64.AppImage` 或 `arm64.deb` |
 
-桌面版基于 Tauri，不再打包完整 Chromium；Windows 使用系统 WebView2，macOS 使用 WebKit，Linux 使用 WebKitGTK。本机实测 macOS `.app` 约 4.3 MB，具体安装包大小会随平台格式变化。
+桌面版基于 Tauri，不再打包完整 Chromium；Windows 使用系统 WebView2，macOS 使用 WebKit，Linux 使用 WebKitGTK。本机实测 macOS `.app` 约 4.5 MB、DMG 约 2.1 MB，具体安装包大小会随平台格式变化。
 
 当前 macOS 包使用 ad-hoc 签名，没有 Apple Developer ID 公证。首次打开时，如果系统提示无法验证开发者，请在“系统设置 → 隐私与安全性”中确认打开。正式公开分发建议配置 Apple Developer ID 签名与公证。
+
+### 托盘与悬浮压缩坞
+
+启动桌面版后，PicLite 会在 Windows 系统托盘、macOS 菜单栏或 Linux 状态区显示图标。左键恢复主窗口，右键可以打开悬浮压缩坞、切换快速预设、主题与界面密度、启动或停止文件夹监测，以及完全退出应用。
+
+标准系统托盘 API 在 Windows、macOS 和 Linux 上没有统一的文件拖放事件，因此 PicLite 使用托盘菜单唤起一个无任务栏图标、始终置顶的“悬浮压缩坞”。把文件拖到压缩坞即可直接压缩；这比伪装成托盘拖放更可靠，也能显示逐张处理结果和继续压缩操作。悬浮压缩坞始终生成新文件，不会覆盖原图。
 
 ## 在服务器上部署
 
@@ -250,8 +260,8 @@ npm run desktop:build:linux:x64
 推送版本标签后，GitHub Actions 会构建五组桌面产物，并自动创建 Release：
 
 ```bash
-git tag v0.5.1
-git push origin v0.5.1
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 只想测试构建、不发布版本时，在 GitHub 的 `Actions → Build desktop apps → Run workflow` 手动运行。手动运行的文件会保存在该次工作流的 Artifacts 中。

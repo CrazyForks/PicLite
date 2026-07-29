@@ -3,7 +3,10 @@ use std::{
     fs,
     io::{BufReader, Cursor},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +24,11 @@ use image::{
 };
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 use tauri_plugin_dialog::DialogExt;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"];
@@ -33,13 +40,58 @@ struct SelectedFolders {
     export: Option<PathBuf>,
 }
 
-#[derive(Default)]
 struct DesktopState {
     watcher: Mutex<Option<RecommendedWatcher>>,
     watcher_settings: Mutex<Option<WatcherSettings>>,
     folders: Mutex<SelectedFolders>,
     source_files: Mutex<HashSet<PathBuf>>,
     processing: Arc<Mutex<HashSet<PathBuf>>>,
+    quitting: AtomicBool,
+    minimize_to_tray: AtomicBool,
+}
+
+impl Default for DesktopState {
+    fn default() -> Self {
+        Self {
+            watcher: Mutex::new(None),
+            watcher_settings: Mutex::new(None),
+            folders: Mutex::new(SelectedFolders::default()),
+            source_files: Mutex::new(HashSet::new()),
+            processing: Arc::new(Mutex::new(HashSet::new())),
+            quitting: AtomicBool::new(false),
+            minimize_to_tray: AtomicBool::new(true),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDesktopPreferences {
+    minimize_to_tray: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuickCompressSettings {
+    quality: u8,
+    scale: f64,
+    format: String,
+    strip_metadata: bool,
+    prevent_larger: bool,
+    export_mode: String,
+    export_suffix: String,
+    fixed_folder: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuickCompressResult {
+    source: String,
+    output: Option<String>,
+    original_bytes: Option<u64>,
+    output_bytes: Option<u64>,
+    kept_original: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -402,6 +454,181 @@ fn optimize_bytes(path: &Path, settings: &WatcherSettings) -> Result<Vec<u8>, St
         return Ok(original);
     }
     Ok(candidate)
+}
+
+fn native_images_from_paths(
+    paths: Vec<String>,
+    state: &DesktopState,
+) -> Result<Vec<NativeImage>, String> {
+    let mut images = Vec::new();
+    let mut authorized = state
+        .source_files
+        .lock()
+        .map_err(|_| "文件授权状态不可用".to_string())?;
+    for requested in paths {
+        let path = PathBuf::from(requested);
+        if !is_image(&path) || !path.is_file() {
+            continue;
+        }
+        let canonical = fs::canonicalize(&path).unwrap_or(path);
+        let data = fs::read(&canonical).map_err(|error| error.to_string())?;
+        authorized.insert(canonical.clone());
+        images.push(NativeImage {
+            name: canonical
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image")
+                .to_string(),
+            mime_type: mime_for(&canonical).to_string(),
+            path: canonical.to_string_lossy().to_string(),
+            data: BASE64.encode(data),
+        });
+    }
+    Ok(images)
+}
+
+fn show_window(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
+    WatcherSettings {
+        input_folder: String::new(),
+        output_folder: String::new(),
+        mode: if value.quality >= 96 {
+            "lossless".to_string()
+        } else if value.quality >= 65 {
+            "balanced".to_string()
+        } else {
+            "small".to_string()
+        },
+        quality: value.quality.clamp(1, 100),
+        scale: value.scale.clamp(0.1, 100.0),
+        format: value.format.clone(),
+        resize: false,
+        max_width: u32::MAX,
+        max_height: u32::MAX,
+        strip_metadata: value.strip_metadata,
+        prevent_larger: value.prevent_larger,
+    }
+}
+
+#[tauri::command]
+async fn read_images_from_paths(
+    paths: Vec<String>,
+    state: State<'_, DesktopState>,
+) -> Result<Vec<NativeImage>, String> {
+    native_images_from_paths(paths, &state)
+}
+
+#[tauri::command]
+async fn quick_compress_paths(
+    paths: Vec<String>,
+    settings: QuickCompressSettings,
+) -> Result<Vec<QuickCompressResult>, String> {
+    let compression = quick_settings(&settings);
+    let mut results = Vec::new();
+    for requested in paths {
+        let source = PathBuf::from(&requested);
+        let result = (|| -> Result<(PathBuf, u64, u64, bool), String> {
+            if !source.is_file() || !is_image(&source) {
+                return Err("不是支持的图片文件".to_string());
+            }
+            let source = fs::canonicalize(&source).unwrap_or(source.clone());
+            let original_bytes = fs::metadata(&source)
+                .map_err(|error| error.to_string())?
+                .len();
+            let bytes = optimize_bytes(&source, &compression)?;
+            let output_extension = extension_for(&source, &settings.format);
+            let base = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image");
+            let suffix = if settings.export_suffix.trim().is_empty() {
+                "-piclite"
+            } else {
+                settings.export_suffix.trim()
+            };
+            let output_directory = if settings.export_mode == "fixed-folder" {
+                settings
+                    .fixed_folder
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .ok_or_else(|| "固定输出文件夹尚未设置".to_string())?
+            } else {
+                source
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| "无法定位源文件夹".to_string())?
+            };
+            // 悬浮压缩坞始终生成新文件，避免一次拖放意外覆盖源图。
+            let output = available_path(
+                &output_directory,
+                &format!("{base}{suffix}.{output_extension}"),
+            )?;
+            fs::write(&output, &bytes).map_err(|error| error.to_string())?;
+            Ok((
+                output,
+                original_bytes,
+                bytes.len() as u64,
+                bytes.len() as u64 == original_bytes,
+            ))
+        })();
+        match result {
+            Ok((output, original_bytes, output_bytes, kept_original)) => {
+                results.push(QuickCompressResult {
+                    source: requested,
+                    output: Some(output.to_string_lossy().to_string()),
+                    original_bytes: Some(original_bytes),
+                    output_bytes: Some(output_bytes),
+                    kept_original,
+                    error: None,
+                });
+            }
+            Err(error) => results.push(QuickCompressResult {
+                source: requested,
+                output: None,
+                original_bytes: None,
+                output_bytes: None,
+                kept_original: false,
+                error: Some(error),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+async fn update_desktop_preferences(
+    preferences: NativeDesktopPreferences,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
+    state
+        .minimize_to_tray
+        .store(preferences.minimize_to_tray, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_main_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "main");
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "dropzone");
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|error| error.to_string())
 }
 
 fn process_watched_file(
@@ -777,22 +1004,184 @@ async fn get_watcher_state(state: State<'_, DesktopState>) -> Result<WatcherStat
     Ok(WatcherState { active, settings })
 }
 
+fn create_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "显示 PicLite", true, None::<&str>)?;
+    let dropzone = MenuItem::with_id(app, "dropzone", "打开悬浮压缩坞", true, None::<&str>)?;
+    let preferences = MenuItem::with_id(app, "preferences", "应用设置…", true, None::<&str>)?;
+    let watcher = MenuItem::with_id(
+        app,
+        "toggle_watcher",
+        "开始 / 停止文件夹监测",
+        true,
+        None::<&str>,
+    )?;
+
+    let preset_last = MenuItem::with_id(app, "preset_last", "上次使用", true, None::<&str>)?;
+    let preset_lossless =
+        MenuItem::with_id(app, "preset_lossless", "无损优先", true, None::<&str>)?;
+    let preset_balanced =
+        MenuItem::with_id(app, "preset_balanced", "智能平衡", true, None::<&str>)?;
+    let preset_small = MenuItem::with_id(app, "preset_small", "更小体积", true, None::<&str>)?;
+    let presets = Submenu::with_items(
+        app,
+        "快速预设",
+        true,
+        &[
+            &preset_last,
+            &preset_lossless,
+            &preset_balanced,
+            &preset_small,
+        ],
+    )?;
+
+    let theme_system = MenuItem::with_id(app, "theme_system", "跟随系统", true, None::<&str>)?;
+    let theme_light = MenuItem::with_id(app, "theme_light", "浅色", true, None::<&str>)?;
+    let theme_dark = MenuItem::with_id(app, "theme_dark", "深色", true, None::<&str>)?;
+    let themes = Submenu::with_items(
+        app,
+        "外观主题",
+        true,
+        &[&theme_system, &theme_light, &theme_dark],
+    )?;
+
+    let density_auto =
+        MenuItem::with_id(app, "density_auto", "自动适应高分屏", true, None::<&str>)?;
+    let density_comfortable =
+        MenuItem::with_id(app, "density_comfortable", "标准", true, None::<&str>)?;
+    let density_compact = MenuItem::with_id(app, "density_compact", "紧凑", true, None::<&str>)?;
+    let densities = Submenu::with_items(
+        app,
+        "界面密度",
+        true,
+        &[&density_auto, &density_comfortable, &density_compact],
+    )?;
+
+    let close_to_tray = MenuItem::with_id(
+        app,
+        "close_to_tray_status",
+        "关闭时留在托盘  ✓",
+        false,
+        None::<&str>,
+    )?;
+    let minimize_to_tray = MenuItem::with_id(
+        app,
+        "toggle_minimize_to_tray",
+        "最小化时留在托盘",
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, "quit", "完全退出 PicLite", true, None::<&str>)?;
+    let separator_one = PredefinedMenuItem::separator(app)?;
+    let separator_two = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &dropzone,
+            &separator_one,
+            &presets,
+            &themes,
+            &densities,
+            &watcher,
+            &preferences,
+            &close_to_tray,
+            &minimize_to_tray,
+            &separator_two,
+            &quit,
+        ],
+    )?;
+
+    TrayIconBuilder::new()
+        .tooltip("PicLite 图轻 · 拖图到悬浮压缩坞")
+        .icon(app.default_window_icon().expect("missing app icon").clone())
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_window(app, "main"),
+            "dropzone" => show_window(app, "dropzone"),
+            "preferences" => {
+                show_window(app, "main");
+                let _ = app.emit("tray:action", "preferences");
+            }
+            "quit" => {
+                app.state::<DesktopState>()
+                    .quitting
+                    .store(true, Ordering::Relaxed);
+                app.exit(0);
+            }
+            action => {
+                let _ = app.emit("tray:action", action.to_string());
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_window(tray.app_handle(), "main");
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState::default())
+        .setup(|app| {
+            create_tray(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            let state = window.state::<DesktopState>();
+            match event {
+                WindowEvent::CloseRequested { api, .. }
+                    if !state.quitting.load(Ordering::Relaxed) =>
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                WindowEvent::Resized(_) if state.minimize_to_tray.load(Ordering::Relaxed) => {
+                    if window.is_minimized().unwrap_or(false) {
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             select_folder,
             select_images,
+            read_images_from_paths,
             read_clipboard_image,
             export_images,
+            quick_compress_paths,
+            update_desktop_preferences,
+            show_main_window,
+            show_dropzone_window,
+            hide_current_window,
             start_watcher,
             stop_watcher,
             get_watcher_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running PicLite");
+        .build(tauri::generate_context!())
+        .expect("error while building PicLite");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if !app_handle
+                .state::<DesktopState>()
+                .quitting
+                .load(Ordering::Relaxed)
+            {
+                api.prevent_exit();
+            }
+        }
+    });
 }
 
 #[cfg(test)]

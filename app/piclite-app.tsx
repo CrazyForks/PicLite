@@ -22,6 +22,8 @@ type PreviewMode = "compare" | "original" | "result";
 type ItemStatus = "ready" | "processing" | "done" | "error";
 type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
 type WatermarkLayout = "tile" | "single";
+type ThemeMode = "system" | "light" | "dark";
+type UiDensity = "auto" | "comfortable" | "compact";
 
 type WritableFileLike = {
   write: (data: Blob) => Promise<void>;
@@ -71,13 +73,23 @@ type WatcherSettings = {
 
 type NativeBridge = {
   platform: string;
+  windowLabel: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
   selectImages: () => Promise<NativeImage[]>;
+  readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
   exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; fixedFolder?: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
   startWatcher: (settings: WatcherSettings) => Promise<{ ok: boolean; error?: string }>;
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
+  quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  updateDesktopPreferences: (preferences: { minimizeToTray: boolean }) => Promise<void>;
+  setWindowTheme: (theme: ThemeMode) => Promise<void>;
+  showMainWindow: () => Promise<void>;
+  showDropzoneWindow: () => Promise<void>;
+  hideCurrentWindow: () => Promise<void>;
+  onFileDrop: (callback: (event: { type: "over" | "drop" | "leave"; paths?: string[] }) => void) => () => void;
+  onTrayAction: (callback: (action: string) => void) => () => void;
   onWatcherEvent: (callback: (event: WatcherEvent) => void) => () => void;
 };
 
@@ -150,6 +162,36 @@ type DesktopPreferences = {
   exportFolder: string;
   confirmOverwrite: boolean;
   preventLarger: boolean;
+  theme: ThemeMode;
+  density: UiDensity;
+  minimizeToTray: boolean;
+};
+
+type SavedPreset = {
+  id: string;
+  name: string;
+  settings: CompressionSettings;
+  custom?: boolean;
+};
+
+type QuickCompressSettings = {
+  quality: number;
+  scale: number;
+  format: OutputFormat;
+  stripMetadata: boolean;
+  preventLarger: boolean;
+  exportMode: Exclude<ExportMode, "download">;
+  exportSuffix: string;
+  fixedFolder?: string;
+};
+
+type QuickCompressResult = {
+  source: string;
+  output?: string;
+  originalBytes?: number;
+  outputBytes?: number;
+  keptOriginal: boolean;
+  error?: string;
 };
 
 const DEFAULT_SETTINGS: CompressionSettings = {
@@ -187,7 +229,43 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   exportFolder: "",
   confirmOverwrite: true,
   preventLarger: true,
+  theme: "system",
+  density: "auto",
+  minimizeToTray: true,
 };
+
+function presetSettings(mode: CompressionMode, quality: number, scale = 100): CompressionSettings {
+  return { ...DEFAULT_SETTINGS, mode, quality, scale, watermark: { ...DEFAULT_SETTINGS.watermark } };
+}
+
+const BUILT_IN_PRESETS: SavedPreset[] = [
+  { id: "lossless", name: "无损优先", settings: presetSettings("lossless", 100) },
+  { id: "balanced", name: "智能平衡", settings: presetSettings("balanced", 82) },
+  { id: "small", name: "更小体积", settings: presetSettings("small", 45, 75) },
+];
+
+function loadStoredSettings() {
+  if (typeof window === "undefined") return DEFAULT_SETTINGS;
+  try {
+    const saved = window.localStorage.getItem("piclite.compressionSettings.v2");
+    if (!saved) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(saved) as Partial<CompressionSettings>;
+    return { ...DEFAULT_SETTINGS, ...parsed, watermark: { ...DEFAULT_SETTINGS.watermark, ...parsed.watermark } };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function loadStoredPresets() {
+  if (typeof window === "undefined") return BUILT_IN_PRESETS;
+  try {
+    const saved = window.localStorage.getItem("piclite.customPresets.v1");
+    const custom = saved ? JSON.parse(saved) as SavedPreset[] : [];
+    return [...BUILT_IN_PRESETS, ...custom.filter((preset) => preset.custom)];
+  } catch {
+    return BUILT_IN_PRESETS;
+  }
+}
 
 const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
   inputFolder: "",
@@ -620,11 +698,124 @@ function IconButton({ label, symbol, onClick, disabled }: { label: string; symbo
   return <button className="icon-button" type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}><span aria-hidden="true">{symbol}</span></button>;
 }
 
+function fileNameFromPath(path: string) {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
+  const initialSettings = useMemo(loadStoredSettings, []);
+  const [quality, setQuality] = useState(initialSettings.quality);
+  const [scale, setScale] = useState(initialSettings.scale);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [results, setResults] = useState<QuickCompressResult[]>([]);
+  const lastPathsRef = useRef<string[]>([]);
+
+  const runCompression = useCallback(async (paths: string[], nextQuality = quality, nextScale = scale) => {
+    if (!paths.length || isProcessing) return;
+    lastPathsRef.current = paths;
+    setIsProcessing(true);
+    setResults(paths.map((source) => ({ source, keptOriginal: false })));
+    try {
+      let preferences = DEFAULT_DESKTOP_PREFERENCES;
+      try {
+        const stored = window.localStorage.getItem("piclite.desktopPreferences.v1");
+        if (stored) preferences = { ...preferences, ...JSON.parse(stored) };
+      } catch { /* 使用安全默认值 */ }
+      const next = await bridge.quickCompressPaths(paths, {
+        quality: nextQuality,
+        scale: nextScale,
+        format: initialSettings.format,
+        stripMetadata: initialSettings.stripMetadata,
+        preventLarger: preferences.preventLarger,
+        exportMode: preferences.exportMode === "overwrite" ? "same-folder" : preferences.exportMode,
+        exportSuffix: preferences.exportSuffix,
+        fixedFolder: preferences.exportFolder || undefined,
+      });
+      setResults(next);
+    } catch (error) {
+      setResults(paths.map((source) => ({ source, keptOriginal: false, error: error instanceof Error ? error.message : "压缩失败" })));
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [bridge, initialSettings.format, initialSettings.stripMetadata, isProcessing, quality, scale]);
+
+  useEffect(() => bridge.onFileDrop((event) => {
+    setIsDragging(event.type === "over");
+    if (event.type === "drop" && event.paths?.length) void runCompression(event.paths);
+  }), [bridge, runCompression]);
+
+  useEffect(() => {
+    let preferences = DEFAULT_DESKTOP_PREFERENCES;
+    try {
+      const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
+      if (saved) preferences = { ...preferences, ...JSON.parse(saved) };
+    } catch { /* 使用默认主题 */ }
+    const resolvedTheme = preferences.theme === "system"
+      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+      : preferences.theme;
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.dataset.density = "comfortable";
+  }, []);
+
+  const compressFurther = useCallback(() => {
+    const nextQuality = Math.max(1, Math.round(quality * 0.78));
+    const nextScale = Math.max(0.1, Number((scale * 0.78).toFixed(1)));
+    setQuality(nextQuality);
+    setScale(nextScale);
+    void runCompression(lastPathsRef.current, nextQuality, nextScale);
+  }, [quality, runCompression, scale]);
+
+  return (
+    <main className={`drop-dock ${isDragging ? "dragging" : ""}`}>
+      <header data-tauri-drag-region>
+        <span className="dock-brand"><i>✦</i><b>PicLite Drop</b></span>
+        <span className="dock-actions">
+          <button type="button" title="打开主窗口" onClick={() => void bridge.showMainWindow()}>↗</button>
+          <button type="button" title="隐藏压缩坞" onClick={() => void bridge.hideCurrentWindow()}>×</button>
+        </span>
+      </header>
+      <section className="dock-body">
+        {!results.length ? (
+          <div className="dock-empty">
+            <span className="dock-orbit"><i /><i /><b>＋</b></span>
+            <div><strong>{isDragging ? "松开开始压缩" : "把图片拖到这里"}</strong><small>保持在最前 · 输出到源文件旁 · 不覆盖原图</small></div>
+          </div>
+        ) : (
+          <div className="dock-results">
+            {results.slice(0, 3).map((result) => (
+              <div className={result.error ? "error" : result.output ? "done" : "working"} key={result.source}>
+                <span>{result.error ? "!" : result.output ? "✓" : "···"}</span>
+                <p><strong>{fileNameFromPath(result.source)}</strong><small>{result.error || (result.outputBytes ? `${formatBytes(result.originalBytes)} → ${formatBytes(result.outputBytes)}` : "正在压缩…")}</small></p>
+                {result.originalBytes && result.outputBytes ? <b>{sizeChangeLabel(result.originalBytes, result.outputBytes)}</b> : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+      <footer>
+        <span><b>{quality}%</b> 画质 · <b>{formatScale(scale)}</b> 尺寸</span>
+        <button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={compressFurther}>{isProcessing ? "处理中…" : "继续压小 −22%"}</button>
+      </footer>
+    </main>
+  );
+}
+
 export function PicLiteApp() {
+  const bridge = typeof window !== "undefined" ? window.picLite : undefined;
+  return bridge?.windowLabel === "dropzone" ? <TrayDropDock bridge={bridge} /> : <PicLiteWorkbench nativeBridge={bridge} />;
+}
+
+function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [view, setView] = useState<ViewName>("workspace");
   const [items, setItems] = useState<ImageItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<CompressionSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<CompressionSettings>(loadStoredSettings);
+  const [presets, setPresets] = useState<SavedPreset[]>(loadStoredPresets);
+  const [activePresetId, setActivePresetId] = useState("lossless");
+  const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const [pendingTrayAction, setPendingTrayAction] = useState<string | null>(null);
   const [compare, setCompare] = useState(52);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("compare");
   const [previewZoom, setPreviewZoom] = useState(100);
@@ -639,7 +830,15 @@ export function PicLiteApp() {
   const [exportFolderName, setExportFolderName] = useState("");
   const [localFonts, setLocalFonts] = useState<string[]>(["Microsoft YaHei", "PingFang SC", "Arial", "SimSun"]);
   const [toast, setToast] = useState<string | null>(null);
-  const [watcherSettings, setWatcherSettings] = useState<WatcherSettings>(DEFAULT_WATCHER_SETTINGS);
+  const [watcherSettings, setWatcherSettings] = useState<WatcherSettings>(() => {
+    if (typeof window === "undefined") return DEFAULT_WATCHER_SETTINGS;
+    try {
+      const saved = window.localStorage.getItem("piclite.watcherSettings.v1");
+      return saved ? { ...DEFAULT_WATCHER_SETTINGS, ...JSON.parse(saved) } : DEFAULT_WATCHER_SETTINGS;
+    } catch {
+      return DEFAULT_WATCHER_SETTINGS;
+    }
+  });
   const [watcherActive, setWatcherActive] = useState(false);
   const [watcherEvents, setWatcherEvents] = useState<WatcherEvent[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -651,7 +850,6 @@ export function PicLiteApp() {
   const settingsReadyRef = useRef(false);
   const desktopPreferencesReadyRef = useRef(false);
   const livePreviewGenerationRef = useRef(0);
-  const nativeBridge = typeof window !== "undefined" ? window.picLite : undefined;
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
@@ -722,6 +920,40 @@ export function PicLiteApp() {
   }, [desktopPreferences, nativeBridge]);
 
   useEffect(() => {
+    if (!nativeBridge || !desktopPreferencesReadyRef.current) return;
+    void nativeBridge.updateDesktopPreferences({
+      minimizeToTray: desktopPreferences.minimizeToTray,
+    });
+  }, [desktopPreferences.minimizeToTray, nativeBridge]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyAppearance = () => {
+      const resolvedTheme = desktopPreferences.theme === "system"
+        ? (media.matches ? "dark" : "light")
+        : desktopPreferences.theme;
+      const resolvedDensity = desktopPreferences.density === "auto"
+        ? (window.devicePixelRatio >= 1.25 ? "compact" : "comfortable")
+        : desktopPreferences.density;
+      document.documentElement.dataset.theme = resolvedTheme;
+      document.documentElement.dataset.density = resolvedDensity;
+      document.documentElement.style.colorScheme = resolvedTheme;
+      if (nativeBridge) void nativeBridge.setWindowTheme(desktopPreferences.theme);
+    };
+    applyAppearance();
+    media.addEventListener("change", applyAppearance);
+    return () => media.removeEventListener("change", applyAppearance);
+  }, [desktopPreferences.density, desktopPreferences.theme, nativeBridge]);
+
+  useEffect(() => {
+    window.localStorage.setItem("piclite.customPresets.v1", JSON.stringify(presets.filter((preset) => preset.custom)));
+  }, [presets]);
+
+  useEffect(() => {
+    window.localStorage.setItem("piclite.watcherSettings.v1", JSON.stringify(watcherSettings));
+  }, [watcherSettings]);
+
+  useEffect(() => {
     setPreviewPan({ x: 0, y: 0 });
     setPreviewZoom(100);
     setPreviewFit(true);
@@ -737,13 +969,29 @@ export function PicLiteApp() {
   useEffect(() => {
     if (!settingsReadyRef.current) {
       settingsReadyRef.current = true;
+      window.localStorage.setItem("piclite.compressionSettings.v2", JSON.stringify(settings));
       return;
     }
+    window.localStorage.setItem("piclite.compressionSettings.v2", JSON.stringify(settings));
     setItems((current) => current.map((item) => {
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
       return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, sizeGuardQuality: undefined, status: "ready", error: undefined };
     }));
   }, [settings]);
+
+  useEffect(() => {
+    if (!nativeBridge) return;
+    return nativeBridge.onFileDrop((event) => {
+      setDragging(event.type === "over");
+      if (event.type !== "drop" || !event.paths?.length) return;
+      void nativeBridge.readImagesFromPaths(event.paths).then((nativeImages) => addSources(nativeImages.map((image) => ({
+        file: new File([new Uint8Array(image.data)], image.name, { type: image.type || mimeFromName(image.name) }),
+        sourcePath: image.path,
+      }))));
+    });
+  }, [addSources, nativeBridge]);
+
+  useEffect(() => nativeBridge?.onTrayAction(setPendingTrayAction), [nativeBridge]);
 
   useEffect(() => {
     const id = selectedId || itemsRef.current[0]?.id;
@@ -1100,6 +1348,36 @@ export function PicLiteApp() {
     setWatcherSettings((current) => ({ ...current, [kind === "input" ? "inputFolder" : "outputFolder"]: folder }));
   }, [nativeBridge]);
 
+  const applyPreset = useCallback((preset: SavedPreset) => {
+    setSettings({ ...preset.settings, watermark: { ...preset.settings.watermark } });
+    setActivePresetId(preset.id);
+    showToast(`已应用预设：${preset.name}`);
+  }, [showToast]);
+
+  const saveCustomPreset = useCallback(() => {
+    const name = presetName.trim();
+    if (!name) return;
+    const preset: SavedPreset = {
+      id: `custom-${uid()}`,
+      name,
+      custom: true,
+      settings: { ...settings, watermark: { ...settings.watermark } },
+    };
+    setPresets((current) => [...current, preset]);
+    setActivePresetId(preset.id);
+    setPresetName("");
+    setPresetDialogOpen(false);
+    showToast(`已保存预设：${name}`);
+  }, [presetName, settings, showToast]);
+
+  const deleteActivePreset = useCallback(() => {
+    const preset = presets.find((candidate) => candidate.id === activePresetId);
+    if (!preset?.custom) return;
+    setPresets((current) => current.filter((candidate) => candidate.id !== preset.id));
+    setActivePresetId("lossless");
+    showToast(`已删除预设：${preset.name}`);
+  }, [activePresetId, presets, showToast]);
+
   const toggleWatcher = useCallback(async () => {
     if (!nativeBridge) return;
     if (watcherActive) {
@@ -1113,6 +1391,41 @@ export function PicLiteApp() {
     const result = await nativeBridge.startWatcher(watcherSettings);
     if (!result.ok) showToast(result.error || "无法启动文件夹监测");
   }, [nativeBridge, showToast, watcherActive, watcherSettings]);
+
+  useEffect(() => {
+    if (!pendingTrayAction) return;
+    const action = pendingTrayAction;
+    setPendingTrayAction(null);
+    if (action === "preferences") {
+      setView("preferences");
+      return;
+    }
+    if (action === "toggle_watcher") {
+      void toggleWatcher();
+      return;
+    }
+    if (action.startsWith("theme_")) {
+      const theme = action.replace("theme_", "") as ThemeMode;
+      setDesktopPreferences((current) => ({ ...current, theme }));
+      return;
+    }
+    if (action.startsWith("density_")) {
+      const density = action.replace("density_", "") as UiDensity;
+      setDesktopPreferences((current) => ({ ...current, density }));
+      return;
+    }
+    if (action === "toggle_minimize_to_tray") {
+      setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }));
+      return;
+    }
+    const presetId = action.startsWith("preset_") ? action.replace("preset_", "") : "";
+    if (presetId === "last") {
+      showToast("已保留上次使用的压缩参数");
+      return;
+    }
+    const preset = presets.find((candidate) => candidate.id === presetId);
+    if (preset) applyPreset(preset);
+  }, [applyPreset, pendingTrayAction, presets, showToast, toggleWatcher]);
 
   const onDrop = useCallback((event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -1278,6 +1591,15 @@ export function PicLiteApp() {
           <aside className="settings-panel">
             <div className="panel-heading"><div><span className="eyebrow">实时试压</span><strong>滑动即预览体积</strong></div><button className="reset-button" type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>重置</button></div>
 
+            <div className="preset-toolbar">
+              <div className="select-wrap"><select aria-label="压缩预设" value={activePresetId} onChange={(event) => {
+                const preset = presets.find((candidate) => candidate.id === event.target.value);
+                if (preset) applyPreset(preset);
+              }}>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.custom ? `自定义 · ${preset.name}` : preset.name}</option>)}</select></div>
+              <button type="button" title="保存当前参数为预设" onClick={() => setPresetDialogOpen(true)}>＋ 保存</button>
+              {presets.find((preset) => preset.id === activePresetId)?.custom && <button className="preset-delete" type="button" title="删除当前预设" onClick={deleteActivePreset}>删除</button>}
+            </div>
+
             <div className="setting-section">
               <label className="setting-label">快速方案</label>
               <div className="mode-grid">
@@ -1286,7 +1608,10 @@ export function PicLiteApp() {
                   ["balanced", 82, "智能平衡", "82%", "◐"],
                   ["small", 45, "更小体积", "45%", "●"],
                 ] as const).map(([value, quality, label, note, icon]) => (
-                  <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => setSettings((current) => ({ ...current, mode: value, quality }))}>
+                  <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => {
+                    const preset = BUILT_IN_PRESETS.find((candidate) => candidate.id === value);
+                    if (preset) applyPreset({ ...preset, settings: { ...settings, mode: value, quality } });
+                  }}>
                     <span>{icon}</span><strong>{label}</strong><small>{note}</small>
                   </button>
                 ))}
@@ -1499,16 +1824,40 @@ export function PicLiteApp() {
               </label>
             </section>
 
+            <section className="preference-card">
+              <div className="preference-card-heading"><span>外观</span><small>高分屏与深色主题</small></div>
+              <div className="preference-row column">
+                <div><strong>主题</strong><small>可跟随 Windows / macOS 系统外观</small></div>
+                <div className="preference-segments">
+                  {([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([value, label]) => <button className={desktopPreferences.theme === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, theme: value }))}>{label}</button>)}
+                </div>
+              </div>
+              <div className="preference-row column">
+                <div><strong>界面密度</strong><small>自动模式在 125% / 150% 等高 DPI 缩放下会主动收紧界面</small></div>
+                <div className="preference-segments">
+                  {([['auto', '自动'], ['comfortable', '标准'], ['compact', '紧凑']] as const).map(([value, label]) => <button className={desktopPreferences.density === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, density: value }))}>{label}</button>)}
+                </div>
+              </div>
+            </section>
+
+            <section className="preference-card">
+              <div className="preference-card-heading"><span>系统托盘</span><small>后台常驻行为</small></div>
+              <div className="preference-row"><div><strong>关闭时留在托盘</strong><small>已固定开启：点关闭按钮只隐藏窗口，文件夹监测继续运行</small></div><span className="always-on-badge">始终开启</span></div>
+              <label className="preference-row clickable"><div><strong>最小化时留在托盘</strong><small>不占用任务栏；从托盘左键恢复主窗口</small></div><button className={`switch ${desktopPreferences.minimizeToTray ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.minimizeToTray} onClick={() => setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }))}><i /></button></label>
+              <div className="preference-row"><div><strong>悬浮压缩坞</strong><small>拖入图片后按上次参数直接输出，不覆盖源图</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>立即打开</button></div>
+            </section>
+
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.5.1 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.5.1 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.0 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>
       )}
 
+      {presetDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPresetDialogOpen(false); }}><form className="preset-dialog" onSubmit={(event) => { event.preventDefault(); saveCustomPreset(); }}><span className="eyebrow">SAVE PRESET</span><h2>保存当前压缩参数</h2><p>画质、尺寸、格式、元数据和水印设置会一起保存，下次启动仍然可用。</p><input autoFocus value={presetName} maxLength={24} placeholder="例如：公众号封面" onChange={(event) => setPresetName(event.target.value)} /><div><button type="button" onClick={() => setPresetDialogOpen(false)}>取消</button><button className="primary" type="submit" disabled={!presetName.trim()}>保存预设</button></div></form></div>}
       {dragging && <div className="drag-overlay" onDragLeave={() => setDragging(false)}><div><span>＋</span><strong>松开即可加入图片</strong><small>支持同时导入多张</small></div></div>}
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
     </main>
