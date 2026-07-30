@@ -726,6 +726,13 @@ async fn hide_current_window(window: tauri::WebviewWindow) -> Result<(), String>
     window.hide().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn quit_application(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
+    state.quitting.store(true, Ordering::Relaxed);
+    app.exit(0);
+    Ok(())
+}
+
 fn process_watched_file(
     app: AppHandle,
     path: PathBuf,
@@ -2206,6 +2213,7 @@ pub fn run() {
             show_dropzone_window,
             configure_dropzone_window,
             hide_current_window,
+            quit_application,
             start_watcher,
             stop_watcher,
             get_watcher_state,

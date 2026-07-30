@@ -64,7 +64,9 @@ if ("__TAURI_INTERNALS__" in window) {
     showMainWindow: () => invoke("show_main_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
+    setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
     hideCurrentWindow: () => invoke("hide_current_window"),
+    quitApplication: () => invoke("quit_application"),
     onFileDrop: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
