@@ -87,6 +87,23 @@ struct NativeDesktopPreferences {
     clipboard_watcher_enabled: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    available: bool,
+    release_url: String,
+    published_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    published_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QuickCompressSettings {
@@ -2418,6 +2435,104 @@ async fn set_tray_theme(app: AppHandle, theme: String) -> Result<(), String> {
     Ok(())
 }
 
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let latest = version_parts(latest);
+    let current = version_parts(current);
+    let count = latest.len().max(current.len());
+    (0..count)
+        .map(|index| {
+            (
+                *latest.get(index).unwrap_or(&0),
+                *current.get(index).unwrap_or(&0),
+            )
+        })
+        .find(|(left, right)| left != right)
+        .is_some_and(|(left, right)| left > right)
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let release = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent(format!("PicLite/{current_version}"))
+            .build()
+            .map_err(|error| format!("无法创建更新检查请求：{error}"))?
+            .get("https://api.github.com/repos/amiaoapp/PicLite/releases/latest")
+            .send()
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("连接 GitHub 检查更新失败：{error}"))?
+            .text()
+            .map_err(|error| format!("读取 GitHub 版本信息失败：{error}"))?;
+        let release = serde_json::from_str::<GithubRelease>(&release)
+            .map_err(|error| format!("解析 GitHub 版本信息失败：{error}"))?;
+        let latest_version = release.tag_name.trim_start_matches(['v', 'V']).to_string();
+        Ok(UpdateInfo {
+            available: version_is_newer(&latest_version, &current_version),
+            current_version,
+            latest_version,
+            release_url: release.html_url,
+            published_at: release.published_at,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(url).status();
+
+    #[cfg(target_os = "windows")]
+    let status = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+    };
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let status = Command::new("xdg-open").arg(url).status();
+
+    status
+        .map_err(|error| format!("无法打开浏览器：{error}"))?
+        .success()
+        .then_some(())
+        .ok_or_else(|| "系统没有成功打开浏览器".to_string())
+}
+
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|_| "链接格式无效".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.path().starts_with("/amiaoapp/PicLite")
+    {
+        return Err("只允许打开 PicLite 的 GitHub 页面".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || open_url(&url))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 fn start_clipboard_monitor(app: AppHandle) {
     thread::spawn(move || {
         let mut was_enabled = false;
@@ -2532,6 +2647,8 @@ pub fn run() {
             quick_compress_paths,
             update_desktop_preferences,
             set_tray_theme,
+            check_for_updates,
+            open_external_url,
             show_main_window,
             show_dropzone_window,
             configure_dropzone_window,
@@ -2667,5 +2784,13 @@ mod tests {
             joined_public_url("https://img.example.com/", "piclite/图 轻.png", "unused"),
             "https://img.example.com/piclite/%E5%9B%BE%20%E8%BD%BB.png"
         );
+    }
+
+    #[test]
+    fn update_versions_compare_numerically() {
+        assert!(version_is_newer("v0.11.0", "0.10.9"));
+        assert!(version_is_newer("1.0.0", "0.99.99"));
+        assert!(!version_is_newer("v0.10.0", "0.10.0"));
+        assert!(!version_is_newer("0.9.9", "0.10.0"));
     }
 }

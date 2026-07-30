@@ -37,6 +37,7 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 - 桌面端可选上传到通用 S3 / MinIO、WebDAV、Cloudflare R2、阿里云 OSS、FTP 或 SFTP，配置与凭证可保存到当前系统用户的 PicLite 配置目录
 - 自动恢复上次画质、缩放、水印、监测配置，并支持保存和删除自定义压缩预设
 - 桌面专属应用设置：默认输出规则、固定目录、后缀、覆盖确认、托盘行为和关于页面
+- 桌面端可自动检查 GitHub Release 并提示更新；网页端会识别当前系统并引导下载对应客户端
 - Docker 自托管和 GitHub Actions 跨平台自动构建
 
 图片默认只在浏览器或桌面客户端本地处理，不会上传到 PicLite 服务器。只有你主动点击“上传图床”时，结果图才会发送到你自己配置的存储服务；桌面端可按你的操作将凭证保存在当前系统用户的 PicLite 配置目录中，不会写入网页 localStorage 或同步到 PicLite 服务器。网页端受浏览器权限限制，持续文件夹监测和图床上传只在桌面客户端提供。
@@ -322,8 +323,8 @@ npm run desktop:build:linux:x64
 推送版本标签后，GitHub Actions 会构建五组桌面产物，并自动创建 Release：
 
 ```bash
-git tag v0.10.0
-git push origin v0.10.0
+git tag v0.11.0
+git push origin v0.11.0
 ```
 
 只想测试构建、不发布版本时，在 GitHub 的 `Actions → Build desktop apps → Run workflow` 手动运行。手动运行的文件会保存在该次工作流的 Artifacts 中。

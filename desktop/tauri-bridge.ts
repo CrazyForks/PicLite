@@ -75,6 +75,8 @@ if ("__TAURI_INTERNALS__" in window) {
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
     hideCurrentWindow: () => invoke("hide_current_window"),
     quitApplication: () => invoke("quit_application"),
+    checkForUpdates: () => invoke("check_for_updates"),
+    openExternal: (url) => invoke("open_external_url", { url }),
     onFileDrop: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
