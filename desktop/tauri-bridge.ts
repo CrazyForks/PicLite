@@ -57,6 +57,10 @@ if ("__TAURI_INTERNALS__" in window) {
     loadUploadProfile: () => invoke("load_upload_profile"),
     saveUploadProfile: (profile) => invoke("save_upload_profile", { profile }),
     listSystemFonts: () => invoke("list_system_fonts"),
+    readSystemFont: async (path, faceIndex) => {
+      const result = await invoke<{ data: string }>("read_system_font", { path, faceIndex });
+      return { data: decodeBase64(result.data) };
+    },
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: (theme) => currentWindow.setTheme(theme === "system" ? null : theme),
     startDragging: () => currentWindow.startDragging(),

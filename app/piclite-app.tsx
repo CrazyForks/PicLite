@@ -77,6 +77,12 @@ type NativeUploadPayload = UploadSettings & {
   data: Uint8Array;
 };
 
+type SystemFontInfo = {
+  family: string;
+  path: string;
+  faceIndex: number;
+};
+
 type WatcherEvent = {
   id: string;
   type: "success" | "error" | "started" | "stopped";
@@ -121,7 +127,8 @@ type NativeBridge = {
   uploadImage: (payload: NativeUploadPayload) => Promise<{ url: string; remotePath: string }>;
   loadUploadProfile: () => Promise<StoredUploadProfile | null>;
   saveUploadProfile: (profile: StoredUploadProfile) => Promise<void>;
-  listSystemFonts: () => Promise<string[]>;
+  listSystemFonts: () => Promise<SystemFontInfo[]>;
+  readSystemFont: (path: string, faceIndex: number) => Promise<{ data: Uint8Array }>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean }) => Promise<void>;
   setWindowTheme: (theme: ThemeMode) => Promise<void>;
   startDragging: () => Promise<void>;
@@ -1360,6 +1367,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const galleryUrlsRef = useRef<string[]>([]);
   const savedUploadProfileRef = useRef<string | null>(null);
   const loadedSystemFontsRef = useRef<Set<string>>(new Set());
+  const systemFontFilesRef = useRef<Map<string, SystemFontInfo>>(new Map());
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
@@ -2106,11 +2114,14 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
   const loadSystemFonts = useCallback(async () => {
     try {
-      const families = nativeBridge
-        ? await nativeBridge.listSystemFonts()
-        : window.queryLocalFonts
-          ? Array.from(new Set((await window.queryLocalFonts()).map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right))
-          : [];
+      let families: string[] = [];
+      if (nativeBridge) {
+        const fonts = await nativeBridge.listSystemFonts();
+        systemFontFilesRef.current = new Map(fonts.map((font) => [font.family, font]));
+        families = fonts.map((font) => font.family);
+      } else if (window.queryLocalFonts) {
+        families = Array.from(new Set((await window.queryLocalFonts()).map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+      }
       if (!families.length) {
         showToast(nativeBridge ? "没有在系统字体目录中找到可用字体" : "当前浏览器不支持读取系统字体，可直接导入字体文件");
         return;
@@ -2125,11 +2136,16 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const selectSystemFont = useCallback(async (family: string) => {
     try {
       if (!loadedSystemFontsRef.current.has(family)) {
+        const systemFont = systemFontFilesRef.current.get(family);
         const localName = family.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-        const face = new FontFace(family, `local("${localName}")`);
+        const source = nativeBridge && systemFont
+          ? (await nativeBridge.readSystemFont(systemFont.path, systemFont.faceIndex)).data
+          : `local("${localName}")`;
+        const face = new FontFace(family, source);
         await face.load();
         document.fonts.add(face);
-        await document.fonts.load(`16px "${localName}"`);
+        await document.fonts.load(`16px "${localName}"`, "PicLite 图轻 123");
+        await document.fonts.ready;
         loadedSystemFontsRef.current.add(family);
       }
       setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
@@ -2138,7 +2154,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
       showToast(`系统字体 ${family} 无法载入，请尝试导入对应字体文件`);
     }
-  }, [showToast]);
+  }, [nativeBridge, showToast]);
 
   const onFontSelected = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -2550,7 +2566,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                   <button className={settings.watermark.layout === "single" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "single" } }))}>单点定位</button>
                 </div>
                 <div className="font-picker-row">
-                  <div className="select-wrap"><select aria-label="水印字体" value={settings.watermark.fontFamily} onChange={(event) => void selectSystemFont(event.target.value)}>{localFonts.map((font) => <option value={font} key={font}>{font}</option>)}</select></div>
+                  <div className="select-wrap"><select aria-label="水印字体" value={settings.watermark.fontFamily} onChange={(event) => void selectSystemFont(event.target.value)}>{localFonts.map((font) => <option value={font} key={font} style={{ fontFamily: `"${font.replaceAll('"', "")}"` }}>{font}</option>)}</select></div>
                   <button type="button" onClick={loadSystemFonts}>系统字体</button>
                   <button type="button" onClick={() => fontInputRef.current?.click()}>导入字体</button>
                 </div>
@@ -2794,9 +2810,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.9.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.9.1 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.9.0 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.9.1 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>

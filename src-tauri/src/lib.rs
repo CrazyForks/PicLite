@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Cursor, Write},
     net::{Shutdown, TcpStream},
@@ -140,6 +140,19 @@ struct NativeImage {
 
 #[derive(Serialize)]
 struct ClipboardImage {
+    data: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemFontInfo {
+    family: String,
+    path: String,
+    face_index: u32,
+}
+
+#[derive(Serialize)]
+struct SystemFontData {
     data: String,
 }
 
@@ -950,7 +963,10 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
         .to_string();
     for (program, arguments) in [
         ("wl-copy", vec!["--type", "text/uri-list"]),
-        ("xclip", vec!["-selection", "clipboard", "-t", "text/uri-list", "-i"]),
+        (
+            "xclip",
+            vec!["-selection", "clipboard", "-t", "text/uri-list", "-i"],
+        ),
     ] {
         let Ok(mut child) = Command::new(program)
             .args(arguments)
@@ -1038,7 +1054,12 @@ fn collect_font_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) 
         let supported = path
             .extension()
             .and_then(|value| value.to_str())
-            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "ttf" | "otf" | "ttc" | "otc"
+                )
+            })
             .unwrap_or(false);
         if supported {
             files.push(path);
@@ -1050,7 +1071,10 @@ fn system_font_directories() -> Vec<PathBuf> {
     let mut directories = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        directories.extend([PathBuf::from("/System/Library/Fonts"), PathBuf::from("/Library/Fonts")]);
+        directories.extend([
+            PathBuf::from("/System/Library/Fonts"),
+            PathBuf::from("/Library/Fonts"),
+        ]);
         if let Some(home) = std::env::var_os("HOME") {
             directories.push(PathBuf::from(home).join("Library/Fonts"));
         }
@@ -1066,7 +1090,10 @@ fn system_font_directories() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        directories.extend([PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")]);
+        directories.extend([
+            PathBuf::from("/usr/share/fonts"),
+            PathBuf::from("/usr/local/share/fonts"),
+        ]);
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
             directories.push(home.join(".fonts"));
@@ -1076,12 +1103,13 @@ fn system_font_directories() -> Vec<PathBuf> {
     directories
 }
 
-fn read_system_font_families() -> Vec<String> {
+fn read_system_fonts() -> Vec<SystemFontInfo> {
     let mut files = Vec::new();
     for directory in system_font_directories() {
         collect_font_files(&directory, 0, &mut files);
     }
-    let mut families = BTreeSet::new();
+    files.sort();
+    let mut families = BTreeMap::new();
     for path in files {
         let Ok(data) = fs::read(&path) else {
             continue;
@@ -1091,23 +1119,163 @@ fn read_system_font_families() -> Vec<String> {
             let Ok(face) = ttf_parser::Face::parse(&data, index) else {
                 continue;
             };
-            for name in face.names() {
-                if matches!(name.name_id, 1 | 16) {
-                    if let Some(value) = name.to_string().filter(|value| !value.trim().is_empty()) {
-                        families.insert(value);
-                    }
-                }
-            }
+            let family = face
+                .names()
+                .into_iter()
+                .filter(|name| name.name_id == 16)
+                .find_map(|name| name.to_string().filter(|value| !value.trim().is_empty()))
+                .or_else(|| {
+                    face.names()
+                        .into_iter()
+                        .filter(|name| name.name_id == 1)
+                        .find_map(|name| name.to_string().filter(|value| !value.trim().is_empty()))
+                });
+            let Some(family) = family else { continue };
+            families
+                .entry(family.clone())
+                .or_insert_with(|| SystemFontInfo {
+                    family,
+                    path: path.to_string_lossy().to_string(),
+                    face_index: index,
+                });
         }
     }
-    families.into_iter().take(2_000).collect()
+    families.into_values().take(2_000).collect()
 }
 
 #[tauri::command]
-async fn list_system_fonts() -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(read_system_font_families)
+async fn list_system_fonts() -> Result<Vec<SystemFontInfo>, String> {
+    tauri::async_runtime::spawn_blocking(read_system_fonts)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn read_be_u16(data: &[u8], offset: usize) -> Result<u16, String> {
+    let bytes = data
+        .get(offset..offset + 2)
+        .ok_or_else(|| "字体文件结构不完整".to_string())?;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_be_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| "字体文件结构不完整".to_string())?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn extract_font_face(data: &[u8], face_index: u32) -> Result<Vec<u8>, String> {
+    if data.get(0..4) != Some(b"ttcf") {
+        if face_index != 0 {
+            return Err("字体字面索引无效".to_string());
+        }
+        return Ok(data.to_vec());
+    }
+
+    let face_count = read_be_u32(data, 8)?;
+    if face_index >= face_count {
+        return Err("字体字面索引无效".to_string());
+    }
+    let face_offset = read_be_u32(data, 12 + face_index as usize * 4)? as usize;
+    let table_count = read_be_u16(data, face_offset + 4)? as usize;
+    let directory_length = 12usize
+        .checked_add(
+            table_count
+                .checked_mul(16)
+                .ok_or_else(|| "字体表数量异常".to_string())?,
+        )
+        .ok_or_else(|| "字体目录过大".to_string())?;
+    let directory_end = face_offset
+        .checked_add(directory_length)
+        .ok_or_else(|| "字体目录过大".to_string())?;
+    let directory = data
+        .get(face_offset..directory_end)
+        .ok_or_else(|| "字体目录不完整".to_string())?;
+    let mut output = directory.to_vec();
+    let mut head_offset = None;
+
+    for table_index in 0..table_count {
+        let record = face_offset + 12 + table_index * 16;
+        let tag = data
+            .get(record..record + 4)
+            .ok_or_else(|| "字体表记录不完整".to_string())?;
+        let source_offset = read_be_u32(data, record + 8)? as usize;
+        let length = read_be_u32(data, record + 12)? as usize;
+        let source_end = source_offset
+            .checked_add(length)
+            .ok_or_else(|| "字体表过大".to_string())?;
+        let table = data
+            .get(source_offset..source_end)
+            .ok_or_else(|| "字体表数据不完整".to_string())?;
+        while output.len() % 4 != 0 {
+            output.push(0);
+        }
+        let target_offset = output.len();
+        let target_offset_u32 =
+            u32::try_from(target_offset).map_err(|_| "字体文件过大".to_string())?;
+        output[12 + table_index * 16 + 8..12 + table_index * 16 + 12]
+            .copy_from_slice(&target_offset_u32.to_be_bytes());
+        output.extend_from_slice(table);
+        if tag == b"head" {
+            head_offset = Some(target_offset);
+        }
+    }
+
+    while output.len() % 4 != 0 {
+        output.push(0);
+    }
+    if let Some(head) = head_offset.filter(|offset| offset + 12 <= output.len()) {
+        output[head + 8..head + 12].fill(0);
+        let checksum = output.chunks_exact(4).fold(0u32, |sum, chunk| {
+            sum.wrapping_add(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        });
+        output[head + 8..head + 12]
+            .copy_from_slice(&0xB1B0_AFBAu32.wrapping_sub(checksum).to_be_bytes());
+    }
+    Ok(output)
+}
+
+fn validated_system_font_path(value: &str) -> Result<PathBuf, String> {
+    let path = fs::canonicalize(value).map_err(|error| format!("无法读取字体文件：{error}"))?;
+    let allowed = system_font_directories()
+        .into_iter()
+        .filter_map(|directory| fs::canonicalize(directory).ok())
+        .any(|directory| path.starts_with(directory));
+    if !allowed || !path.is_file() {
+        return Err("只能读取系统字体目录中的字体文件".to_string());
+    }
+    let supported = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "otc"
+            )
+        })
+        .unwrap_or(false);
+    if !supported {
+        return Err("不支持该字体文件格式".to_string());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+async fn read_system_font(path: String, face_index: u32) -> Result<SystemFontData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = validated_system_font_path(&path)?;
+        let metadata = fs::metadata(&path).map_err(|error| format!("无法读取字体信息：{error}"))?;
+        if metadata.len() > 64 * 1024 * 1024 {
+            return Err("字体文件超过 64 MB，无法载入".to_string());
+        }
+        let data = fs::read(path).map_err(|error| format!("无法读取字体文件：{error}"))?;
+        let face = extract_font_face(&data, face_index)?;
+        Ok(SystemFontData {
+            data: BASE64.encode(face),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn upload_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1132,10 +1300,7 @@ async fn load_upload_profile(app: AppHandle) -> Result<Option<NativeUploadProfil
 }
 
 #[tauri::command]
-async fn save_upload_profile(
-    app: AppHandle,
-    profile: NativeUploadProfile,
-) -> Result<(), String> {
+async fn save_upload_profile(app: AppHandle, profile: NativeUploadProfile) -> Result<(), String> {
     let path = upload_profile_path(&app)?;
     let data = serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?;
     let mut options = OpenOptions::new();
@@ -1359,7 +1524,11 @@ fn upload_s3_compatible(
         None => format!("{scheme}://{request_host}{canonical_uri}"),
     };
     let region = if payload.region.trim().is_empty() {
-        if service_name == "R2" { "auto" } else { "us-east-1" }
+        if service_name == "R2" {
+            "auto"
+        } else {
+            "us-east-1"
+        }
     } else {
         payload.region.trim()
     };
@@ -2202,6 +2371,7 @@ pub fn run() {
             copy_compressed_data,
             copy_image_path,
             list_system_fonts,
+            read_system_font,
             reveal_path,
             upload_image,
             load_upload_profile,
@@ -2289,6 +2459,27 @@ mod tests {
         let steps = guarded_quality_steps(100);
         assert!(steps.windows(2).all(|pair| pair[0] > pair[1]));
         assert_eq!(steps.last(), Some(&1));
+    }
+
+    #[test]
+    fn selected_collection_font_face_stays_parseable() {
+        let mut files = Vec::new();
+        for directory in system_font_directories() {
+            collect_font_files(&directory, 0, &mut files);
+        }
+        for path in files {
+            let Ok(data) = fs::read(path) else { continue };
+            let Some(face_count) = ttf_parser::fonts_in_collection(&data) else {
+                continue;
+            };
+            if face_count < 2 {
+                continue;
+            }
+            let selected = face_count - 1;
+            let extracted = extract_font_face(&data, selected).expect("extract collection face");
+            ttf_parser::Face::parse(&extracted, 0).expect("parse extracted collection face");
+            return;
+        }
     }
 
     #[test]
