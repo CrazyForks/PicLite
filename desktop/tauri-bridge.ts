@@ -62,12 +62,16 @@ if ("__TAURI_INTERNALS__" in window) {
       return { data: decodeBase64(result.data) };
     },
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
-    setWindowTheme: (theme) => currentWindow.setTheme(theme === "system" ? null : theme),
+    setWindowTheme: async (theme) => {
+      await currentWindow.setTheme(theme === "system" ? null : theme);
+      await invoke("set_tray_theme", { theme });
+    },
     startDragging: () => currentWindow.startDragging(),
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
+    resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
     hideCurrentWindow: () => invoke("hide_current_window"),
     quitApplication: () => invoke("quit_application"),
@@ -105,6 +109,18 @@ if ("__TAURI_INTERNALS__" in window) {
       let unlisten: (() => void) | undefined;
       let disposed = false;
       void listen("watcher:event", (event) => callback(event.payload as Parameters<typeof callback>[0])).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
+    onClipboardImage: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen<{ data: string }>("clipboard:image", (event) => callback(decodeBase64(event.payload.data))).then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       });

@@ -35,9 +35,10 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use tauri::{
+    image::Image as TauriImage,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
@@ -60,6 +61,7 @@ struct DesktopState {
     quitting: AtomicBool,
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
+    clipboard_monitor_enabled: AtomicBool,
 }
 
 impl Default for DesktopState {
@@ -73,6 +75,7 @@ impl Default for DesktopState {
             quitting: AtomicBool::new(false),
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
+            clipboard_monitor_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -81,6 +84,7 @@ impl Default for DesktopState {
 #[serde(rename_all = "camelCase")]
 struct NativeDesktopPreferences {
     minimize_to_tray: bool,
+    clipboard_watcher_enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,7 +142,7 @@ struct NativeImage {
     data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ClipboardImage {
     data: String,
 }
@@ -591,6 +595,29 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
     }
 }
 
+fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
+    if let Some(window) = app.get_webview_window("dropzone") {
+        let width = width.clamp(190.0, 520.0);
+        let height = height.clamp(140.0, 420.0);
+        let old_position = window.outer_position().ok();
+        let old_size = window.outer_size().ok();
+        let scale = window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| monitor.scale_factor())
+            .unwrap_or(1.0);
+        let _ = window.set_size(LogicalSize::new(width, height));
+        if let (Some(position), Some(size)) = (old_position, old_size) {
+            let new_width = (width * scale).round() as i32;
+            let new_height = (height * scale).round() as i32;
+            let x = position.x + (size.width as i32 - new_width) / 2;
+            let y = position.y + (size.height as i32 - new_height) / 2;
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+}
+
 fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
     WatcherSettings {
         input_folder: String::new(),
@@ -707,6 +734,9 @@ async fn update_desktop_preferences(
     state
         .minimize_to_tray
         .store(preferences.minimize_to_tray, Ordering::Relaxed);
+    state
+        .clipboard_monitor_enabled
+        .store(preferences.clipboard_watcher_enabled, Ordering::Relaxed);
     Ok(())
 }
 
@@ -731,6 +761,12 @@ async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn configure_dropzone_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
     resize_and_position_dropzone(&app, width, height);
+    Ok(())
+}
+
+#[tauri::command]
+async fn resize_dropzone_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    resize_dropzone_around_center(&app, width, height);
     Ok(())
 }
 
@@ -879,8 +915,7 @@ async fn select_images(
     Ok(images)
 }
 
-#[tauri::command]
-async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
     let image = match clipboard.get_image() {
         Ok(image) => image,
@@ -899,6 +934,13 @@ async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     Ok(Some(ClipboardImage {
         data: BASE64.encode(png),
     }))
+}
+
+#[tauri::command]
+async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard_image)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn write_clipboard_image(data: &[u8]) -> Result<(), String> {
@@ -939,14 +981,20 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
-    let status = Command::new("powershell.exe")
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new("powershell.exe");
+    command
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             "Set-Clipboard -LiteralPath $args[0]",
         ])
-        .arg(path)
+        .arg(path);
+    let status = command
         .status()
         .map_err(|error| format!("无法调用系统剪贴板：{error}"))?;
     if status.success() {
@@ -2272,9 +2320,12 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    TrayIconBuilder::new()
+    let tray_icon = decode_tray_icon(include_bytes!("../icons/tray-light.png"))
+        .unwrap_or_else(|| app.default_window_icon().expect("missing app icon").clone());
+    TrayIconBuilder::with_id("piclite-tray")
         .tooltip("PicLite 图轻 · 拖图到悬浮压缩坞")
-        .icon(app.default_window_icon().expect("missing app icon").clone())
+        .icon(tray_icon)
+        .icon_as_template(cfg!(target_os = "macos"))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -2287,6 +2338,23 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             "watcher_settings" => {
                 show_window(app, "main");
                 let _ = app.emit("tray:action", "watcher_settings");
+            }
+            "theme_light" => {
+                apply_tray_icon_theme(app, false);
+                let _ = app.emit("tray:action", "theme_light");
+            }
+            "theme_dark" => {
+                apply_tray_icon_theme(app, true);
+                let _ = app.emit("tray:action", "theme_dark");
+            }
+            "theme_system" => {
+                let dark = app
+                    .get_webview_window("main")
+                    .and_then(|window| window.theme().ok())
+                    .map(|theme| theme == Theme::Dark)
+                    .unwrap_or(false);
+                apply_tray_icon_theme(app, dark);
+                let _ = app.emit("tray:action", "theme_system");
             }
             "quit" => {
                 app.state::<DesktopState>()
@@ -2312,6 +2380,88 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn decode_tray_icon(bytes: &[u8]) -> Option<TauriImage<'static>> {
+    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(TauriImage::new_owned(rgba.into_raw(), width, height))
+}
+
+fn apply_tray_icon_theme(app: &AppHandle, dark: bool) {
+    let Some(tray) = app.tray_by_id("piclite-tray") else {
+        return;
+    };
+    let bytes = if dark {
+        include_bytes!("../icons/tray-dark.png").as_slice()
+    } else {
+        include_bytes!("../icons/tray-light.png").as_slice()
+    };
+    if let Some(icon) = decode_tray_icon(bytes) {
+        let _ = tray.set_icon(Some(icon));
+        #[cfg(target_os = "macos")]
+        let _ = tray.set_icon_as_template(true);
+    }
+}
+
+#[tauri::command]
+async fn set_tray_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    let dark = if theme == "dark" {
+        true
+    } else if theme == "light" {
+        false
+    } else {
+        app.get_webview_window("main")
+            .and_then(|window| window.theme().ok())
+            .map(|theme| theme == Theme::Dark)
+            .unwrap_or(false)
+    };
+    apply_tray_icon_theme(&app, dark);
+    Ok(())
+}
+
+fn start_clipboard_monitor(app: AppHandle) {
+    thread::spawn(move || {
+        let mut was_enabled = false;
+        let mut last_fingerprint: Option<String> = None;
+        loop {
+            let (enabled, quitting) = {
+                let state = app.state::<DesktopState>();
+                (
+                    state.clipboard_monitor_enabled.load(Ordering::Relaxed),
+                    state.quitting.load(Ordering::Relaxed),
+                )
+            };
+            if quitting {
+                return;
+            }
+            if !enabled {
+                was_enabled = false;
+                last_fingerprint = None;
+                thread::sleep(Duration::from_millis(800));
+                continue;
+            }
+
+            match clipboard_image() {
+                Ok(Some(image)) => {
+                    let fingerprint = format!("{:x}", Sha256::digest(image.data.as_bytes()));
+                    if !was_enabled {
+                        last_fingerprint = Some(fingerprint);
+                        was_enabled = true;
+                    } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                        last_fingerprint = Some(fingerprint);
+                        let _ = app.emit("clipboard:image", image);
+                    }
+                }
+                Ok(None) => {
+                    was_enabled = true;
+                    last_fingerprint = None;
+                }
+                Err(_) => {}
+            }
+            thread::sleep(Duration::from_millis(800));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -2333,6 +2483,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.handle()
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+
+            start_clipboard_monitor(app.handle().clone());
 
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
@@ -2379,9 +2531,11 @@ pub fn run() {
             export_images,
             quick_compress_paths,
             update_desktop_preferences,
+            set_tray_theme,
             show_main_window,
             show_dropzone_window,
             configure_dropzone_window,
+            resize_dropzone_window,
             hide_current_window,
             quit_application,
             start_watcher,
