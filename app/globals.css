@@ -331,7 +331,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .mini-range { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .mini-range > span { display: flex; justify-content: space-between; color: #89958f; font-size: 8px; }
 .mini-range b { color: var(--deep); }
-.mini-range input[type="range"] { width: 100%; margin: 0; accent-color: var(--deep); }
+.mini-range input[type="range"] { position: relative; z-index: 2; width: 100%; height: 28px; min-width: 0; margin: -4px 0; padding: 0; border: 0; background: transparent; accent-color: var(--deep); cursor: pointer; pointer-events: auto; touch-action: none; }
+.watermark-controls, .watermark-controls > *, .watermark-color-row > *, .shadow-row > * { min-width: 0; }
 .watermark-color-row { display: grid; grid-template-columns: 73px 1fr; gap: 10px; align-items: end; }
 .watermark-color-row > label:first-child { display: flex; flex-direction: column; gap: 4px; color: #89958f; font-size: 8px; }
 .watermark-color-row input[type="color"], .shadow-row input[type="color"] { width: 100%; height: 26px; padding: 2px; border: 1px solid #dce3de; border-radius: 7px; background: #fff; }
@@ -651,6 +652,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .upload-field > small { color: #929f98; font-size: 7px; }
 .upload-security-note { margin: 0; padding: 13px 20px 16px; color: #738178; font-size: 8px; line-height: 1.55; }
 .upload-security-note span { color: var(--success); }
+.upload-save-row { padding: 13px 20px 16px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.upload-save-row .upload-security-note { flex: 1; padding: 0; }
+.upload-save-row .preference-action { flex: 0 0 auto; }
+.upload-field.upload-check { flex-direction: row; align-items: center; align-self: end; min-height: 36px; }
+.upload-field.upload-check input { width: 16px; height: 16px; padding: 0; accent-color: var(--deep); }
+.upload-field.upload-check span { line-height: 1.4; }
+.preference-number { display: flex; align-items: center; gap: 6px; color: #78877f; font-size: 9px; }
+.preference-number input { width: 66px; height: 34px; border: 1px solid #dce3de; border-radius: 9px; background: #fafbf9; color: #38483f; text-align: center; font-weight: 800; }
 
 .drag-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(16,42,32,.72); backdrop-filter: blur(12px); pointer-events: none; }
 .drag-overlay > div { width: min(470px, calc(100vw - 40px)); height: 270px; border: 2px dashed rgba(217,255,116,.8); border-radius: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; box-shadow: inset 0 0 90px rgba(217,255,116,.06); }
@@ -1116,6 +1125,55 @@ html[data-theme="light"] .dock-controls input::-webkit-slider-thumb { border-col
   .dock-controls { padding-inline: 8px; }
   .drop-dock > footer { padding-left: 8px; }
 }
+
+/* 0.8 floating result: borderless frosted card, desktop-pet entry and compact tools. */
+.drop-dock {
+  border-color: rgba(181,209,147,.18);
+  border-radius: 18px;
+  clip-path: none;
+  background: radial-gradient(circle at 10% -25%, rgba(180,212,126,.2), transparent 52%), rgba(12,18,15,.82);
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 16px 52px rgba(0,0,0,.24);
+  backdrop-filter: blur(34px) saturate(1.28);
+  -webkit-backdrop-filter: blur(34px) saturate(1.28);
+}
+.drop-dock::before { border-radius: 18px; }
+.dock-empty { width: 100%; padding: 4px 8px; color: inherit; font: inherit; cursor: pointer; outline: 0; }
+.dock-empty:focus-visible { border-color: var(--dock-accent); box-shadow: inset 0 0 0 2px rgba(157,185,109,.18); }
+.dock-results > div { min-height: 43px; grid-template-columns: 38px minmax(0,1fr) auto; padding: 4px 6px; border-radius: 10px; }
+.dock-results > div > img { width: 36px; height: 34px; border-radius: 8px; object-fit: cover; background: rgba(255,255,255,.06); }
+.dock-results > div > span { width: 34px; height: 34px; border-radius: 8px; }
+.dock-results strong { font-size: 8.5px; }
+.dock-results small, .dock-results > div > b { font-size: 7px; }
+.dock-controls input { touch-action: none; }
+.drop-dock.is-idle.layout-pet { grid-template-rows: 28px minmax(0,1fr); }
+.drop-dock.is-idle.layout-pet .dock-controls,
+.drop-dock.is-idle.layout-pet > footer { display: none; }
+.drop-dock.is-idle.layout-pet .dock-body { padding: 5px 7px 7px; }
+.drop-dock.is-idle.layout-pet .dock-empty { flex-direction: column; gap: 2px; border-style: solid; border-color: rgba(157,185,109,.12); background: rgba(255,255,255,.025); }
+.drop-dock.is-idle.layout-pet .dock-empty strong { font-size: 9px; }
+.drop-dock.is-idle.layout-pet .dock-empty small { font-size: 6px; }
+.drop-dock.layout-full .dock-results > div { min-height: 54px; grid-template-columns: 48px minmax(0,1fr) auto; }
+.drop-dock.layout-full .dock-results > div > img,
+.drop-dock.layout-full .dock-results > div > span { width: 45px; height: 44px; }
+.drop-dock.layout-full .dock-results strong { font-size: 10px; }
+.drop-dock.layout-full .dock-results small { font-size: 8px; }
+
+.piclite-pet { position: relative; width: 82px; height: 73px; display: block; filter: drop-shadow(0 8px 13px rgba(0,0,0,.22)); animation: pet-breathe 3.4s ease-in-out infinite; }
+.pet-hair { position: absolute; z-index: 1; left: 11px; top: 2px; width: 60px; height: 47px; border-radius: 48% 48% 42% 42%; background: #a6c875; box-shadow: -7px 10px #8faf63, 7px 9px #bddb88, -2px -3px 0 2px #cde9a0; }
+.pet-face { position: absolute; z-index: 2; left: 20px; top: 14px; width: 43px; height: 32px; display: grid; place-items: center; border: 3px solid #263a31; border-radius: 12px; background: #10211a; box-shadow: inset 0 -5px rgba(69,111,91,.28); }
+.pet-face b { color: #d7ff74; font-size: 14px; line-height: 1; letter-spacing: 2px; }
+.pet-body { position: absolute; z-index: 1; left: 25px; top: 47px; width: 33px; height: 22px; display: grid; place-items: center; border-radius: 9px 9px 12px 12px; color: #193026; background: #8fb864; font-style: normal; font-size: 9px; }
+.pet-feet::before, .pet-feet::after { content: ""; position: absolute; z-index: 0; bottom: 0; width: 19px; height: 13px; border-radius: 50% 50% 8px 8px; background: #799e57; }
+.pet-feet::before { left: 14px; transform: rotate(13deg); }
+.pet-feet::after { right: 14px; transform: rotate(-13deg); }
+.dock-empty:hover .piclite-pet { animation: pet-wave .65s ease-in-out; }
+
+html[data-theme="light"] .drop-dock { border-color: rgba(66,92,76,.16); background: radial-gradient(circle at 10% -25%, rgba(178,211,124,.24), transparent 52%), rgba(244,249,245,.86); box-shadow: inset 0 1px rgba(255,255,255,.84), 0 16px 52px rgba(37,59,46,.16); }
+html[data-theme="light"] .drop-dock.is-idle.layout-pet .dock-empty { background: rgba(255,255,255,.38); border-color: rgba(64,94,75,.12); }
+html[data-theme="dark"] .preference-number input { background: #111714; border-color: #324139; color: #e8f0eb; }
+
+@keyframes pet-breathe { 50% { transform: translateY(-2px) scale(1.015); } }
+@keyframes pet-wave { 35% { transform: rotate(-3deg) translateY(-3px); } 70% { transform: rotate(3deg) translateY(-1px); } }
 
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(16px) scale(.97); } }

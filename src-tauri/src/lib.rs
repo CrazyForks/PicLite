@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
-    fs,
+    collections::{BTreeSet, HashSet},
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader, Cursor, Write},
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
@@ -37,7 +37,7 @@ use ssh2::{CheckResult, KnownHostFileKind, Session};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
@@ -195,10 +195,30 @@ struct NativeUploadPayload {
     remote_path: String,
     public_base_url: String,
     key_path: String,
+    #[serde(default = "default_true")]
+    path_style: bool,
     secret: String,
     file_name: String,
     mime_type: String,
     data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeUploadProfile {
+    provider: String,
+    endpoint: String,
+    bucket: String,
+    region: String,
+    access_key: String,
+    username: String,
+    port: u16,
+    remote_path: String,
+    public_base_url: String,
+    key_path: String,
+    #[serde(default = "default_true")]
+    path_style: bool,
+    secret: String,
 }
 
 #[derive(Serialize)]
@@ -534,6 +554,30 @@ fn show_window(app: &AppHandle, label: &str) {
     }
 }
 
+fn position_dropzone(window: &tauri::WebviewWindow, logical_width: f64, logical_height: f64) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let margin = (18.0 * scale).round() as i32;
+    let width = (logical_width * scale).round() as i32;
+    let height = (logical_height * scale).round() as i32;
+    let position = monitor.position();
+    let size = monitor.size();
+    let x = position.x + size.width as i32 - width - margin;
+    let y = position.y + size.height as i32 - height - margin;
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
+    if let Some(window) = app.get_webview_window("dropzone") {
+        let width = width.clamp(190.0, 520.0);
+        let height = height.clamp(140.0, 420.0);
+        let _ = window.set_size(LogicalSize::new(width, height));
+        position_dropzone(&window, width, height);
+    }
+}
+
 fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
     WatcherSettings {
         input_folder: String::new(),
@@ -661,7 +705,19 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("dropzone") {
+        if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
+            let logical = size.to_logical::<f64>(monitor.scale_factor());
+            position_dropzone(&window, logical.width, logical.height);
+        }
+    }
     show_window(&app, "dropzone");
+    Ok(())
+}
+
+#[tauri::command]
+async fn configure_dropzone_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    resize_and_position_dropzone(&app, width, height);
     Ok(())
 }
 
@@ -709,14 +765,15 @@ fn process_watched_file(
     match result {
         Ok((output_path, original_bytes, output_bytes)) => {
             let mut event = watcher_event("success", None);
-            event.file = canonical
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_string);
+            event.file = Some(canonical.to_string_lossy().to_string());
             event.output = Some(output_path.to_string_lossy().to_string());
             event.original_bytes = Some(original_bytes);
             event.output_bytes = Some(output_bytes);
             emit_event(&app, event);
+            resize_and_position_dropzone(&app, 320.0, 228.0);
+            if let Some(window) = app.get_webview_window("dropzone") {
+                let _ = window.show();
+            }
         }
         Err(error) => {
             let mut event = watcher_event("error", Some(error));
@@ -839,6 +896,89 @@ fn write_clipboard_image(data: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("无法写入系统剪贴板：{error}"))
 }
 
+#[cfg(target_os = "macos")]
+fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    let status = Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "set the clipboard to (POSIX file (item 1 of argv))",
+            "-e",
+            "end run",
+        ])
+        .arg(path)
+        .status()
+        .map_err(|error| format!("无法调用系统剪贴板：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统未能复制压缩文件".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Set-Clipboard -LiteralPath $args[0]",
+        ])
+        .arg(path)
+        .status()
+        .map_err(|error| format!("无法调用系统剪贴板：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统未能复制压缩文件".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    let uri = Url::from_file_path(path)
+        .map_err(|_| "无法生成结果文件地址".to_string())?
+        .to_string();
+    for (program, arguments) in [
+        ("wl-copy", vec!["--type", "text/uri-list"]),
+        ("xclip", vec!["-selection", "clipboard", "-t", "text/uri-list", "-i"]),
+    ] {
+        let Ok(mut child) = Command::new(program)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(uri.as_bytes());
+        }
+        if child.wait().map(|status| status.success()).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+    let data = fs::read(path).map_err(|error| error.to_string())?;
+    write_clipboard_image(&data)
+}
+
+fn clipboard_cache_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("clipboard");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let safe = safe_file_name(file_name);
+    let safe = if safe.trim().is_empty() {
+        "piclite-result.png".to_string()
+    } else {
+        safe
+    };
+    Ok(directory.join(format!("{}-{safe}", now_ms())))
+}
+
 #[tauri::command]
 async fn copy_image_data(data: Vec<u8>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || write_clipboard_image(&data))
@@ -847,13 +987,163 @@ async fn copy_image_data(data: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn copy_image_path(path: String) -> Result<(), String> {
+async fn copy_compressed_data(
+    app: AppHandle,
+    data: Vec<u8>,
+    file_name: String,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let data = fs::read(&path).map_err(|error| format!("无法读取结果文件：{error}"))?;
-        write_clipboard_image(&data)
+        let path = clipboard_cache_path(&app, &file_name)?;
+        fs::write(&path, data).map_err(|error| format!("无法缓存压缩文件：{error}"))?;
+        copy_file_to_clipboard(&path)?;
+        Ok(path.to_string_lossy().to_string())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn copy_image_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err("结果文件已经不存在".to_string());
+        }
+        copy_file_to_clipboard(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn collect_font_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
+    if depth > 8 || files.len() >= 4_000 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_font_files(&path, depth + 1, files);
+            continue;
+        }
+        let supported = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+            .unwrap_or(false);
+        if supported {
+            files.push(path);
+        }
+    }
+}
+
+fn system_font_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        directories.extend([PathBuf::from("/System/Library/Fonts"), PathBuf::from("/Library/Fonts")]);
+        if let Some(home) = std::env::var_os("HOME") {
+            directories.push(PathBuf::from(home).join("Library/Fonts"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(windows) = std::env::var_os("WINDIR") {
+            directories.push(PathBuf::from(windows).join("Fonts"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            directories.push(PathBuf::from(local).join("Microsoft/Windows/Fonts"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        directories.extend([PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")]);
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            directories.push(home.join(".fonts"));
+            directories.push(home.join(".local/share/fonts"));
+        }
+    }
+    directories
+}
+
+fn read_system_font_families() -> Vec<String> {
+    let mut files = Vec::new();
+    for directory in system_font_directories() {
+        collect_font_files(&directory, 0, &mut files);
+    }
+    let mut families = BTreeSet::new();
+    for path in files {
+        let Ok(data) = fs::read(&path) else {
+            continue;
+        };
+        let face_count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+        for index in 0..face_count {
+            let Ok(face) = ttf_parser::Face::parse(&data, index) else {
+                continue;
+            };
+            for name in face.names() {
+                if matches!(name.name_id, 1 | 16) {
+                    if let Some(value) = name.to_string().filter(|value| !value.trim().is_empty()) {
+                        families.insert(value);
+                    }
+                }
+            }
+        }
+    }
+    families.into_iter().take(2_000).collect()
+}
+
+#[tauri::command]
+async fn list_system_fonts() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(read_system_font_families)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn upload_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("upload-profile.json"))
+}
+
+#[tauri::command]
+async fn load_upload_profile(app: AppHandle) -> Result<Option<NativeUploadProfile>, String> {
+    let path = upload_profile_path(&app)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let data = fs::read(&path).map_err(|error| format!("无法读取上传配置：{error}"))?;
+    serde_json::from_slice(&data)
+        .map(Some)
+        .map_err(|error| format!("上传配置已损坏：{error}"))
+}
+
+#[tauri::command]
+async fn save_upload_profile(
+    app: AppHandle,
+    profile: NativeUploadProfile,
+) -> Result<(), String> {
+    let path = upload_profile_path(&app)?;
+    let data = serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("无法保存上传配置：{error}"))?;
+    file.write_all(&data)
+        .map_err(|error| format!("无法保存上传配置：{error}"))?;
+    file.flush().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1009,43 +1299,60 @@ fn upload_webdav(payload: &NativeUploadPayload, key: &str) -> Result<String, Str
     ))
 }
 
-fn upload_r2(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+fn upload_s3_compatible(
+    payload: &NativeUploadPayload,
+    key: &str,
+    service_name: &str,
+    force_path_style: bool,
+) -> Result<String, String> {
     if payload.bucket.trim().is_empty()
         || payload.access_key.trim().is_empty()
         || payload.secret.is_empty()
     {
-        return Err("R2 需要 Bucket、Access Key ID 和 Secret Access Key".to_string());
+        return Err(format!(
+            "{service_name} 需要 Bucket、Access Key ID 和 Secret Access Key"
+        ));
     }
     let endpoint = endpoint_url(&payload.endpoint, "https")?;
     let scheme = endpoint.scheme();
     let host = endpoint
         .host_str()
-        .ok_or_else(|| "R2 服务地址缺少主机名".to_string())?;
+        .ok_or_else(|| format!("{service_name} 服务地址缺少主机名"))?;
+    let path_style = force_path_style || payload.path_style;
+    let request_host = if path_style {
+        host.to_string()
+    } else {
+        format!("{}.{}", payload.bucket.trim_matches('/'), host)
+    };
     let host_header = match endpoint.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
+        Some(port) => format!("{request_host}:{port}"),
+        None => request_host.clone(),
     };
     let base_path = endpoint.path().trim_matches('/');
-    let object_path = if base_path.is_empty() {
+    let object_path = if path_style && base_path.is_empty() {
         format!(
             "{}/{}",
             payload.bucket.trim_matches('/'),
             encoded_object_key(key)
         )
-    } else {
+    } else if path_style {
         format!(
             "{base_path}/{}/{}",
             payload.bucket.trim_matches('/'),
             encoded_object_key(key)
         )
+    } else if base_path.is_empty() {
+        encoded_object_key(key)
+    } else {
+        format!("{base_path}/{}", encoded_object_key(key))
     };
     let canonical_uri = format!("/{object_path}");
     let upload_url = match endpoint.port() {
-        Some(port) => format!("{scheme}://{host}:{port}{canonical_uri}"),
-        None => format!("{scheme}://{host}{canonical_uri}"),
+        Some(port) => format!("{scheme}://{request_host}:{port}{canonical_uri}"),
+        None => format!("{scheme}://{request_host}{canonical_uri}"),
     };
     let region = if payload.region.trim().is_empty() {
-        "auto"
+        if service_name == "R2" { "auto" } else { "us-east-1" }
     } else {
         payload.region.trim()
     };
@@ -1092,12 +1399,12 @@ fn upload_r2(payload: &NativeUploadPayload, key: &str) -> Result<String, String>
         .header("Authorization", authorization)
         .body(payload.data.clone())
         .send()
-        .map_err(|error| format!("R2 上传失败：{error}"))?;
+        .map_err(|error| format!("{service_name} 上传失败：{error}"))?;
     if !response.status().is_success() {
         let status = response.status();
         let detail = response.text().unwrap_or_default();
         return Err(format!(
-            "R2 上传失败：HTTP {status} {}",
+            "{service_name} 上传失败：HTTP {status} {}",
             detail.chars().take(180).collect::<String>()
         ));
     }
@@ -1463,7 +1770,8 @@ fn upload_image_sync(payload: NativeUploadPayload) -> Result<UploadResult, Strin
     let key = remote_object_key(&payload)?;
     let url = match payload.provider.as_str() {
         "webdav" => upload_webdav(&payload, &key)?,
-        "r2" => upload_r2(&payload, &key)?,
+        "s3" => upload_s3_compatible(&payload, &key, "S3", false)?,
+        "r2" => upload_s3_compatible(&payload, &key, "R2", true)?,
         "oss" => upload_oss(&payload, &key)?,
         "ftp" => upload_ftp(&payload, &key)?,
         "sftp" => upload_sftp(&payload, &key)?,
@@ -1884,14 +2192,19 @@ pub fn run() {
             read_images_from_paths,
             read_clipboard_image,
             copy_image_data,
+            copy_compressed_data,
             copy_image_path,
+            list_system_fonts,
             reveal_path,
             upload_image,
+            load_upload_profile,
+            save_upload_profile,
             export_images,
             quick_compress_paths,
             update_desktop_preferences,
             show_main_window,
             show_dropzone_window,
+            configure_dropzone_window,
             hide_current_window,
             start_watcher,
             stop_watcher,
@@ -1983,6 +2296,7 @@ mod tests {
             remote_path: "../piclite/./2026".to_string(),
             public_base_url: String::new(),
             key_path: String::new(),
+            path_style: true,
             secret: String::new(),
             file_name: "hello:world.png".to_string(),
             mime_type: "image/png".to_string(),

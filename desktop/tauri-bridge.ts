@@ -31,6 +31,7 @@ if ("__TAURI_INTERNALS__" in window) {
       return result ? { data: decodeBase64(result.data) } : null;
     },
     copyImageData: (data) => invoke("copy_image_data", { data: Array.from(data) }),
+    copyCompressedData: (data, fileName) => invoke("copy_compressed_data", { data: Array.from(data), fileName }),
     copyImagePath: (path) => invoke("copy_image_path", { path }),
     selectImages: async () => {
       const images = await invoke<EncodedImage[]>("select_images");
@@ -53,12 +54,16 @@ if ("__TAURI_INTERNALS__" in window) {
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
     revealPath: (path) => invoke("reveal_path", { path }),
     uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
+    loadUploadProfile: () => invoke("load_upload_profile"),
+    saveUploadProfile: (profile) => invoke("save_upload_profile", { profile }),
+    listSystemFonts: () => invoke("list_system_fonts"),
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: (theme) => currentWindow.setTheme(theme === "system" ? null : theme),
     startDragging: () => currentWindow.startDragging(),
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
+    configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     hideCurrentWindow: () => invoke("hide_current_window"),
     onFileDrop: (callback) => {
       let unlisten: (() => void) | undefined;

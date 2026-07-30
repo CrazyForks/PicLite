@@ -49,7 +49,8 @@ type DirectoryHandleLike = {
 type NativeImage = { name: string; type: string; path: string; data: Uint8Array };
 type NativeExportItem = { sourcePath?: string; outputName: string; data: Uint8Array };
 type ImageSourceInput = { file: File; fileHandle?: FileHandleLike; sourcePath?: string };
-type UploadProvider = "webdav" | "r2" | "oss" | "ftp" | "sftp";
+type UploadProvider = "webdav" | "s3" | "r2" | "oss" | "ftp" | "sftp";
+type DockLayout = "pet" | "compact" | "full";
 
 type UploadSettings = {
   provider: UploadProvider;
@@ -62,7 +63,10 @@ type UploadSettings = {
   remotePath: string;
   publicBaseUrl: string;
   keyPath: string;
+  pathStyle: boolean;
 };
+
+type StoredUploadProfile = UploadSettings & { secret: string };
 
 type NativeUploadPayload = UploadSettings & {
   secret: string;
@@ -101,6 +105,7 @@ type NativeBridge = {
   windowLabel: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
   copyImageData: (data: Uint8Array) => Promise<void>;
+  copyCompressedData: (data: Uint8Array, fileName: string) => Promise<string>;
   copyImagePath: (path: string) => Promise<void>;
   selectImages: () => Promise<NativeImage[]>;
   readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
@@ -112,12 +117,16 @@ type NativeBridge = {
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
   revealPath: (path: string) => Promise<void>;
   uploadImage: (payload: NativeUploadPayload) => Promise<{ url: string; remotePath: string }>;
+  loadUploadProfile: () => Promise<StoredUploadProfile | null>;
+  saveUploadProfile: (profile: StoredUploadProfile) => Promise<void>;
+  listSystemFonts: () => Promise<string[]>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean }) => Promise<void>;
   setWindowTheme: (theme: ThemeMode) => Promise<void>;
   startDragging: () => Promise<void>;
   startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
+  configureDropzoneWindow: (width: number, height: number) => Promise<void>;
   hideCurrentWindow: () => Promise<void>;
   onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
@@ -202,6 +211,8 @@ type DesktopPreferences = {
   shortcutShow: string;
   shortcutPaste: string;
   shortcutDock: string;
+  dockLayout: DockLayout;
+  floatingResultSeconds: number;
 };
 
 type SavedPreset = {
@@ -292,6 +303,8 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   shortcutShow: "CommandOrControl+Alt+P",
   shortcutPaste: "CommandOrControl+Alt+V",
   shortcutDock: "CommandOrControl+Alt+D",
+  dockLayout: "pet",
+  floatingResultSeconds: 10,
 };
 
 const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
@@ -305,6 +318,7 @@ const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
   remotePath: "piclite",
   publicBaseUrl: "",
   keyPath: "",
+  pathStyle: true,
 };
 
 function loadStoredDesktopPreferences(): DesktopPreferences {
@@ -682,8 +696,11 @@ function applyWatermark(context: CanvasRenderingContext2D, width: number, height
     const diagonal = Math.hypot(width, height);
     const measured = Math.max(fontSize * 2, context.measureText(text).width);
     const density = Math.min(1, Math.max(0, watermark.density / 100));
-    const stepX = measured + fontSize * (3.2 - density * 2.2);
-    const stepY = fontSize * (4.6 - density * 3.15);
+    // A non-linear curve gives the low end real breathing room: 0% is deliberately
+    // sparse enough for one or two marks on ordinary photos, while 100% stays dense.
+    const sparse = (1 - density) ** 2;
+    const stepX = measured + fontSize * (1.05 + sparse * 18);
+    const stepY = fontSize * (1.45 + sparse * 14);
     context.translate(width / 2, height / 2);
     context.rotate(angle);
     let row = 0;
@@ -881,17 +898,26 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const [quality, setQuality] = useState(initialSettings.quality);
   const [scale, setScale] = useState(initialSettings.scale);
   const [dockTheme, setDockTheme] = useState<ThemeMode>(initialPreferences.dockTheme);
+  const [dockLayout, setDockLayout] = useState<DockLayout>(initialPreferences.dockLayout);
+  const [floatingResultSeconds, setFloatingResultSeconds] = useState(initialPreferences.floatingResultSeconds);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<QuickCompressResult[]>([]);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("每次都从原图重算");
   const lastPathsRef = useRef<string[]>([]);
   const historyRef = useRef<Array<{ quality: number; scale: number; results: QuickCompressResult[] }>>([]);
   const resultSettingsRef = useRef({ quality: initialSettings.quality, scale: initialSettings.scale });
+  const autoHideTimerRef = useRef<number | null>(null);
+  const previewUrlsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     document.documentElement.classList.add("dropzone-root");
-    return () => document.documentElement.classList.remove("dropzone-root");
+    return () => {
+      document.documentElement.classList.remove("dropzone-root");
+      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      if (autoHideTimerRef.current) window.clearTimeout(autoHideTimerRef.current);
+    };
   }, []);
 
   const saveDockResults = useCallback(async (next: QuickCompressResult[]) => {
@@ -899,9 +925,11 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     if (!completed.length) return;
     try {
       const images = await bridge.readImagesFromPaths(completed.map((result) => result.output!));
+      const nextPreviews: Record<string, string> = {};
       for (const image of images) {
         const result = completed.find((candidate) => candidate.output === image.path);
         const blob = new Blob([new Uint8Array(image.data)], { type: image.type || mimeFromName(image.name) });
+        if (result) nextPreviews[result.source] = URL.createObjectURL(blob);
         const dimensions = await getDimensions(new File([blob], image.name, { type: blob.type }));
         await galleryPut({
           id: `dock:${result?.source || image.path}`,
@@ -917,6 +945,9 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
           outputPath: image.path,
         });
       }
+      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      previewUrlsRef.current = nextPreviews;
+      setPreviewUrls(nextPreviews);
     } catch { /* 图库失败不影响快速压缩 */ }
   }, [bridge]);
 
@@ -929,6 +960,9 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     lastPathsRef.current = paths;
     setIsProcessing(true);
     setNotice("正在从原图重新计算…");
+    Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    previewUrlsRef.current = {};
+    setPreviewUrls({});
     setResults(paths.map((source) => ({ source, keptOriginal: false })));
     try {
       let preferences = DEFAULT_DESKTOP_PREFERENCES;
@@ -957,6 +991,38 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     }
   }, [bridge, initialSettings.format, initialSettings.stripMetadata, isProcessing, quality, results, saveDockResults, scale]);
 
+  const clearAutoHide = useCallback(() => {
+    if (autoHideTimerRef.current) window.clearTimeout(autoHideTimerRef.current);
+    autoHideTimerRef.current = null;
+  }, []);
+
+  const scheduleAutoHide = useCallback(() => {
+    clearAutoHide();
+    if (!floatingResultSeconds || isProcessing || !results.some((result) => result.output || result.error)) return;
+    autoHideTimerRef.current = window.setTimeout(() => void bridge.hideCurrentWindow(), floatingResultSeconds * 1000);
+  }, [bridge, clearAutoHide, floatingResultSeconds, isProcessing, results]);
+
+  useEffect(() => {
+    const width = results.length ? (dockLayout === "full" ? 390 : 320) : dockLayout === "pet" ? 210 : dockLayout === "compact" ? 280 : 340;
+    const height = results.length ? (dockLayout === "full" ? 300 : 228) : dockLayout === "pet" ? 174 : dockLayout === "compact" ? 158 : 220;
+    void bridge.configureDropzoneWindow(width, height);
+  }, [bridge, dockLayout, results.length]);
+
+  useEffect(() => {
+    scheduleAutoHide();
+    return clearAutoHide;
+  }, [clearAutoHide, scheduleAutoHide]);
+
+  const chooseDockImages = useCallback(async () => {
+    clearAutoHide();
+    try {
+      const images = await bridge.selectImages();
+      if (images.length) await runCompression(images.map((image) => image.path));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "选择图片失败");
+    }
+  }, [bridge, clearAutoHide, runCompression]);
+
   useEffect(() => bridge.onFileDrop((event) => {
     if (event.type === "error") {
       setResults([{ source: "悬浮压缩坞", keptOriginal: false, error: event.error || "文件拖放监听不可用" }]);
@@ -965,6 +1031,21 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     setIsDragging(event.type === "over");
     if (event.type === "drop" && event.paths?.length) void runCompression(event.paths);
   }), [bridge, runCompression]);
+
+  useEffect(() => bridge.onWatcherEvent((event) => {
+    if (event.type !== "success" || !event.output || !event.file) return;
+    const next: QuickCompressResult = {
+      source: event.file,
+      output: event.output,
+      originalBytes: event.originalBytes,
+      outputBytes: event.outputBytes,
+      keptOriginal: event.originalBytes === event.outputBytes,
+    };
+    lastPathsRef.current = [event.file];
+    setResults([next]);
+    setNotice("文件夹监控已完成压缩");
+    void saveDockResults([next]);
+  }), [bridge, saveDockResults]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -981,7 +1062,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   useEffect(() => {
     const syncPreferences = (event: StorageEvent) => {
       if (event.key !== "piclite.desktopPreferences.v1") return;
-      setDockTheme(loadStoredDesktopPreferences().dockTheme);
+      const preferences = loadStoredDesktopPreferences();
+      setDockTheme(preferences.dockTheme);
+      setDockLayout(preferences.dockLayout);
+      setFloatingResultSeconds(preferences.floatingResultSeconds);
     };
     window.addEventListener("storage", syncPreferences);
     return () => window.removeEventListener("storage", syncPreferences);
@@ -1038,10 +1122,12 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     void bridge.startResizeDragging("SouthEast");
   }, [bridge]);
 
+  const latestOutput = results.find((result) => result.output && !result.error)?.output;
+
   return (
-    <main className={`drop-dock ${isDragging ? "dragging" : ""}`}>
+    <main className={`drop-dock layout-${dockLayout} ${results.length ? "has-results" : "is-idle"} ${isDragging ? "dragging" : ""}`} onPointerEnter={clearAutoHide} onPointerLeave={scheduleAutoHide}>
       <header data-tauri-drag-region onPointerDown={startDockDrag}>
-        <span className="dock-brand" data-tauri-drag-region><i data-tauri-drag-region>✦</i><b data-tauri-drag-region>PicLite Drop</b></span>
+        <span className="dock-brand" data-tauri-drag-region><i data-tauri-drag-region>✦</i><b data-tauri-drag-region>{results.length ? "压缩结果" : "PicLite"}</b></span>
         <span className="dock-actions">
           <button type="button" title={resolveTheme(dockTheme) === "dark" ? "切换浅色" : "切换深色"} onClick={toggleDockTheme}>{resolveTheme(dockTheme) === "dark" ? "☀" : "☾"}</button>
           <button type="button" title="打开主窗口" onClick={() => void bridge.showMainWindow()}>↗</button>
@@ -1050,15 +1136,15 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       </header>
       <section className="dock-body">
         {!results.length ? (
-          <div className="dock-empty">
-            <span className="dock-orbit"><i /><i /><b>＋</b></span>
-            <div><strong>{isDragging ? "松开开始压缩" : "把图片拖到这里"}</strong><small>保持在最前 · 输出到源文件旁 · 不覆盖原图</small></div>
-          </div>
+          <button className="dock-empty" type="button" onClick={() => void chooseDockImages()} title="点击选择图片，也可以直接拖入">
+            {dockLayout === "pet" ? <span className="piclite-pet" aria-hidden="true"><i className="pet-hair" /><i className="pet-face"><b>›_</b></i><i className="pet-body">✦</i><i className="pet-feet" /></span> : <span className="dock-orbit"><i /><i /><b>＋</b></span>}
+            <div><strong>{isDragging ? "松开开始压缩" : "点击或拖入图片"}</strong><small>{dockLayout === "pet" ? "我会在右下角告诉你结果" : "输出到源文件旁 · 不覆盖原图"}</small></div>
+          </button>
         ) : (
           <div className="dock-results">
             {results.slice(0, 2).map((result) => (
               <div className={result.error ? "error" : result.output ? "done" : "working"} key={result.source}>
-                <span>{result.error ? "!" : result.output ? "✓" : "···"}</span>
+                {previewUrls[result.source] ? <img src={previewUrls[result.source]} alt="" /> : <span>{result.error ? "!" : result.output ? "✓" : "···"}</span>}
                 <p><strong>{fileNameFromPath(result.source)}</strong><small>{result.error || (result.outputBytes ? `${formatBytes(result.originalBytes)} → ${formatBytes(result.outputBytes)}` : "正在压缩…")}</small></p>
                 {result.originalBytes && result.outputBytes ? <b>{sizeChangeLabel(result.originalBytes, result.outputBytes)}</b> : null}
               </div>
@@ -1066,13 +1152,13 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
           </div>
         )}
       </section>
-      <div className="dock-controls">
+      <div className={`dock-controls ${results.length ? "" : "idle-controls"}`}>
         <label htmlFor="dock-quality"><span>画质</span><input id="dock-quality" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onChange={(event) => setQuality(Number(event.target.value))} /><b>{quality}%</b></label>
         <label htmlFor="dock-scale"><span>尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onChange={(event) => setScale(Number(event.target.value))} /><b>{formatScale(scale)}</b></label>
       </div>
       <footer>
         <span title={notice}>{notice}</span>
-        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="复制结果图" disabled={isProcessing || !results.some((result) => result.output)} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "应用"}</button></span>
+        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="在文件夹中显示" disabled={!latestOutput} onClick={() => latestOutput && void bridge.revealPath(latestOutput)}>⌑</button><button className="dock-icon-action" type="button" title="复制压缩文件" disabled={isProcessing || !latestOutput} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "重压"}</button></span>
       </footer>
       <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
@@ -1124,6 +1210,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [galleryRevision, setGalleryRevision] = useState(0);
   const [uploadSettings, setUploadSettings] = useState<UploadSettings>(loadUploadSettings);
   const [uploadSecret, setUploadSecret] = useState("");
+  const [uploadProfileSaved, setUploadProfileSaved] = useState(false);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
@@ -1137,6 +1224,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const importFromClipboardRef = useRef<(() => Promise<void>) | null>(null);
   const livePreviewGenerationRef = useRef(0);
   const galleryUrlsRef = useRef<string[]>([]);
+  const savedUploadProfileRef = useRef<string | null>(null);
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
@@ -1183,6 +1271,25 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       window.localStorage.setItem("piclite.uploadSettings.v1", JSON.stringify(uploadSettings));
     } catch { /* 非敏感上传配置仅用于本机偏好 */ }
   }, [uploadSettings]);
+
+  useEffect(() => {
+    if (!nativeBridge) return;
+    void nativeBridge.loadUploadProfile()
+      .then((profile) => {
+        if (!profile) return;
+        const { secret, ...storedSettings } = profile;
+        savedUploadProfileRef.current = JSON.stringify({ ...DEFAULT_UPLOAD_SETTINGS, ...storedSettings, secret });
+        setUploadSettings({ ...DEFAULT_UPLOAD_SETTINGS, ...storedSettings });
+        setUploadSecret(secret);
+        setUploadProfileSaved(true);
+      })
+      .catch(() => showToast("本机上传配置读取失败"));
+  }, [nativeBridge, showToast]);
+
+  useEffect(() => {
+    if (!savedUploadProfileRef.current) return;
+    setUploadProfileSaved(savedUploadProfileRef.current === JSON.stringify({ ...uploadSettings, secret: uploadSecret }));
+  }, [uploadSecret, uploadSettings]);
 
   const saveItemToGallery = useCallback(async (item: ImageItem, blob: Blob, outputPath?: string, remoteUrl?: string) => {
     await galleryPut({
@@ -1468,9 +1575,14 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     window.setTimeout(() => URL.revokeObjectURL(url), 3000);
   }, [exportSuffix]);
 
-  const copyBlobToClipboard = useCallback(async (blob: Blob) => {
+  const copyBlobToClipboard = useCallback(async (blob: Blob, fileName: string) => {
     if (nativeBridge) {
-      await nativeBridge.copyImageData(new Uint8Array(await blob.arrayBuffer()));
+      await nativeBridge.copyCompressedData(new Uint8Array(await blob.arrayBuffer()), fileName);
+      return;
+    }
+    const clipboardItem = ClipboardItem as unknown as { new(items: Record<string, Blob>): ClipboardItem; supports?: (type: string) => boolean };
+    if (clipboardItem.supports?.(blob.type)) {
+      await navigator.clipboard.write([new clipboardItem({ [blob.type]: blob })]);
       return;
     }
     const clipboardBlob = blob.type === "image/png" ? blob : await (async () => {
@@ -1493,22 +1605,22 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     if (!selected) return;
     try {
       const blob = selected.outputBlob || selected.file;
-      await copyBlobToClipboard(blob);
+      await copyBlobToClipboard(blob, outputName(selected, cleanSuffix(exportSuffix)));
       await saveItemToGallery(selected, blob);
-      showToast("结果图已复制，可直接粘贴到其他软件");
+      showToast(nativeBridge ? `已复制压缩文件 · ${formatBytes(blob.size)}` : "结果图已复制，可直接粘贴到其他软件");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "复制结果图失败");
     }
-  }, [copyBlobToClipboard, saveItemToGallery, selected, showToast]);
+  }, [copyBlobToClipboard, exportSuffix, nativeBridge, saveItemToGallery, selected, showToast]);
 
   const copyGalleryResult = useCallback(async (record: GalleryRecord) => {
     try {
-      await copyBlobToClipboard(record.blob);
-      showToast("图库图片已复制");
+      await copyBlobToClipboard(record.blob, record.name);
+      showToast(nativeBridge ? `已复制压缩文件 · ${formatBytes(record.blob.size)}` : "图库图片已复制");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "复制失败");
     }
-  }, [copyBlobToClipboard, showToast]);
+  }, [copyBlobToClipboard, nativeBridge, showToast]);
 
   const downloadGalleryResult = useCallback((record: GalleryRecord) => {
     const url = URL.createObjectURL(record.blob);
@@ -1546,6 +1658,25 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       showToast(error instanceof Error ? error.message : "上传失败");
     } finally {
       setUploadingId(null);
+    }
+  }, [nativeBridge, showToast, uploadSecret, uploadSettings]);
+
+  const saveUploadProfile = useCallback(async () => {
+    if (!nativeBridge) {
+      showToast("图床上传配置只在桌面客户端保存");
+      return;
+    }
+    if (!uploadSettings.endpoint.trim()) {
+      showToast("请先填写服务地址");
+      return;
+    }
+    try {
+      await nativeBridge.saveUploadProfile({ ...uploadSettings, secret: uploadSecret });
+      savedUploadProfileRef.current = JSON.stringify({ ...uploadSettings, secret: uploadSecret });
+      setUploadProfileSaved(true);
+      showToast("图床配置与凭证已保存到本机");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "图床配置保存失败");
     }
   }, [nativeBridge, showToast, uploadSecret, uploadSettings]);
 
@@ -1830,19 +1961,22 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   }, [addSources, nativeBridge]);
 
   const loadSystemFonts = useCallback(async () => {
-    if (!window.queryLocalFonts) {
-      showToast("当前浏览器不支持读取系统字体，可直接导入字体文件");
-      return;
-    }
     try {
-      const fonts = await window.queryLocalFonts();
-      const families = Array.from(new Set(fonts.map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+      const families = nativeBridge
+        ? await nativeBridge.listSystemFonts()
+        : window.queryLocalFonts
+          ? Array.from(new Set((await window.queryLocalFonts()).map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right))
+          : [];
+      if (!families.length) {
+        showToast(nativeBridge ? "没有在系统字体目录中找到可用字体" : "当前浏览器不支持读取系统字体，可直接导入字体文件");
+        return;
+      }
       setLocalFonts((current) => Array.from(new Set([...current, ...families])));
       showToast(`已读取 ${families.length} 个本地字体`);
     } catch {
       showToast("没有获得本地字体读取权限");
     }
-  }, [showToast]);
+  }, [nativeBridge, showToast]);
 
   const onFontSelected = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -2259,7 +2393,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                 </div>
                 <label className="mini-range"><span>字号 <b>{settings.watermark.fontScale.toFixed(1)}%</b></span><input type="range" min="1" max="20" step="0.5" value={settings.watermark.fontScale} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontScale: Number(event.target.value) } }))} /></label>
                 <label className="mini-range"><span>方向 <b>{settings.watermark.rotation}°</b></span><input type="range" min="-180" max="180" step="1" value={settings.watermark.rotation} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, rotation: Number(event.target.value) } }))} /></label>
-                {settings.watermark.layout === "tile" ? <label className="mini-range"><span>铺设密度 <b>{settings.watermark.density}%</b></span><input type="range" min="5" max="100" step="1" value={settings.watermark.density} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, density: Number(event.target.value) } }))} /></label> : <>
+                {settings.watermark.layout === "tile" ? <label className="mini-range"><span>铺设密度（越低越稀疏） <b>{settings.watermark.density}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.density} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, density: Number(event.target.value) } }))} /></label> : <>
                   <label className="mini-range"><span>水平位置 <b>{settings.watermark.positionX}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionX} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionX: Number(event.target.value) } }))} /></label>
                   <label className="mini-range"><span>垂直位置 <b>{settings.watermark.positionY}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionY} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionY: Number(event.target.value) } }))} /></label>
                 </>}
@@ -2436,29 +2570,37 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                   {([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([value, label]) => <button className={desktopPreferences.dockTheme === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, dockTheme: value }))}>{label}</button>)}
                 </div>
               </div>
+              <div className="preference-row column">
+                <div><strong>悬浮入口样式</strong><small>桌宠适合常驻；紧凑与完整样式会在产生结果时展开工具区</small></div>
+                <div className="preference-segments">
+                  {([['pet', '桌宠'], ['compact', '紧凑'], ['full', '完整']] as const).map(([value, label]) => <button className={desktopPreferences.dockLayout === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, dockLayout: value }))}>{label}</button>)}
+                </div>
+              </div>
+              <label className="preference-row"><div><strong>结果自动收起</strong><small>压缩完成后在桌面右下角停留；设为 0 秒则不自动收起</small></div><span className="preference-number"><input type="number" min="0" max="120" step="1" value={desktopPreferences.floatingResultSeconds} onChange={(event) => setDesktopPreferences((current) => ({ ...current, floatingResultSeconds: Math.max(0, Math.min(120, Number(event.target.value) || 0)) }))} /> 秒</span></label>
             </section>
 
             <section className="preference-card upload-preference-card">
-              <div className="preference-card-heading"><span>图床上传</span><small>WebDAV · R2 · OSS · FTP · SFTP</small></div>
+              <div className="preference-card-heading"><span>图床上传</span><small>WebDAV · S3 · R2 · OSS · FTP · SFTP</small></div>
               <div className="preference-row column">
                 <div><strong>服务类型</strong><small>压缩后可从工作台或图库直接上传并复制链接</small></div>
                 <div className="preference-segments upload-provider-segments">
-                  {([['webdav', 'WebDAV'], ['r2', 'Cloudflare R2'], ['oss', '阿里云 OSS'], ['ftp', 'FTP'], ['sftp', 'SFTP']] as const).map(([value, label]) => <button className={uploadSettings.provider === value ? "active" : ""} type="button" key={value} onClick={() => setUploadSettings((current) => ({ ...current, provider: value, port: value === "ftp" ? 21 : value === "sftp" ? 22 : current.port }))}>{label}</button>)}
+                  {([['webdav', 'WebDAV'], ['s3', 'S3 / MinIO'], ['r2', 'Cloudflare R2'], ['oss', '阿里云 OSS'], ['ftp', 'FTP'], ['sftp', 'SFTP']] as const).map(([value, label]) => <button className={uploadSettings.provider === value ? "active" : ""} type="button" key={value} onClick={() => setUploadSettings((current) => ({ ...current, provider: value, region: value === "r2" ? "auto" : value === "s3" && current.region === "auto" ? "us-east-1" : current.region, port: value === "ftp" ? 21 : value === "sftp" ? 22 : current.port }))}>{label}</button>)}
                 </div>
               </div>
               <div className="upload-grid">
-                <label className="upload-field wide"><span>服务地址</span><input type="text" value={uploadSettings.endpoint} placeholder={uploadSettings.provider === "webdav" ? "https://dav.example.com/remote.php/dav/files/user" : uploadSettings.provider === "r2" ? "https://ACCOUNT_ID.r2.cloudflarestorage.com" : uploadSettings.provider === "oss" ? "https://oss-cn-hangzhou.aliyuncs.com" : "server.example.com"} onChange={(event) => setUploadSettings((current) => ({ ...current, endpoint: event.target.value }))} /></label>
-                {(uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Bucket</span><input type="text" value={uploadSettings.bucket} placeholder="images" onChange={(event) => setUploadSettings((current) => ({ ...current, bucket: event.target.value }))} /></label>}
-                {uploadSettings.provider === "r2" && <label className="upload-field"><span>Region</span><input type="text" value={uploadSettings.region} placeholder="auto" onChange={(event) => setUploadSettings((current) => ({ ...current, region: event.target.value }))} /></label>}
-                {(uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Access Key ID</span><input type="text" value={uploadSettings.accessKey} autoComplete="off" onChange={(event) => setUploadSettings((current) => ({ ...current, accessKey: event.target.value }))} /></label>}
+                <label className="upload-field wide"><span>服务地址</span><input type="text" value={uploadSettings.endpoint} placeholder={uploadSettings.provider === "webdav" ? "https://dav.example.com/remote.php/dav/files/user" : uploadSettings.provider === "r2" ? "https://ACCOUNT_ID.r2.cloudflarestorage.com" : uploadSettings.provider === "s3" ? "https://s3.amazonaws.com 或 https://minio.example.com" : uploadSettings.provider === "oss" ? "https://oss-cn-hangzhou.aliyuncs.com" : "server.example.com"} onChange={(event) => setUploadSettings((current) => ({ ...current, endpoint: event.target.value }))} /></label>
+                {(uploadSettings.provider === "s3" || uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Bucket</span><input type="text" value={uploadSettings.bucket} placeholder="images" onChange={(event) => setUploadSettings((current) => ({ ...current, bucket: event.target.value }))} /></label>}
+                {(uploadSettings.provider === "s3" || uploadSettings.provider === "r2") && <label className="upload-field"><span>Region</span><input type="text" value={uploadSettings.region} placeholder={uploadSettings.provider === "r2" ? "auto" : "us-east-1"} onChange={(event) => setUploadSettings((current) => ({ ...current, region: event.target.value }))} /></label>}
+                {(uploadSettings.provider === "s3" || uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Access Key ID</span><input type="text" value={uploadSettings.accessKey} autoComplete="off" onChange={(event) => setUploadSettings((current) => ({ ...current, accessKey: event.target.value }))} /></label>}
                 {(uploadSettings.provider === "webdav" || uploadSettings.provider === "ftp" || uploadSettings.provider === "sftp") && <label className="upload-field"><span>用户名</span><input type="text" value={uploadSettings.username} autoComplete="username" onChange={(event) => setUploadSettings((current) => ({ ...current, username: event.target.value }))} /></label>}
                 {(uploadSettings.provider === "ftp" || uploadSettings.provider === "sftp") && <label className="upload-field"><span>端口</span><input type="number" min="1" max="65535" value={uploadSettings.port} onChange={(event) => setUploadSettings((current) => ({ ...current, port: Number(event.target.value) }))} /></label>}
                 {uploadSettings.provider === "sftp" && <label className="upload-field wide"><span>SSH 私钥路径（可选）</span><input type="text" value={uploadSettings.keyPath} placeholder="留空时使用密码" onChange={(event) => setUploadSettings((current) => ({ ...current, keyPath: event.target.value }))} /></label>}
-                <label className="upload-field"><span>{uploadSettings.provider === "r2" || uploadSettings.provider === "oss" ? "Secret Access Key" : "密码"}</span><input type="password" value={uploadSecret} autoComplete="new-password" placeholder="仅保留到本次退出" onChange={(event) => setUploadSecret(event.target.value)} /></label>
+                <label className="upload-field"><span>{uploadSettings.provider === "s3" || uploadSettings.provider === "r2" || uploadSettings.provider === "oss" ? "Secret Access Key" : "密码"}</span><input type="password" value={uploadSecret} autoComplete="new-password" placeholder="保存后下次自动读取" onChange={(event) => setUploadSecret(event.target.value)} /></label>
+                {uploadSettings.provider === "s3" && <label className="upload-field upload-check"><input type="checkbox" checked={uploadSettings.pathStyle} onChange={(event) => setUploadSettings((current) => ({ ...current, pathStyle: event.target.checked }))} /><span>使用 Path-style（MinIO / 自建 S3 常用）</span></label>}
                 <label className="upload-field"><span>远端目录</span><input type="text" value={uploadSettings.remotePath} placeholder="piclite" onChange={(event) => setUploadSettings((current) => ({ ...current, remotePath: event.target.value }))} /></label>
                 <label className="upload-field wide"><span>公开访问地址（可选）</span><input type="text" value={uploadSettings.publicBaseUrl} placeholder="https://img.example.com" onChange={(event) => setUploadSettings((current) => ({ ...current, publicBaseUrl: event.target.value }))} /><small>用于拼接最终图片链接；留空则返回服务本身的地址。</small></label>
               </div>
-              <p className="upload-security-note"><span>◉</span> 密码或 Secret Key 只存在当前内存中，关闭 PicLite 后立即丢弃，不会写入 localStorage 或图库。</p>
+              <div className="upload-save-row"><p className="upload-security-note"><span>◉</span> 配置和凭证保存在当前系统用户的 PicLite 配置目录，不写入网页 localStorage，也不会同步到云端。</p><button className="preference-action" type="button" disabled={!nativeBridge} onClick={() => void saveUploadProfile()}>{uploadProfileSaved ? "✓ 已保存 · 再次保存" : "保存到本机"}</button></div>
             </section>
 
             <section className="preference-card">
@@ -2466,7 +2608,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               <div className="preference-row"><div><strong>仅在系统托盘 / 菜单栏显示</strong><small>任务栏与 macOS Dock 不保留图标，主窗口关闭后仍在后台运行</small></div><span className="always-on-badge">始终开启</span></div>
               <label className="preference-row clickable"><div><strong>开机自启动</strong><small>登录系统后静默进入托盘，不主动弹出主窗口</small></div><button className={`switch ${desktopPreferences.launchAtStartup ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.launchAtStartup} onClick={() => void toggleAutostart()}><i /></button></label>
               <label className="preference-row clickable"><div><strong>最小化时留在托盘</strong><small>不占用任务栏；从托盘左键恢复主窗口</small></div><button className={`switch ${desktopPreferences.minimizeToTray ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.minimizeToTray} onClick={() => setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }))}><i /></button></label>
-              <div className="preference-row"><div><strong>悬浮压缩坞</strong><small>拖入图片后按上次参数直接输出，不覆盖源图</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>立即打开</button></div>
+              <div className="preference-row"><div><strong>悬浮压缩坞</strong><small>可点击选图或拖入图片；结果会在桌面右下角显示并继续调整</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>立即打开</button></div>
             </section>
 
             <section className="preference-card">
@@ -2482,9 +2624,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.7.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.8.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.7.0 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.8.0 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>
