@@ -20,7 +20,7 @@ import { register as registerGlobalShortcut, unregisterAll as unregisterAllGloba
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
-type ViewName = "workspace" | "watcher" | "preferences";
+type ViewName = "workspace" | "watcher" | "gallery" | "preferences";
 type PreviewMode = "compare" | "original" | "result";
 type ItemStatus = "ready" | "processing" | "done" | "error";
 type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
@@ -49,6 +49,27 @@ type DirectoryHandleLike = {
 type NativeImage = { name: string; type: string; path: string; data: Uint8Array };
 type NativeExportItem = { sourcePath?: string; outputName: string; data: Uint8Array };
 type ImageSourceInput = { file: File; fileHandle?: FileHandleLike; sourcePath?: string };
+type UploadProvider = "webdav" | "r2" | "oss" | "ftp" | "sftp";
+
+type UploadSettings = {
+  provider: UploadProvider;
+  endpoint: string;
+  bucket: string;
+  region: string;
+  accessKey: string;
+  username: string;
+  port: number;
+  remotePath: string;
+  publicBaseUrl: string;
+  keyPath: string;
+};
+
+type NativeUploadPayload = UploadSettings & {
+  secret: string;
+  fileName: string;
+  mimeType: string;
+  data: Uint8Array;
+};
 
 type WatcherEvent = {
   id: string;
@@ -79,6 +100,8 @@ type NativeBridge = {
   platform: string;
   windowLabel: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
+  copyImageData: (data: Uint8Array) => Promise<void>;
+  copyImagePath: (path: string) => Promise<void>;
   selectImages: () => Promise<NativeImage[]>;
   readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
@@ -87,6 +110,8 @@ type NativeBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  revealPath: (path: string) => Promise<void>;
+  uploadImage: (payload: NativeUploadPayload) => Promise<{ url: string; remotePath: string }>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean }) => Promise<void>;
   setWindowTheme: (theme: ThemeMode) => Promise<void>;
   startDragging: () => Promise<void>;
@@ -206,6 +231,23 @@ type QuickCompressResult = {
   error?: string;
 };
 
+type GalleryRecord = {
+  id: string;
+  name: string;
+  createdAt: number;
+  originalBytes: number;
+  outputBytes: number;
+  width: number;
+  height: number;
+  mimeType: string;
+  blob: Blob;
+  sourcePath?: string;
+  outputPath?: string;
+  remoteUrl?: string;
+};
+
+type GalleryViewItem = GalleryRecord & { previewUrl: string };
+
 const DEFAULT_SETTINGS: CompressionSettings = {
   mode: "lossless",
   quality: 100,
@@ -252,6 +294,19 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   shortcutDock: "CommandOrControl+Alt+D",
 };
 
+const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
+  provider: "webdav",
+  endpoint: "",
+  bucket: "",
+  region: "auto",
+  accessKey: "",
+  username: "",
+  port: 22,
+  remotePath: "piclite",
+  publicBaseUrl: "",
+  keyPath: "",
+};
+
 function loadStoredDesktopPreferences(): DesktopPreferences {
   if (typeof window === "undefined") return DEFAULT_DESKTOP_PREFERENCES;
   try {
@@ -261,6 +316,16 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
       : DEFAULT_DESKTOP_PREFERENCES;
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
+  }
+}
+
+function loadUploadSettings(): UploadSettings {
+  if (typeof window === "undefined") return DEFAULT_UPLOAD_SETTINGS;
+  try {
+    const saved = window.localStorage.getItem("piclite.uploadSettings.v1");
+    return saved ? { ...DEFAULT_UPLOAD_SETTINGS, ...JSON.parse(saved) } as UploadSettings : DEFAULT_UPLOAD_SETTINGS;
+  } catch {
+    return DEFAULT_UPLOAD_SETTINGS;
   }
 }
 
@@ -344,6 +409,53 @@ const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
 
 function uid() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const GALLERY_DB_NAME = "piclite-gallery";
+const GALLERY_STORE_NAME = "images";
+
+function openGalleryDb() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = window.indexedDB.open(GALLERY_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(GALLERY_STORE_NAME)) request.result.createObjectStore(GALLERY_STORE_NAME, { keyPath: "id" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("图库无法打开"));
+  });
+}
+
+async function galleryPut(record: GalleryRecord) {
+  const database = await openGalleryDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(GALLERY_STORE_NAME, "readwrite");
+    transaction.objectStore(GALLERY_STORE_NAME).put(record);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("图库写入失败"));
+  });
+  database.close();
+}
+
+async function galleryList() {
+  const database = await openGalleryDb();
+  const records = await new Promise<GalleryRecord[]>((resolve, reject) => {
+    const request = database.transaction(GALLERY_STORE_NAME, "readonly").objectStore(GALLERY_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result as GalleryRecord[]);
+    request.onerror = () => reject(request.error || new Error("图库读取失败"));
+  });
+  database.close();
+  return records.sort((left, right) => right.createdAt - left.createdAt);
+}
+
+async function galleryDelete(id: string) {
+  const database = await openGalleryDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(GALLERY_STORE_NAME, "readwrite");
+    transaction.objectStore(GALLERY_STORE_NAME).delete(id);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("图库删除失败"));
+  });
+  database.close();
 }
 
 function formatBytes(bytes = 0) {
@@ -772,17 +884,51 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<QuickCompressResult[]>([]);
+  const [notice, setNotice] = useState("每次都从原图重算");
   const lastPathsRef = useRef<string[]>([]);
+  const historyRef = useRef<Array<{ quality: number; scale: number; results: QuickCompressResult[] }>>([]);
+  const resultSettingsRef = useRef({ quality: initialSettings.quality, scale: initialSettings.scale });
 
   useEffect(() => {
     document.documentElement.classList.add("dropzone-root");
     return () => document.documentElement.classList.remove("dropzone-root");
   }, []);
 
-  const runCompression = useCallback(async (paths: string[], nextQuality = quality, nextScale = scale) => {
+  const saveDockResults = useCallback(async (next: QuickCompressResult[]) => {
+    const completed = next.filter((result) => result.output && !result.error);
+    if (!completed.length) return;
+    try {
+      const images = await bridge.readImagesFromPaths(completed.map((result) => result.output!));
+      for (const image of images) {
+        const result = completed.find((candidate) => candidate.output === image.path);
+        const blob = new Blob([new Uint8Array(image.data)], { type: image.type || mimeFromName(image.name) });
+        const dimensions = await getDimensions(new File([blob], image.name, { type: blob.type }));
+        await galleryPut({
+          id: `dock:${result?.source || image.path}`,
+          name: image.name,
+          createdAt: Date.now(),
+          originalBytes: result?.originalBytes || blob.size,
+          outputBytes: result?.outputBytes || blob.size,
+          width: dimensions.width,
+          height: dimensions.height,
+          mimeType: blob.type,
+          blob,
+          sourcePath: result?.source,
+          outputPath: image.path,
+        });
+      }
+    } catch { /* 图库失败不影响快速压缩 */ }
+  }, [bridge]);
+
+  const runCompression = useCallback(async (paths: string[], nextQuality = quality, nextScale = scale, remember = true) => {
     if (!paths.length || isProcessing) return;
+    if (remember && results.length) {
+      historyRef.current.push({ ...resultSettingsRef.current, results });
+      historyRef.current = historyRef.current.slice(-12);
+    }
     lastPathsRef.current = paths;
     setIsProcessing(true);
+    setNotice("正在从原图重新计算…");
     setResults(paths.map((source) => ({ source, keptOriginal: false })));
     try {
       let preferences = DEFAULT_DESKTOP_PREFERENCES;
@@ -801,12 +947,15 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         fixedFolder: preferences.exportFolder || undefined,
       });
       setResults(next);
+      resultSettingsRef.current = { quality: nextQuality, scale: nextScale };
+      setNotice(`已按 ${nextQuality}% 画质 · ${formatScale(nextScale)} 尺寸生成`);
+      void saveDockResults(next);
     } catch (error) {
       setResults(paths.map((source) => ({ source, keptOriginal: false, error: error instanceof Error ? error.message : "压缩失败" })));
     } finally {
       setIsProcessing(false);
     }
-  }, [bridge, initialSettings.format, initialSettings.stripMetadata, isProcessing, quality, scale]);
+  }, [bridge, initialSettings.format, initialSettings.stripMetadata, isProcessing, quality, results, saveDockResults, scale]);
 
   useEffect(() => bridge.onFileDrop((event) => {
     if (event.type === "error") {
@@ -855,13 +1004,26 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     } catch { /* 主题至少对当前窗口立即生效 */ }
   }, [dockTheme]);
 
-  const compressFurther = useCallback(() => {
-    const nextQuality = Math.max(1, Math.round(quality * 0.78));
-    const nextScale = Math.max(0.1, Number((scale * 0.78).toFixed(1)));
-    setQuality(nextQuality);
-    setScale(nextScale);
-    void runCompression(lastPathsRef.current, nextQuality, nextScale);
-  }, [quality, runCompression, scale]);
+  const undoCompression = useCallback(() => {
+    const previous = historyRef.current.pop();
+    if (!previous) return;
+    setQuality(previous.quality);
+    setScale(previous.scale);
+    setResults(previous.results);
+    resultSettingsRef.current = { quality: previous.quality, scale: previous.scale };
+    setNotice("已撤回到上一次结果");
+  }, []);
+
+  const copyLatestResult = useCallback(async () => {
+    const result = results.find((candidate) => candidate.output && !candidate.error);
+    if (!result?.output) return;
+    try {
+      await bridge.copyImagePath(result.output);
+      setNotice("结果图已复制，可直接粘贴");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "复制失败");
+    }
+  }, [bridge, results]);
 
   const startDockDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
@@ -894,7 +1056,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
           </div>
         ) : (
           <div className="dock-results">
-            {results.slice(0, 3).map((result) => (
+            {results.slice(0, 2).map((result) => (
               <div className={result.error ? "error" : result.output ? "done" : "working"} key={result.source}>
                 <span>{result.error ? "!" : result.output ? "✓" : "···"}</span>
                 <p><strong>{fileNameFromPath(result.source)}</strong><small>{result.error || (result.outputBytes ? `${formatBytes(result.originalBytes)} → ${formatBytes(result.outputBytes)}` : "正在压缩…")}</small></p>
@@ -905,11 +1067,12 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         )}
       </section>
       <div className="dock-controls">
-        <label htmlFor="dock-scale"><span>输出尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onChange={(event) => setScale(Number(event.target.value))} /><b>{formatScale(scale)}</b></label>
+        <label htmlFor="dock-quality"><span>画质</span><input id="dock-quality" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onChange={(event) => setQuality(Number(event.target.value))} /><b>{quality}%</b></label>
+        <label htmlFor="dock-scale"><span>尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onChange={(event) => setScale(Number(event.target.value))} /><b>{formatScale(scale)}</b></label>
       </div>
       <footer>
-        <span><b>{quality}%</b> 画质</span>
-        <span className="dock-footer-actions"><button className="dock-further-button" type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={compressFurther}>−22%</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "按参数重压"}</button></span>
+        <span title={notice}>{notice}</span>
+        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="复制结果图" disabled={isProcessing || !results.some((result) => result.output)} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "应用"}</button></span>
       </footer>
       <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
@@ -957,6 +1120,11 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   });
   const [watcherActive, setWatcherActive] = useState(false);
   const [watcherEvents, setWatcherEvents] = useState<WatcherEvent[]>([]);
+  const [galleryItems, setGalleryItems] = useState<GalleryViewItem[]>([]);
+  const [galleryRevision, setGalleryRevision] = useState(0);
+  const [uploadSettings, setUploadSettings] = useState<UploadSettings>(loadUploadSettings);
+  const [uploadSecret, setUploadSecret] = useState("");
+  const [uploadingId, setUploadingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
   const exportDirectoryRef = useRef<DirectoryHandleLike | null>(null);
@@ -968,6 +1136,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const shortcutRegistrationGenerationRef = useRef(0);
   const importFromClipboardRef = useRef<(() => Promise<void>) | null>(null);
   const livePreviewGenerationRef = useRef(0);
+  const galleryUrlsRef = useRef<string[]>([]);
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
@@ -990,6 +1159,48 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     setToast(message);
     window.setTimeout(() => setToast(null), 2600);
   }, []);
+
+  const refreshGallery = useCallback(async () => {
+    try {
+      const records = await galleryList();
+      galleryUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      const next = records.map((record) => ({ ...record, previewUrl: URL.createObjectURL(record.blob) }));
+      galleryUrlsRef.current = next.map((record) => record.previewUrl);
+      setGalleryItems(next);
+    } catch {
+      showToast("图库读取失败");
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    if (view === "gallery") void refreshGallery();
+  }, [galleryRevision, refreshGallery, view]);
+
+  useEffect(() => () => galleryUrlsRef.current.forEach((url) => URL.revokeObjectURL(url)), []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("piclite.uploadSettings.v1", JSON.stringify(uploadSettings));
+    } catch { /* 非敏感上传配置仅用于本机偏好 */ }
+  }, [uploadSettings]);
+
+  const saveItemToGallery = useCallback(async (item: ImageItem, blob: Blob, outputPath?: string, remoteUrl?: string) => {
+    await galleryPut({
+      id: item.id,
+      name: outputName(item, cleanSuffix(exportSuffix)),
+      createdAt: Date.now(),
+      originalBytes: item.originalBytes,
+      outputBytes: blob.size,
+      width: item.outputWidth || item.width,
+      height: item.outputHeight || item.height,
+      mimeType: blob.type || item.type,
+      blob,
+      sourcePath: item.sourcePath,
+      outputPath,
+      remoteUrl,
+    });
+    setGalleryRevision((current) => current + 1);
+  }, [exportSuffix]);
 
   const addSources = useCallback(async (sources: ImageSourceInput[]) => {
     const imageSources = sources.filter(({ file }) => file.type.startsWith("image/") || /\.(?:jpe?g|png|webp|avif|gif)$/i.test(file.name));
@@ -1196,6 +1407,26 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       setWatcherEvents((current) => [event, ...current].slice(0, 30));
       if (event.type === "started") setWatcherActive(true);
       if (event.type === "stopped") setWatcherActive(false);
+      if (event.type === "success" && event.output) {
+        void nativeBridge.readImagesFromPaths([event.output]).then(async ([image]) => {
+          if (!image) return;
+          const blob = new Blob([new Uint8Array(image.data)], { type: image.type || mimeFromName(image.name) });
+          const dimensions = await getDimensions(new File([blob], image.name, { type: blob.type }));
+          await galleryPut({
+            id: `watcher:${event.output}`,
+            name: image.name,
+            createdAt: event.time,
+            originalBytes: event.originalBytes || blob.size,
+            outputBytes: event.outputBytes || blob.size,
+            width: dimensions.width,
+            height: dimensions.height,
+            mimeType: blob.type,
+            blob,
+            outputPath: event.output,
+          });
+          setGalleryRevision((current) => current + 1);
+        }).catch(() => undefined);
+      }
     });
   }, [nativeBridge]);
 
@@ -1206,15 +1437,17 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     try {
       const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
+      const completed: ImageItem = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" };
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
-        return { ...candidate, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || candidate.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" };
+        return { ...completed, fileHandle: candidate.fileHandle, sourcePath: candidate.sourcePath };
       }));
+      await saveItemToGallery(completed, result.blob);
     } catch (error) {
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : "压缩失败" } : candidate));
     }
-  }, [settings]);
+  }, [saveItemToGallery, settings]);
 
   const processAll = useCallback(async () => {
     if (!items.length) return;
@@ -1234,6 +1467,121 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 3000);
   }, [exportSuffix]);
+
+  const copyBlobToClipboard = useCallback(async (blob: Blob) => {
+    if (nativeBridge) {
+      await nativeBridge.copyImageData(new Uint8Array(await blob.arrayBuffer()));
+      return;
+    }
+    const clipboardBlob = blob.type === "image/png" ? blob : await (async () => {
+      const bitmap = await createImageBitmap(blob);
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("无法创建剪贴板图片");
+      context.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (!png) throw new Error("无法转换剪贴板图片");
+      return png;
+    })();
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": clipboardBlob })]);
+  }, [nativeBridge]);
+
+  const copySelectedResult = useCallback(async () => {
+    if (!selected) return;
+    try {
+      const blob = selected.outputBlob || selected.file;
+      await copyBlobToClipboard(blob);
+      await saveItemToGallery(selected, blob);
+      showToast("结果图已复制，可直接粘贴到其他软件");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "复制结果图失败");
+    }
+  }, [copyBlobToClipboard, saveItemToGallery, selected, showToast]);
+
+  const copyGalleryResult = useCallback(async (record: GalleryRecord) => {
+    try {
+      await copyBlobToClipboard(record.blob);
+      showToast("图库图片已复制");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "复制失败");
+    }
+  }, [copyBlobToClipboard, showToast]);
+
+  const downloadGalleryResult = useCallback((record: GalleryRecord) => {
+    const url = URL.createObjectURL(record.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = record.name;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 3000);
+  }, []);
+
+  const uploadGalleryResult = useCallback(async (record: GalleryRecord) => {
+    if (!nativeBridge) {
+      showToast("云端上传只在桌面客户端提供");
+      return;
+    }
+    if (!uploadSettings.endpoint.trim()) {
+      showToast("请先在应用设置中填写上传服务地址");
+      setView("preferences");
+      return;
+    }
+    setUploadingId(record.id);
+    try {
+      const result = await nativeBridge.uploadImage({
+        ...uploadSettings,
+        secret: uploadSecret,
+        fileName: record.name,
+        mimeType: record.mimeType,
+        data: new Uint8Array(await record.blob.arrayBuffer()),
+      });
+      await galleryPut({ ...record, remoteUrl: result.url });
+      setGalleryRevision((current) => current + 1);
+      await navigator.clipboard.writeText(result.url).catch(() => undefined);
+      showToast("上传完成，图片链接已复制");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "上传失败");
+    } finally {
+      setUploadingId(null);
+    }
+  }, [nativeBridge, showToast, uploadSecret, uploadSettings]);
+
+  const uploadSelectedResult = useCallback(async () => {
+    if (!selected?.outputBlob) return;
+    const record: GalleryRecord = {
+      id: selected.id,
+      name: outputName(selected, cleanSuffix(exportSuffix)),
+      createdAt: Date.now(),
+      originalBytes: selected.originalBytes,
+      outputBytes: selected.outputBlob.size,
+      width: selected.outputWidth || selected.width,
+      height: selected.outputHeight || selected.height,
+      mimeType: selected.outputBlob.type || selected.type,
+      blob: selected.outputBlob,
+      sourcePath: selected.sourcePath,
+    };
+    await galleryPut(record);
+    setGalleryRevision((current) => current + 1);
+    await uploadGalleryResult(record);
+  }, [exportSuffix, selected, uploadGalleryResult]);
+
+  const copyRemoteUrl = useCallback(async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("图片链接已复制");
+    } catch {
+      showToast("链接复制失败，请手动复制");
+    }
+  }, [showToast]);
+
+  const deleteGalleryResult = useCallback(async (id: string) => {
+    await galleryDelete(id);
+    setGalleryRevision((current) => current + 1);
+    showToast("已从图库记录中移除，不会删除本地文件");
+  }, [showToast]);
 
   const prepareAllForExport = useCallback(async () => {
     const prepared: Array<{ item: ImageItem; blob: Blob }> = [];
@@ -1318,6 +1666,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         }
         const result = await nativeBridge.exportImages({ mode: exportMode, suffix, fixedFolder: exportFolderName || undefined, items: payloadItems });
         if (!result.ok) throw new Error(result.error || "导出失败");
+        for (let index = 0; index < prepared.length; index += 1) {
+          const { item, blob } = prepared[index];
+          await saveItemToGallery(item, blob, result.paths?.[index]);
+        }
         showToast(`已写入 ${result.paths?.length || prepared.length} 个文件`);
         return;
       }
@@ -1345,7 +1697,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     } finally {
       setExporting(false);
     }
-  }, [chooseExportFolder, desktopPreferences.confirmOverwrite, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, settings.format, showToast]);
+  }, [chooseExportFolder, desktopPreferences.confirmOverwrite, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, saveItemToGallery, settings.format, showToast]);
 
   const removeItem = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -1661,6 +2013,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         <nav className="main-nav" aria-label="主要功能">
           <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{nativeBridge ? "工作台" : "压缩工作台"}</button>
           <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>文件夹监测{watcherActive && <span className="live-dot" aria-label="监测中" />}</button>
+          <button className={view === "gallery" ? "active" : ""} type="button" onClick={() => setView("gallery")}>图库</button>
           {nativeBridge && <button className={view === "preferences" ? "active" : ""} type="button" onClick={() => setView("preferences")}>应用设置</button>}
         </nav>
         <div className="topbar-actions">
@@ -1725,6 +2078,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                   <button className="zoom-readout" type="button" aria-label="切换 1:1 实际像素" title="按实际像素查看" onClick={() => { setPreviewFit(false); setPreviewZoom(100); setPreviewPan({ x: 0, y: 0 }); }}>{previewFit ? "适应" : `${previewZoom}%`}</button>
                   <button type="button" aria-label="放大预览" onClick={() => setZoom(previewZoom * 1.25)}>＋</button>
                   <button className="fit-button" type="button" onClick={() => { setPreviewFit(true); setPreviewZoom(100); setPreviewPan({ x: 0, y: 0 }); }}>适应</button>
+                  <button className="copy-result-button" type="button" disabled={!selected.outputBlob} title="复制结果图" aria-label="复制结果图" onClick={() => void copySelectedResult()}>⧉</button>
+                  {nativeBridge && <button className="copy-result-button" type="button" disabled={!selected.outputBlob || uploadingId === selected.id} title="上传并复制图片链接" aria-label="上传并复制图片链接" onClick={() => void uploadSelectedResult()}>{uploadingId === selected.id ? "···" : "⇧"}</button>}
                 </div>
               </>}
             </div>
@@ -1987,6 +2342,41 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
             )) : <div className="log-empty"><span>⌁</span><p>启动监测后，处理记录会出现在这里</p></div>}
           </div>
         </section>
+      ) : view === "gallery" ? (
+        <section className="gallery-page" aria-label="压缩结果图库">
+          <header className="gallery-hero">
+            <div>
+              <span className="section-index">03 / RESULT LIBRARY</span>
+              <h1>压过的图，<br />随手就能<span>再用。</span></h1>
+              <p>压缩结果保存在本机图库中。复制图片可直接粘贴，上传成功后链接也会留在这里。</p>
+            </div>
+            <div className="gallery-summary"><strong>{galleryItems.length}</strong><span>张结果图</span><button type="button" onClick={() => void refreshGallery()}>↻ 刷新</button></div>
+          </header>
+
+          {galleryItems.length ? (
+            <div className="gallery-grid">
+              {galleryItems.map((record) => (
+                <article className="gallery-card" key={record.id}>
+                  <div className="gallery-preview"><img src={record.previewUrl} alt={record.name} /><span>{record.width} × {record.height}</span></div>
+                  <div className="gallery-card-body">
+                    <strong title={record.name}>{record.name}</strong>
+                    <small>{new Date(record.createdAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} · {formatBytes(record.outputBytes)} · {sizeChangeLabel(record.originalBytes, record.outputBytes)}</small>
+                    {record.remoteUrl && <button className="gallery-link" type="button" title={record.remoteUrl} onClick={() => void copyRemoteUrl(record.remoteUrl!)}><span>↗</span><b>{record.remoteUrl}</b><em>复制链接</em></button>}
+                    <div className="gallery-actions">
+                      <button type="button" onClick={() => void copyGalleryResult(record)}>⧉ 复制图片</button>
+                      <button type="button" onClick={() => downloadGalleryResult(record)}>↓ 保存文件</button>
+                      {nativeBridge && <button type="button" disabled={uploadingId === record.id} onClick={() => void uploadGalleryResult(record)}>{uploadingId === record.id ? "上传中…" : record.remoteUrl ? "重新上传" : "⇧ 上传图床"}</button>}
+                      {nativeBridge && (record.outputPath || record.sourcePath) && <button type="button" onClick={() => void nativeBridge.revealPath(record.outputPath || record.sourcePath!)}>⌑ 定位文件</button>}
+                      <button className="danger" type="button" title="只删除图库记录，不删除本地文件" onClick={() => void deleteGalleryResult(record.id)}>移除</button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="gallery-empty"><span>◫</span><strong>图库还是空的</strong><p>工作台实时生成、导出或悬浮窗压缩后的图片会自动出现在这里。</p><button type="button" onClick={() => setView("workspace")}>去压缩图片</button></div>
+          )}
+        </section>
       ) : (
         <section className="preferences-page" aria-label="PicLite 应用设置">
           <aside className="preferences-aside">
@@ -2048,6 +2438,29 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               </div>
             </section>
 
+            <section className="preference-card upload-preference-card">
+              <div className="preference-card-heading"><span>图床上传</span><small>WebDAV · R2 · OSS · FTP · SFTP</small></div>
+              <div className="preference-row column">
+                <div><strong>服务类型</strong><small>压缩后可从工作台或图库直接上传并复制链接</small></div>
+                <div className="preference-segments upload-provider-segments">
+                  {([['webdav', 'WebDAV'], ['r2', 'Cloudflare R2'], ['oss', '阿里云 OSS'], ['ftp', 'FTP'], ['sftp', 'SFTP']] as const).map(([value, label]) => <button className={uploadSettings.provider === value ? "active" : ""} type="button" key={value} onClick={() => setUploadSettings((current) => ({ ...current, provider: value, port: value === "ftp" ? 21 : value === "sftp" ? 22 : current.port }))}>{label}</button>)}
+                </div>
+              </div>
+              <div className="upload-grid">
+                <label className="upload-field wide"><span>服务地址</span><input type="text" value={uploadSettings.endpoint} placeholder={uploadSettings.provider === "webdav" ? "https://dav.example.com/remote.php/dav/files/user" : uploadSettings.provider === "r2" ? "https://ACCOUNT_ID.r2.cloudflarestorage.com" : uploadSettings.provider === "oss" ? "https://oss-cn-hangzhou.aliyuncs.com" : "server.example.com"} onChange={(event) => setUploadSettings((current) => ({ ...current, endpoint: event.target.value }))} /></label>
+                {(uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Bucket</span><input type="text" value={uploadSettings.bucket} placeholder="images" onChange={(event) => setUploadSettings((current) => ({ ...current, bucket: event.target.value }))} /></label>}
+                {uploadSettings.provider === "r2" && <label className="upload-field"><span>Region</span><input type="text" value={uploadSettings.region} placeholder="auto" onChange={(event) => setUploadSettings((current) => ({ ...current, region: event.target.value }))} /></label>}
+                {(uploadSettings.provider === "r2" || uploadSettings.provider === "oss") && <label className="upload-field"><span>Access Key ID</span><input type="text" value={uploadSettings.accessKey} autoComplete="off" onChange={(event) => setUploadSettings((current) => ({ ...current, accessKey: event.target.value }))} /></label>}
+                {(uploadSettings.provider === "webdav" || uploadSettings.provider === "ftp" || uploadSettings.provider === "sftp") && <label className="upload-field"><span>用户名</span><input type="text" value={uploadSettings.username} autoComplete="username" onChange={(event) => setUploadSettings((current) => ({ ...current, username: event.target.value }))} /></label>}
+                {(uploadSettings.provider === "ftp" || uploadSettings.provider === "sftp") && <label className="upload-field"><span>端口</span><input type="number" min="1" max="65535" value={uploadSettings.port} onChange={(event) => setUploadSettings((current) => ({ ...current, port: Number(event.target.value) }))} /></label>}
+                {uploadSettings.provider === "sftp" && <label className="upload-field wide"><span>SSH 私钥路径（可选）</span><input type="text" value={uploadSettings.keyPath} placeholder="留空时使用密码" onChange={(event) => setUploadSettings((current) => ({ ...current, keyPath: event.target.value }))} /></label>}
+                <label className="upload-field"><span>{uploadSettings.provider === "r2" || uploadSettings.provider === "oss" ? "Secret Access Key" : "密码"}</span><input type="password" value={uploadSecret} autoComplete="new-password" placeholder="仅保留到本次退出" onChange={(event) => setUploadSecret(event.target.value)} /></label>
+                <label className="upload-field"><span>远端目录</span><input type="text" value={uploadSettings.remotePath} placeholder="piclite" onChange={(event) => setUploadSettings((current) => ({ ...current, remotePath: event.target.value }))} /></label>
+                <label className="upload-field wide"><span>公开访问地址（可选）</span><input type="text" value={uploadSettings.publicBaseUrl} placeholder="https://img.example.com" onChange={(event) => setUploadSettings((current) => ({ ...current, publicBaseUrl: event.target.value }))} /><small>用于拼接最终图片链接；留空则返回服务本身的地址。</small></label>
+              </div>
+              <p className="upload-security-note"><span>◉</span> 密码或 Secret Key 只存在当前内存中，关闭 PicLite 后立即丢弃，不会写入 localStorage 或图库。</p>
+            </section>
+
             <section className="preference-card">
               <div className="preference-card-heading"><span>系统托盘</span><small>后台常驻行为</small></div>
               <div className="preference-row"><div><strong>仅在系统托盘 / 菜单栏显示</strong><small>任务栏与 macOS Dock 不保留图标，主窗口关闭后仍在后台运行</small></div><span className="always-on-badge">始终开启</span></div>
@@ -2069,9 +2482,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.6.3 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>0.7.0 · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.6.3 · Tauri 2 + Rust")}>版本信息</button></div>
+              <div className="about-links"><a href="https://github.com/amiaoapp/PicLite" target="_blank" rel="noreferrer">GitHub 项目</a><button type="button" onClick={() => showToast("PicLite 0.7.0 · Tauri 2 + Rust")}>版本信息</button></div>
             </section>
           </div>
         </section>

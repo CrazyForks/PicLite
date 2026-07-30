@@ -1,8 +1,11 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs,
-    io::{BufReader, Cursor},
+    io::{BufRead, BufReader, Cursor, Write},
+    net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -12,6 +15,8 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use chrono::Utc;
+use hmac::{Hmac, Mac};
 use image::{
     codecs::{
         gif::{GifDecoder, GifEncoder, Repeat},
@@ -23,13 +28,19 @@ use image::{
     AnimationDecoder, DynamicImage, Frame, GenericImageView, ImageDecoder, ImageEncoder,
 };
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use reqwest::{blocking::Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
+use ssh2::{CheckResult, KnownHostFileKind, Session};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
+use url::Url;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"];
 
@@ -169,6 +180,32 @@ struct ExportPayload {
     suffix: String,
     fixed_folder: Option<String>,
     items: Vec<NativeExportItem>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeUploadPayload {
+    provider: String,
+    endpoint: String,
+    bucket: String,
+    region: String,
+    access_key: String,
+    username: String,
+    port: u16,
+    remote_path: String,
+    public_base_url: String,
+    key_path: String,
+    secret: String,
+    file_name: String,
+    mime_type: String,
+    data: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadResult {
+    url: String,
+    remote_path: String,
 }
 
 #[derive(Serialize)]
@@ -787,6 +824,664 @@ async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     }))
 }
 
+fn write_clipboard_image(data: &[u8]) -> Result<(), String> {
+    let decoded =
+        image::load_from_memory(data).map_err(|error| format!("无法读取结果图：{error}"))?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: Cow::Owned(rgba.into_raw()),
+        })
+        .map_err(|error| format!("无法写入系统剪贴板：{error}"))
+}
+
+#[tauri::command]
+async fn copy_image_data(data: Vec<u8>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_clipboard_image(&data))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn copy_image_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = fs::read(&path).map_err(|error| format!("无法读取结果文件：{error}"))?;
+        write_clipboard_image(&data)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn reveal_path(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err("文件已经不存在".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg("-R").arg(&target);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        command.arg(format!("/select,{}", target.to_string_lossy()));
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(if target.is_dir() {
+            target.as_path()
+        } else {
+            target.parent().unwrap_or_else(|| Path::new("."))
+        });
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开文件位置：{error}"))
+}
+
+const URL_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+fn encoded_object_key(value: &str) -> String {
+    value
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| utf8_percent_encode(part, URL_PATH_ENCODE_SET).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn remote_object_key(payload: &NativeUploadPayload) -> Result<String, String> {
+    let file_name = safe_file_name(&payload.file_name);
+    if file_name.trim().is_empty() {
+        return Err("图片文件名为空".to_string());
+    }
+    let directory = payload
+        .remote_path
+        .split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .map(safe_file_name)
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(if directory.is_empty() {
+        file_name
+    } else {
+        format!("{directory}/{file_name}")
+    })
+}
+
+fn endpoint_url(value: &str, scheme: &str) -> Result<Url, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("请填写服务地址".to_string());
+    }
+    let normalized = if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("{scheme}://{value}")
+    };
+    Url::parse(&normalized).map_err(|error| format!("服务地址无效：{error}"))
+}
+
+fn joined_public_url(base: &str, key: &str, fallback: &str) -> String {
+    if base.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            base.trim().trim_end_matches('/'),
+            encoded_object_key(key)
+        )
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|error| error.to_string())?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn upload_webdav(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let endpoint = payload.endpoint.trim().trim_end_matches('/');
+    let directories = key.split('/').collect::<Vec<_>>();
+    let mut current = endpoint.to_string();
+    for directory in directories.iter().take(directories.len().saturating_sub(1)) {
+        current.push('/');
+        current.push_str(&utf8_percent_encode(directory, URL_PATH_ENCODE_SET).to_string());
+        let mut request = client.request(
+            Method::from_bytes(b"MKCOL").map_err(|error| error.to_string())?,
+            &current,
+        );
+        if !payload.username.is_empty() {
+            request = request.basic_auth(&payload.username, Some(&payload.secret));
+        }
+        let response = request
+            .send()
+            .map_err(|error| format!("WebDAV 建目录失败：{error}"))?;
+        if !(response.status().is_success()
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED
+            || response.status() == StatusCode::CONFLICT)
+        {
+            return Err(format!("WebDAV 建目录失败：HTTP {}", response.status()));
+        }
+    }
+    let upload_url = format!("{endpoint}/{}", encoded_object_key(key));
+    let mut request = client
+        .put(&upload_url)
+        .header("Content-Type", &payload.mime_type)
+        .body(payload.data.clone());
+    if !payload.username.is_empty() {
+        request = request.basic_auth(&payload.username, Some(&payload.secret));
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("WebDAV 上传失败：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("WebDAV 上传失败：HTTP {}", response.status()));
+    }
+    Ok(joined_public_url(
+        &payload.public_base_url,
+        key,
+        &upload_url,
+    ))
+}
+
+fn upload_r2(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+    if payload.bucket.trim().is_empty()
+        || payload.access_key.trim().is_empty()
+        || payload.secret.is_empty()
+    {
+        return Err("R2 需要 Bucket、Access Key ID 和 Secret Access Key".to_string());
+    }
+    let endpoint = endpoint_url(&payload.endpoint, "https")?;
+    let scheme = endpoint.scheme();
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| "R2 服务地址缺少主机名".to_string())?;
+    let host_header = match endpoint.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let base_path = endpoint.path().trim_matches('/');
+    let object_path = if base_path.is_empty() {
+        format!(
+            "{}/{}",
+            payload.bucket.trim_matches('/'),
+            encoded_object_key(key)
+        )
+    } else {
+        format!(
+            "{base_path}/{}/{}",
+            payload.bucket.trim_matches('/'),
+            encoded_object_key(key)
+        )
+    };
+    let canonical_uri = format!("/{object_path}");
+    let upload_url = match endpoint.port() {
+        Some(port) => format!("{scheme}://{host}:{port}{canonical_uri}"),
+        None => format!("{scheme}://{host}{canonical_uri}"),
+    };
+    let region = if payload.region.trim().is_empty() {
+        "auto"
+    } else {
+        payload.region.trim()
+    };
+    let now = Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+    let payload_hash = sha256_hex(&payload.data);
+    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+    let canonical_headers = format!(
+        "content-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        payload.mime_type, host_header, payload_hash, amz_date
+    );
+    let canonical_request =
+        format!("PUT\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let scope = format!("{date}/{region}/s3/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let date_key = hmac_sha256(
+        format!("AWS4{}", payload.secret).as_bytes(),
+        date.as_bytes(),
+    )?;
+    let region_key = hmac_sha256(&date_key, region.as_bytes())?;
+    let service_key = hmac_sha256(&region_key, b"s3")?;
+    let signing_key = hmac_sha256(&service_key, b"aws4_request")?;
+    let signature = hmac_sha256(&signing_key, string_to_sign.as_bytes())?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        payload.access_key, scope, signed_headers, signature
+    );
+    let response = Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| error.to_string())?
+        .put(&upload_url)
+        .header("Content-Type", &payload.mime_type)
+        .header("Host", host_header)
+        .header("x-amz-content-sha256", payload_hash)
+        .header("x-amz-date", amz_date)
+        .header("Authorization", authorization)
+        .body(payload.data.clone())
+        .send()
+        .map_err(|error| format!("R2 上传失败：{error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().unwrap_or_default();
+        return Err(format!(
+            "R2 上传失败：HTTP {status} {}",
+            detail.chars().take(180).collect::<String>()
+        ));
+    }
+    Ok(joined_public_url(
+        &payload.public_base_url,
+        key,
+        &upload_url,
+    ))
+}
+
+fn upload_oss(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+    if payload.bucket.trim().is_empty()
+        || payload.access_key.trim().is_empty()
+        || payload.secret.is_empty()
+    {
+        return Err("OSS 需要 Bucket、Access Key ID 和 Access Key Secret".to_string());
+    }
+    let endpoint = endpoint_url(&payload.endpoint, "https")?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| "OSS 服务地址缺少主机名".to_string())?;
+    let bucket = payload.bucket.trim();
+    let upload_host = if host.starts_with(&format!("{bucket}.")) {
+        host.to_string()
+    } else {
+        format!("{bucket}.{host}")
+    };
+    let port = endpoint
+        .port()
+        .map(|value| format!(":{value}"))
+        .unwrap_or_default();
+    let object_path = encoded_object_key(key);
+    let upload_url = format!(
+        "{}://{}{}/{}",
+        endpoint.scheme(),
+        upload_host,
+        port,
+        object_path
+    );
+    let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let canonical_resource = format!("/{bucket}/{key}");
+    let string_to_sign = format!(
+        "PUT\n\n{}\n{}\n{}",
+        payload.mime_type, date, canonical_resource
+    );
+    let mut mac = Hmac::<Sha1>::new_from_slice(payload.secret.as_bytes())
+        .map_err(|error| error.to_string())?;
+    mac.update(string_to_sign.as_bytes());
+    let signature = BASE64.encode(mac.finalize().into_bytes());
+    let response = Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| error.to_string())?
+        .put(&upload_url)
+        .header("Content-Type", &payload.mime_type)
+        .header("Date", date)
+        .header(
+            "Authorization",
+            format!("OSS {}:{signature}", payload.access_key),
+        )
+        .body(payload.data.clone())
+        .send()
+        .map_err(|error| format!("OSS 上传失败：{error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().unwrap_or_default();
+        return Err(format!(
+            "OSS 上传失败：HTTP {status} {}",
+            detail.chars().take(180).collect::<String>()
+        ));
+    }
+    Ok(joined_public_url(
+        &payload.public_base_url,
+        key,
+        &upload_url,
+    ))
+}
+
+fn ftp_read_response(reader: &mut BufReader<TcpStream>) -> Result<(u16, String), String> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    if line.len() < 3 {
+        return Err("FTP 返回了无效响应".to_string());
+    }
+    let code = line[..3]
+        .parse::<u16>()
+        .map_err(|_| format!("FTP 响应无效：{line}"))?;
+    let multiline = line.as_bytes().get(3) == Some(&b'-');
+    let mut response = line;
+    if multiline {
+        loop {
+            let mut next = String::new();
+            reader
+                .read_line(&mut next)
+                .map_err(|error| error.to_string())?;
+            let finished = next.starts_with(&format!("{code} "));
+            response.push_str(&next);
+            if finished {
+                break;
+            }
+        }
+    }
+    Ok((code, response.trim().to_string()))
+}
+
+fn ftp_command(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut TcpStream,
+    command: &str,
+) -> Result<(u16, String), String> {
+    writer
+        .write_all(command.as_bytes())
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(b"\r\n")
+        .map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())?;
+    ftp_read_response(reader)
+}
+
+fn upload_ftp(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+    let endpoint = endpoint_url(&payload.endpoint, "ftp")?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| "FTP 地址缺少主机名".to_string())?;
+    let port = if payload.port == 0 {
+        endpoint.port().unwrap_or(21)
+    } else {
+        payload.port
+    };
+    let control =
+        TcpStream::connect((host, port)).map_err(|error| format!("FTP 连接失败：{error}"))?;
+    control
+        .set_read_timeout(Some(Duration::from_secs(45)))
+        .map_err(|error| error.to_string())?;
+    control
+        .set_write_timeout(Some(Duration::from_secs(45)))
+        .map_err(|error| error.to_string())?;
+    let peer_ip = control.peer_addr().map_err(|error| error.to_string())?.ip();
+    let mut writer = control.try_clone().map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(control);
+    let (code, message) = ftp_read_response(&mut reader)?;
+    if code != 220 {
+        return Err(format!("FTP 拒绝连接：{message}"));
+    }
+    let username = if payload.username.is_empty() {
+        "anonymous"
+    } else {
+        &payload.username
+    };
+    let (code, message) = ftp_command(&mut reader, &mut writer, &format!("USER {username}"))?;
+    if code == 331 {
+        let (code, message) = ftp_command(
+            &mut reader,
+            &mut writer,
+            &format!("PASS {}", payload.secret),
+        )?;
+        if code != 230 {
+            return Err(format!("FTP 登录失败：{message}"));
+        }
+    } else if code != 230 {
+        return Err(format!("FTP 登录失败：{message}"));
+    }
+    let (code, message) = ftp_command(&mut reader, &mut writer, "TYPE I")?;
+    if code != 200 {
+        return Err(format!("FTP 无法切换二进制模式：{message}"));
+    }
+    let mut components = endpoint
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    components.extend(
+        key.split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string),
+    );
+    let file_name = components
+        .pop()
+        .ok_or_else(|| "FTP 远端文件名为空".to_string())?;
+    for directory in &components {
+        let (code, _) = ftp_command(&mut reader, &mut writer, &format!("CWD {directory}"))?;
+        if code != 250 {
+            let (code, message) =
+                ftp_command(&mut reader, &mut writer, &format!("MKD {directory}"))?;
+            if code != 257 {
+                return Err(format!("FTP 建目录失败：{message}"));
+            }
+            let (code, message) =
+                ftp_command(&mut reader, &mut writer, &format!("CWD {directory}"))?;
+            if code != 250 {
+                return Err(format!("FTP 进入目录失败：{message}"));
+            }
+        }
+    }
+    let (code, message) = ftp_command(&mut reader, &mut writer, "PASV")?;
+    if code != 227 {
+        return Err(format!("FTP 无法进入被动模式：{message}"));
+    }
+    let numbers = message
+        .split(['(', ')'])
+        .nth(1)
+        .ok_or_else(|| format!("FTP 被动模式响应无效：{message}"))?
+        .split(',')
+        .filter_map(|value| value.trim().parse::<u16>().ok())
+        .collect::<Vec<_>>();
+    if numbers.len() != 6 {
+        return Err(format!("FTP 被动模式响应无效：{message}"));
+    }
+    let data_port = numbers[4] * 256 + numbers[5];
+    let mut data_stream = TcpStream::connect((peer_ip, data_port))
+        .map_err(|error| format!("FTP 数据连接失败：{error}"))?;
+    let (code, message) = ftp_command(&mut reader, &mut writer, &format!("STOR {file_name}"))?;
+    if code != 125 && code != 150 {
+        return Err(format!("FTP 无法写入文件：{message}"));
+    }
+    data_stream
+        .write_all(&payload.data)
+        .map_err(|error| format!("FTP 上传中断：{error}"))?;
+    let _ = data_stream.shutdown(Shutdown::Write);
+    drop(data_stream);
+    let (code, message) = ftp_read_response(&mut reader)?;
+    if code != 226 && code != 250 {
+        return Err(format!("FTP 上传未完成：{message}"));
+    }
+    let _ = ftp_command(&mut reader, &mut writer, "QUIT");
+    let remote_path = format!("/{}/{}", components.join("/"), file_name).replace("//", "/");
+    let fallback = format!("ftp://{host}:{port}/{}", encoded_object_key(&remote_path));
+    Ok(joined_public_url(&payload.public_base_url, key, &fallback))
+}
+
+fn upload_sftp(payload: &NativeUploadPayload, key: &str) -> Result<String, String> {
+    let endpoint = endpoint_url(&payload.endpoint, "sftp")?;
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| "SFTP 地址缺少主机名".to_string())?;
+    let port = if payload.port == 0 {
+        endpoint.port().unwrap_or(22)
+    } else {
+        payload.port
+    };
+    let tcp =
+        TcpStream::connect((host, port)).map_err(|error| format!("SFTP 连接失败：{error}"))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| error.to_string())?;
+    tcp.set_write_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| error.to_string())?;
+    let mut session = Session::new().map_err(|error| error.to_string())?;
+    session.set_tcp_stream(tcp);
+    session
+        .handshake()
+        .map_err(|error| format!("SSH 握手失败：{error}"))?;
+
+    let (host_key, _) = session
+        .host_key()
+        .ok_or_else(|| "服务器没有提供 SSH Host Key".to_string())?;
+    let known_hosts_path = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .map(|path| path.join(".ssh").join("known_hosts"))
+        .ok_or_else(|| "无法定位 SSH known_hosts；请先用 ssh 命令连接一次服务器".to_string())?;
+    if !known_hosts_path.exists() {
+        return Err("未找到 SSH known_hosts；请先用 ssh 命令连接一次服务器并确认指纹".to_string());
+    }
+    let mut known_hosts = session.known_hosts().map_err(|error| error.to_string())?;
+    known_hosts
+        .read_file(&known_hosts_path, KnownHostFileKind::OpenSSH)
+        .map_err(|error| format!("无法读取 known_hosts：{error}"))?;
+    match known_hosts.check_port(host, port, host_key) {
+        CheckResult::Match => {}
+        CheckResult::Mismatch => {
+            return Err("SSH Host Key 与 known_hosts 不一致，已拒绝连接".to_string())
+        }
+        CheckResult::NotFound => {
+            return Err(
+                "SSH Host Key 不在 known_hosts 中；请先用 ssh 命令连接一次服务器".to_string(),
+            )
+        }
+        CheckResult::Failure => return Err("无法校验 SSH Host Key".to_string()),
+    }
+
+    let username = if payload.username.trim().is_empty() {
+        endpoint.username()
+    } else {
+        payload.username.trim()
+    };
+    if username.is_empty() {
+        return Err("请填写 SFTP 用户名".to_string());
+    }
+    if payload.key_path.trim().is_empty() {
+        session
+            .userauth_password(username, &payload.secret)
+            .map_err(|error| format!("SFTP 登录失败：{error}"))?;
+    } else {
+        session
+            .userauth_pubkey_file(
+                username,
+                None,
+                Path::new(payload.key_path.trim()),
+                if payload.secret.is_empty() {
+                    None
+                } else {
+                    Some(payload.secret.as_str())
+                },
+            )
+            .map_err(|error| format!("SFTP 私钥登录失败：{error}"))?;
+    }
+    if !session.authenticated() {
+        return Err("SFTP 身份验证失败".to_string());
+    }
+    let sftp = session.sftp().map_err(|error| error.to_string())?;
+    let endpoint_path = endpoint.path();
+    let mut components = endpoint_path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    components.extend(
+        key.split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string),
+    );
+    let file_name = components
+        .pop()
+        .ok_or_else(|| "SFTP 远端文件名为空".to_string())?;
+    let mut directory = if endpoint_path.trim_matches('/').is_empty() {
+        PathBuf::new()
+    } else {
+        PathBuf::from("/")
+    };
+    for component in &components {
+        directory.push(component);
+        if sftp.stat(&directory).is_err() {
+            sftp.mkdir(&directory, 0o755)
+                .map_err(|error| format!("SFTP 建目录失败 {}：{error}", directory.display()))?;
+        }
+    }
+    let target = directory.join(&file_name);
+    let mut remote = sftp
+        .create(&target)
+        .map_err(|error| format!("SFTP 创建文件失败：{error}"))?;
+    remote
+        .write_all(&payload.data)
+        .map_err(|error| format!("SFTP 上传中断：{error}"))?;
+    remote.flush().map_err(|error| error.to_string())?;
+    let fallback = format!(
+        "sftp://{host}:{port}/{}",
+        encoded_object_key(&target.to_string_lossy())
+    );
+    Ok(joined_public_url(&payload.public_base_url, key, &fallback))
+}
+
+fn upload_image_sync(payload: NativeUploadPayload) -> Result<UploadResult, String> {
+    if payload.data.is_empty() {
+        return Err("图片内容为空".to_string());
+    }
+    if payload.data.len() > 512 * 1024 * 1024 {
+        return Err("单张图片不能超过 512 MB".to_string());
+    }
+    let key = remote_object_key(&payload)?;
+    let url = match payload.provider.as_str() {
+        "webdav" => upload_webdav(&payload, &key)?,
+        "r2" => upload_r2(&payload, &key)?,
+        "oss" => upload_oss(&payload, &key)?,
+        "ftp" => upload_ftp(&payload, &key)?,
+        "sftp" => upload_sftp(&payload, &key)?,
+        _ => return Err("不支持的上传服务".to_string()),
+    };
+    Ok(UploadResult {
+        url,
+        remote_path: key,
+    })
+}
+
+#[tauri::command]
+async fn upload_image(payload: NativeUploadPayload) -> Result<UploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || upload_image_sync(payload))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn export_images(
     payload: ExportPayload,
@@ -1188,6 +1883,10 @@ pub fn run() {
             select_images,
             read_images_from_paths,
             read_clipboard_image,
+            copy_image_data,
+            copy_image_path,
+            reveal_path,
+            upload_image,
             export_images,
             quick_compress_paths,
             update_desktop_preferences,
@@ -1269,5 +1968,37 @@ mod tests {
         let steps = guarded_quality_steps(100);
         assert!(steps.windows(2).all(|pair| pair[0] > pair[1]));
         assert_eq!(steps.last(), Some(&1));
+    }
+
+    #[test]
+    fn upload_key_removes_parent_segments_and_unsafe_file_characters() {
+        let payload = NativeUploadPayload {
+            provider: "webdav".to_string(),
+            endpoint: "https://dav.example.com".to_string(),
+            bucket: String::new(),
+            region: "auto".to_string(),
+            access_key: String::new(),
+            username: String::new(),
+            port: 0,
+            remote_path: "../piclite/./2026".to_string(),
+            public_base_url: String::new(),
+            key_path: String::new(),
+            secret: String::new(),
+            file_name: "hello:world.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: vec![1],
+        };
+        assert_eq!(
+            remote_object_key(&payload).expect("upload key"),
+            "piclite/2026/hello-world.png"
+        );
+    }
+
+    #[test]
+    fn public_url_encodes_unicode_without_losing_path_segments() {
+        assert_eq!(
+            joined_public_url("https://img.example.com/", "piclite/图 轻.png", "unused"),
+            "https://img.example.com/piclite/%E5%9B%BE%20%E8%BD%BB.png"
+        );
     }
 }

@@ -30,6 +30,8 @@ if ("__TAURI_INTERNALS__" in window) {
       const result = await invoke<{ data: string } | null>("read_clipboard_image");
       return result ? { data: decodeBase64(result.data) } : null;
     },
+    copyImageData: (data) => invoke("copy_image_data", { data: Array.from(data) }),
+    copyImagePath: (path) => invoke("copy_image_path", { path }),
     selectImages: async () => {
       const images = await invoke<EncodedImage[]>("select_images");
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
@@ -49,6 +51,8 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
+    revealPath: (path) => invoke("reveal_path", { path }),
+    uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: (theme) => currentWindow.setTheme(theme === "system" ? null : theme),
     startDragging: () => currentWindow.startDragging(),
