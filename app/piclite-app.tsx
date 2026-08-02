@@ -30,7 +30,7 @@ type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 type DockLayout = "compact" | "full";
 
-const APP_VERSION = "0.11.0";
+const APP_VERSION = "0.12.0";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {

@@ -325,8 +325,8 @@ npm run desktop:build:linux:x64
 推送版本标签后，GitHub Actions 会构建五组桌面产物，并自动创建 Release：
 
 ```bash
-git tag v0.11.0
-git push origin v0.11.0
+git tag v0.12.0
+git push origin v0.12.0
 ```
 
 只想测试构建、不发布版本时，在 GitHub 的 `Actions → Build desktop apps → Run workflow` 手动运行。手动运行的文件会保存在该次工作流的 Artifacts 中。
