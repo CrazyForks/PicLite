@@ -35,7 +35,6 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use tauri::{
-    image::Image as TauriImage,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent,
@@ -890,6 +889,33 @@ async fn select_folder(
         _ => return Err("不支持的文件夹类型".to_string()),
     }
     Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Returns the OS convention for screenshots when it exists, so the folder
+/// watcher can provide the same hands-off screenshot flow as Clop.
+#[tauri::command]
+fn suggest_screenshot_folder() -> Option<String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+
+    #[cfg(target_os = "windows")]
+    let candidates = [
+        home.join("Pictures").join("Screenshots"),
+        home.join("OneDrive").join("Pictures").join("Screenshots"),
+    ];
+    #[cfg(target_os = "macos")]
+    let candidates = [home.join("Desktop"), home.join("Pictures")];
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let candidates = [
+        home.join("Pictures").join("Screenshots"),
+        home.join("Pictures"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -2337,12 +2363,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    let tray_icon = decode_tray_icon(include_bytes!("../icons/tray-light.png"))
-        .unwrap_or_else(|| app.default_window_icon().expect("missing app icon").clone());
     TrayIconBuilder::with_id("piclite-tray")
         .tooltip("PicLite 图轻 · 拖图到悬浮压缩坞")
-        .icon(tray_icon)
-        .icon_as_template(cfg!(target_os = "macos"))
+        .icon(app.default_window_icon().expect("missing app icon").clone())
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -2397,26 +2420,8 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn decode_tray_icon(bytes: &[u8]) -> Option<TauriImage<'static>> {
-    let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Some(TauriImage::new_owned(rgba.into_raw(), width, height))
-}
-
-fn apply_tray_icon_theme(app: &AppHandle, dark: bool) {
-    let Some(tray) = app.tray_by_id("piclite-tray") else {
-        return;
-    };
-    let bytes = if dark {
-        include_bytes!("../icons/tray-dark.png").as_slice()
-    } else {
-        include_bytes!("../icons/tray-light.png").as_slice()
-    };
-    if let Some(icon) = decode_tray_icon(bytes) {
-        let _ = tray.set_icon(Some(icon));
-        #[cfg(target_os = "macos")]
-        let _ = tray.set_icon_as_template(true);
-    }
+fn apply_tray_icon_theme(_app: &AppHandle, _dark: bool) {
+    // PicLite 使用统一的原始应用图标，不随主题切换替换托盘图标。
 }
 
 #[tauri::command]
@@ -2631,6 +2636,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             select_folder,
+            suggest_screenshot_folder,
             select_images,
             read_images_from_paths,
             read_clipboard_image,

@@ -42,6 +42,7 @@ if ("__TAURI_INTERNALS__" in window) {
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
     },
     selectFolder: (kind) => invoke<string | null>("select_folder", { kind }),
+    suggestScreenshotFolder: () => invoke<string | null>("suggest_screenshot_folder"),
     exportImages: async (payload) => invoke("export_images", {
       payload: {
         ...payload,

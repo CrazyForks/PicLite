@@ -28,8 +28,7 @@ type WatermarkLayout = "tile" | "single";
 type ThemeMode = "system" | "light" | "dark";
 type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
-type PetVariant = "white" | "black";
-type PetInteraction = "jump" | "squash" | "shake";
+type DockLayout = "compact" | "full";
 
 const APP_VERSION = "0.11.0";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
@@ -63,7 +62,6 @@ type NativeImage = { name: string; type: string; path: string; data: Uint8Array 
 type NativeExportItem = { sourcePath?: string; outputName: string; data: Uint8Array };
 type ImageSourceInput = { file: File; fileHandle?: FileHandleLike; sourcePath?: string };
 type UploadProvider = "webdav" | "s3" | "r2" | "oss" | "ftp" | "sftp";
-type DockLayout = "pet" | "compact" | "full";
 
 type UploadSettings = {
   provider: UploadProvider;
@@ -129,6 +127,7 @@ type NativeBridge = {
   selectImages: () => Promise<NativeImage[]>;
   readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
+  suggestScreenshotFolder: () => Promise<string | null>;
   exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; fixedFolder?: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
   startWatcher: (settings: WatcherSettings) => Promise<{ ok: boolean; error?: string }>;
   stopWatcher: () => Promise<{ ok: boolean }>;
@@ -239,7 +238,6 @@ type DesktopPreferences = {
   shortcutDock: string;
   dockLayout: DockLayout;
   floatingResultSeconds: number;
-  petScale: number;
   clipboardWatcherEnabled: boolean;
   autoCheckUpdates: boolean;
 };
@@ -332,9 +330,8 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   shortcutShow: "CommandOrControl+Alt+P",
   shortcutPaste: "CommandOrControl+Alt+V",
   shortcutDock: "CommandOrControl+Alt+D",
-  dockLayout: "pet",
+  dockLayout: "compact",
   floatingResultSeconds: 10,
-  petScale: 100,
   clipboardWatcherEnabled: false,
   autoCheckUpdates: true,
 };
@@ -357,9 +354,10 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
   if (typeof window === "undefined") return DEFAULT_DESKTOP_PREFERENCES;
   try {
     const saved = window.localStorage.getItem("piclite.desktopPreferences.v1");
-    return saved
-      ? { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences
-      : DEFAULT_DESKTOP_PREFERENCES;
+    if (!saved) return DEFAULT_DESKTOP_PREFERENCES;
+    const preferences = { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences & { dockLayout?: string };
+    // 0.11 之前的“桌宠”偏好自动迁移到紧凑压缩坞。
+    return { ...preferences, dockLayout: preferences.dockLayout === "full" ? "full" : "compact" };
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
   }
@@ -942,13 +940,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const [dockTheme, setDockTheme] = useState<ThemeMode>(initialPreferences.dockTheme);
   const [dockLayout, setDockLayout] = useState<DockLayout>(initialPreferences.dockLayout);
   const [floatingResultSeconds, setFloatingResultSeconds] = useState(initialPreferences.floatingResultSeconds);
-  const [petScale, setPetScale] = useState(initialPreferences.petScale);
   const [clipboardWatcherEnabled, setClipboardWatcherEnabled] = useState(initialPreferences.clipboardWatcherEnabled);
-  const [petInteraction, setPetInteraction] = useState<PetInteraction | null>(null);
-  const [petBubble, setPetBubble] = useState<string | null>(null);
-  const [petBellyText, setPetBellyText] = useState("就绪");
-  const [petMenuOpen, setPetMenuOpen] = useState(false);
-  const [petAlwaysOnTop, setPetAlwaysOnTop] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState<QuickCompressResult[]>([]);
@@ -959,13 +951,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const resultSettingsRef = useRef({ quality: initialSettings.quality, scale: initialSettings.scale, format: initialSettings.format });
   const autoHideTimerRef = useRef<number | null>(null);
   const previewUrlsRef = useRef<Record<string, string>>({});
-  const petPointerRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
-  const petInteractionIndexRef = useRef(0);
-  const petBellyIndexRef = useRef(0);
-  const petInteractionTimerRef = useRef<number | null>(null);
-  const petBubbleTimerRef = useRef<number | null>(null);
   const clipboardBusyRef = useRef(false);
-  const resolvedPetVariant: PetVariant = resolveTheme(dockTheme) === "dark" ? "black" : "white";
 
   useEffect(() => {
     document.documentElement.classList.add("dropzone-root");
@@ -973,8 +959,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       document.documentElement.classList.remove("dropzone-root");
       Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
       if (autoHideTimerRef.current) window.clearTimeout(autoHideTimerRef.current);
-      if (petInteractionTimerRef.current) window.clearTimeout(petInteractionTimerRef.current);
-      if (petBubbleTimerRef.current) window.clearTimeout(petBubbleTimerRef.current);
     };
   }, []);
 
@@ -1058,24 +1042,15 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     clearAutoHide();
     if (!floatingResultSeconds || isProcessing || !results.some((result) => result.output || result.error)) return;
     autoHideTimerRef.current = window.setTimeout(() => {
-      if (dockLayout !== "pet") {
-        void bridge.hideCurrentWindow();
-        return;
-      }
-      Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
-      previewUrlsRef.current = {};
-      setPreviewUrls({});
-      setResults([]);
-      setNotice("右键选图，单击和我玩");
+      void bridge.hideCurrentWindow();
     }, floatingResultSeconds * 1000);
-  }, [bridge, clearAutoHide, dockLayout, floatingResultSeconds, isProcessing, results]);
+  }, [bridge, clearAutoHide, floatingResultSeconds, isProcessing, results]);
 
   useEffect(() => {
-    const width = results.length ? (dockLayout === "full" ? 390 : 320) : dockLayout === "pet" ? Math.max(190, Math.min(390, Math.round(205 * petScale / 100))) : dockLayout === "compact" ? 280 : 340;
-    const height = results.length ? (dockLayout === "full" ? 320 : 248) : dockLayout === "pet" ? Math.max(190, Math.min(420, Math.round(220 * petScale / 100))) : dockLayout === "compact" ? 176 : 238;
-    if (!results.length && dockLayout === "pet") void bridge.resizeDropzoneWindow(width, height);
-    else void bridge.configureDropzoneWindow(width, height);
-  }, [bridge, dockLayout, petScale, results.length]);
+    const width = results.length ? (dockLayout === "full" ? 390 : 320) : dockLayout === "full" ? 340 : 300;
+    const height = results.length ? (dockLayout === "full" ? 320 : 248) : dockLayout === "full" ? 238 : 188;
+    void bridge.configureDropzoneWindow(width, height);
+  }, [bridge, dockLayout, results.length]);
 
   useEffect(() => {
     scheduleAutoHide();
@@ -1084,7 +1059,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
 
   const chooseDockImages = useCallback(async () => {
     clearAutoHide();
-    setPetMenuOpen(false);
     try {
       const images = await bridge.selectImages();
       if (images.length) await runCompression(images.map((image) => image.path));
@@ -1122,7 +1096,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     clipboardBusyRef.current = true;
     setIsProcessing(true);
     setNotice("检测到剪贴板图片，正在自动压缩…");
-    setPetBellyText("压缩中");
     try {
       const file = new File([new Uint8Array(data)], `clipboard-${Date.now()}.png`, { type: "image/png" });
       const dimensions = await getDimensions(file);
@@ -1160,12 +1133,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       setResults([next]);
       resultSettingsRef.current = { quality, scale, format };
       setNotice(`剪贴板图片已自动压缩并复制 · ${formatBytes(file.size)} → ${formatBytes(compression.blob.size)}`);
-      setPetBellyText("完成");
       void saveDockResults([next]);
       await bridge.showDropzoneWindow();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "剪贴板自动压缩失败");
-      setPetBellyText("失败");
     } finally {
       clipboardBusyRef.current = false;
       setIsProcessing(false);
@@ -1195,7 +1166,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         setDockTheme(preferences.dockTheme);
         setDockLayout(preferences.dockLayout);
         setFloatingResultSeconds(preferences.floatingResultSeconds);
-        setPetScale(preferences.petScale);
         setClipboardWatcherEnabled(preferences.clipboardWatcherEnabled);
       }
       if (event.key === "piclite.compressionSettings.v2") {
@@ -1208,25 +1178,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     window.addEventListener("storage", syncPreferences);
     return () => window.removeEventListener("storage", syncPreferences);
   }, []);
-
-  useEffect(() => {
-    const messages = ["就绪", "拖图", "轻一点", "READY"];
-    const timer = window.setInterval(() => {
-      if (petInteraction || isProcessing) return;
-      petBellyIndexRef.current = (petBellyIndexRef.current + 1) % messages.length;
-      setPetBellyText(messages[petBellyIndexRef.current]);
-    }, 2400);
-    return () => window.clearInterval(timer);
-  }, [isProcessing, petInteraction]);
-
-  useEffect(() => {
-    if (!petMenuOpen) return;
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setPetMenuOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [petMenuOpen]);
 
   useEffect(() => {
     try {
@@ -1244,70 +1195,6 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       window.localStorage.setItem("piclite.desktopPreferences.v1", JSON.stringify({ ...preferences, dockTheme: next }));
     } catch { /* 主题至少对当前窗口立即生效 */ }
   }, [dockTheme]);
-
-  const updatePetPreferences = useCallback((patch: Partial<Pick<DesktopPreferences, "petScale">>) => {
-    const nextScale = patch.petScale === undefined ? petScale : Math.max(60, Math.min(180, Math.round(patch.petScale)));
-    setPetScale(nextScale);
-    try {
-      const preferences = loadStoredDesktopPreferences();
-      window.localStorage.setItem("piclite.desktopPreferences.v1", JSON.stringify({ ...preferences, petScale: nextScale }));
-    } catch { /* 当前桌宠仍会立即更新 */ }
-  }, [petScale]);
-
-  const triggerPetInteraction = useCallback(() => {
-    const interactions: PetInteraction[] = ["jump", "squash", "shake"];
-    const messages = ["喵！今天也要轻一点", "别戳啦，我在压图", "这张还能再瘦一点", "摸鱼被发现了喵", "右键菜单可以选图片", "尺寸小，快乐大！"];
-    const bellyMessages = ["喵", "压图", "变轻", "READY", "✨"];
-    const next = interactions[petInteractionIndexRef.current % interactions.length];
-    petInteractionIndexRef.current += 1;
-    if (petInteractionTimerRef.current) window.clearTimeout(petInteractionTimerRef.current);
-    if (petBubbleTimerRef.current) window.clearTimeout(petBubbleTimerRef.current);
-    setPetMenuOpen(false);
-    setPetInteraction(null);
-    setPetBubble(messages[Math.floor(Math.random() * messages.length)]);
-    setPetBellyText(bellyMessages[petInteractionIndexRef.current % bellyMessages.length]);
-    window.requestAnimationFrame(() => setPetInteraction(next));
-    petInteractionTimerRef.current = window.setTimeout(() => setPetInteraction(null), 760);
-    petBubbleTimerRef.current = window.setTimeout(() => setPetBubble(null), 1900);
-  }, []);
-
-  const handlePetPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
-    setPetMenuOpen(false);
-    petPointerRef.current = { x: event.clientX, y: event.clientY, moved: false };
-  }, []);
-
-  const handlePetPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const pointer = petPointerRef.current;
-    if (!pointer || pointer.moved || Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 5) return;
-    pointer.moved = true;
-    petPointerRef.current = null;
-    setPetMenuOpen(false);
-    void bridge.startDragging();
-  }, [bridge]);
-
-  const handlePetPointerUp = useCallback(() => {
-    const pointer = petPointerRef.current;
-    petPointerRef.current = null;
-    if (!pointer || pointer.moved) return;
-    triggerPetInteraction();
-  }, [triggerPetInteraction]);
-
-  const handlePetWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    updatePetPreferences({ petScale: petScale + (event.deltaY < 0 ? 5 : -5) });
-  }, [petScale, updatePetPreferences]);
-
-  const togglePetAlwaysOnTop = useCallback(async () => {
-    const next = !petAlwaysOnTop;
-    try {
-      await bridge.setAlwaysOnTop(next);
-      setPetAlwaysOnTop(next);
-      setPetMenuOpen(false);
-    } catch {
-      setNotice("置顶设置失败");
-    }
-  }, [bridge, petAlwaysOnTop]);
 
   const undoCompression = useCallback(() => {
     const previous = historyRef.current.pop();
@@ -1358,41 +1245,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       </header>
       <section className="dock-body">
         {!results.length ? (
-          dockLayout === "pet" ? (
-            <div
-              className={`pet-stage ${petMenuOpen ? "menu-open" : ""}`}
-              style={{ "--pet-scale": petScale / 100 } as CSSProperties}
-              title="拖动移动 · 单击互动 · 右键选图 · 滚轮原地缩放"
-              onPointerDown={handlePetPointerDown}
-              onPointerMove={handlePetPointerMove}
-              onPointerUp={handlePetPointerUp}
-              onPointerCancel={() => { petPointerRef.current = null; }}
-              onWheel={handlePetWheel}
-              onContextMenu={(event) => { event.preventDefault(); petPointerRef.current = null; setPetMenuOpen((current) => !current); }}
-            >
-              {petBubble && <span className="pet-speech" role="status">{petBubble}</span>}
-              {isDragging && <span className="pet-drop-hint">松开压缩图片</span>}
-              <span className={`pet-character theme-${resolvedPetVariant} interaction-${petInteraction || "idle"}`}>
-                <img className="piclite-pet" src={`/piclite-pet-${resolvedPetVariant}.png`} alt={resolvedPetVariant === "white" ? "白色小鸡外套猫咪桌宠" : "黑色末影外套猫咪桌宠"} draggable={false} />
-                <span className="pet-belly-screen" aria-live="polite">{petBellyText}</span>
-              </span>
-              {petMenuOpen && <button className="pet-menu-backdrop" type="button" aria-label="关闭桌宠设置" onPointerDown={(event) => { event.stopPropagation(); setPetMenuOpen(false); }} />}
-              {petMenuOpen && <div className="pet-context-menu" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-                <div className="pet-menu-heading"><strong>PicLite 桌宠</strong><button type="button" aria-label="返回桌宠" title="返回桌宠" onClick={() => setPetMenuOpen(false)}>×</button></div>
-                <span className="pet-theme-note">◐ 跟随悬浮窗主题 · {resolvedPetVariant === "white" ? "白猫" : "黑猫"}</span>
-                <div className="pet-size-buttons"><button type="button" aria-label="缩小桌宠" onClick={() => updatePetPreferences({ petScale: petScale - 10 })}>－</button><button type="button" onClick={() => updatePetPreferences({ petScale: 100 })}>{petScale}%</button><button type="button" aria-label="放大桌宠" onClick={() => updatePetPreferences({ petScale: petScale + 10 })}>＋</button></div>
-                <button type="button" onClick={() => void togglePetAlwaysOnTop()}>{petAlwaysOnTop ? "✓ 始终置顶" : "○ 始终置顶"}</button>
-                <button type="button" onClick={() => void chooseDockImages()}>选择图片压缩</button>
-                <button type="button" onClick={() => { setPetMenuOpen(false); void bridge.showMainWindow(); }}>打开主窗口</button>
-                <button className="danger" type="button" onClick={() => void bridge.quitApplication()}>退出 PicLite</button>
-              </div>}
-            </div>
-          ) : (
-            <button className="dock-empty" type="button" onClick={() => void chooseDockImages()} title="点击选择图片，也可以直接拖入">
-              <span className="dock-orbit"><i /><i /><b>＋</b></span>
-              <div><strong>{isDragging ? "松开开始压缩" : "点击或拖入图片"}</strong><small>输出到源文件旁 · 不覆盖原图</small></div>
-            </button>
-          )
+          <button className="dock-empty" type="button" onClick={() => void chooseDockImages()} title="点击选择图片，也可以直接拖入">
+            <span className="dock-orbit"><i /><i /><b>＋</b></span>
+            <div><strong>{isDragging ? "松开开始压缩" : "点击或拖入图片"}</strong><small>输出到源文件旁 · 不覆盖原图</small></div>
+          </button>
         ) : (
           <div className="dock-results">
             {results.slice(0, 2).map((result) => (
@@ -2369,6 +2225,21 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     setWatcherSettings((current) => ({ ...current, [kind === "input" ? "inputFolder" : "outputFolder"]: folder }));
   }, [nativeBridge]);
 
+  const useSuggestedScreenshotFolder = useCallback(async () => {
+    if (!nativeBridge || watcherActive) return;
+    try {
+      const folder = await nativeBridge.suggestScreenshotFolder();
+      if (!folder) {
+        showToast("未找到系统截图目录，请手动选择文件夹");
+        return;
+      }
+      setWatcherSettings((current) => ({ ...current, inputFolder: folder }));
+      showToast("已选择系统截图目录，可直接开始监测");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "无法读取系统截图目录");
+    }
+  }, [nativeBridge, showToast, watcherActive]);
+
   const applyPreset = useCallback((preset: SavedPreset) => {
     setSettings({ ...preset.settings, watermark: { ...preset.settings.watermark } });
     setActivePresetId(preset.id);
@@ -2474,7 +2345,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
       <header className="topbar">
         <button className="brand" type="button" onClick={() => setView("workspace")}>
-          <span className="brand-mark cat-brand" aria-hidden="true"><img src="/piclite-cat-head.png" alt="" /></span>
+          <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span><strong>PicLite</strong><small>图轻</small></span>
         </button>
         <nav className="main-nav" aria-label="主要功能">
@@ -2490,7 +2361,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       </header>
 
       {!nativeBridge && downloadGuideVisible && <aside className="desktop-download-guide" aria-label="PicLite 桌面端下载引导">
-        <span className="download-cat" aria-hidden="true"><img src="/piclite-cat-head.png" alt="" /></span>
+        <span className="download-mark brand-mark" aria-hidden="true"><i /><i /><i /></span>
         <span><strong>桌面端可以监测文件夹和剪贴板</strong><small>已识别当前系统，可在本机后台自动压缩图片。</small></span>
         <button className="download-guide-primary" type="button" onClick={() => openReleasePage()}>{browserDownloadLabel()}</button>
         <button className="download-guide-close" type="button" aria-label="关闭桌面端下载引导" onClick={dismissDownloadGuide}>×</button>
@@ -2780,6 +2651,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               <div className="console-lock"><span>▣</span><strong>在桌面客户端中启用</strong><p>网页端的压缩工作台仍可完整使用。文件夹监测需要安装桌面版。</p></div>
             )}
             <div className="console-header"><div><i className={watcherActive ? "active" : ""} /><span>{watcherActive ? "MONITORING" : "READY"}</span></div><small>本地自动化</small></div>
+            <div className="watcher-quick-action"><button type="button" disabled={!nativeBridge || watcherActive} onClick={useSuggestedScreenshotFolder}>⌁ 使用系统截图文件夹</button><small>截图保存后立即按当前参数自动优化</small></div>
             <div className="folder-route">
               <button type="button" onClick={() => chooseFolder("input")} disabled={!nativeBridge || watcherActive}>
                 <span className="folder-icon">⌑</span><small>监测文件夹</small><strong>{watcherSettings.inputFolder || "选择来源文件夹"}</strong><b>选择</b>
@@ -2921,13 +2793,11 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                 </div>
               </div>
               <div className="preference-row column">
-                <div><strong>悬浮入口样式</strong><small>桌宠适合常驻；紧凑与完整样式会在产生结果时展开工具区</small></div>
+                <div><strong>悬浮压缩坞样式</strong><small>紧凑和完整两种样式都会在产生结果时展开工具区</small></div>
                 <div className="preference-segments">
-                  {([['pet', '桌宠'], ['compact', '紧凑'], ['full', '完整']] as const).map(([value, label]) => <button className={desktopPreferences.dockLayout === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, dockLayout: value }))}>{label}</button>)}
+                  {([['compact', '紧凑'], ['full', '完整']] as const).map(([value, label]) => <button className={desktopPreferences.dockLayout === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, dockLayout: value }))}>{label}</button>)}
                 </div>
               </div>
-              <div className="preference-row"><div><strong>桌宠角色</strong><small>浅色主题自动使用白色小鸡外套猫，深色主题自动使用黑色末影猫</small></div><span className="preference-badge">自动跟随主题</span></div>
-              <label className="preference-row"><div><strong>桌宠大小</strong><small>也可以把鼠标放在桌宠上滚动滚轮，范围 60%–180%</small></div><span className="preference-number"><input type="number" min="60" max="180" step="5" value={desktopPreferences.petScale} onChange={(event) => setDesktopPreferences((current) => ({ ...current, petScale: Math.max(60, Math.min(180, Number(event.target.value) || 100)) }))} /> %</span></label>
               <label className="preference-row"><div><strong>结果自动收起</strong><small>压缩完成后在桌面右下角停留；设为 0 秒则不自动收起</small></div><span className="preference-number"><input type="number" min="0" max="120" step="1" value={desktopPreferences.floatingResultSeconds} onChange={(event) => setDesktopPreferences((current) => ({ ...current, floatingResultSeconds: Math.max(0, Math.min(120, Number(event.target.value) || 0)) }))} /> 秒</span></label>
             </section>
 
@@ -2977,9 +2847,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
             <section className="preference-card about-card">
               <div className="preference-card-heading"><span>关于 PicLite</span><small>版本与运行环境</small></div>
-              <div className="about-product"><span className="brand-mark cat-brand" aria-hidden="true"><img src="/piclite-cat-head.png" alt="" /></span><div><strong>PicLite 图轻</strong><small>{APP_VERSION} · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>{APP_VERSION} · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>图片在本机处理，不上传到 PicLite 服务器。桌面端使用操作系统自带 WebView，因此安装包不再携带完整浏览器内核。</p>
-              <div className="about-links"><button type="button" onClick={() => openReleasePage("https://github.com/amiaoapp/PicLite")}>GitHub 项目</button><button type="button" onClick={() => showToast(`PicLite ${APP_VERSION} · Tauri 2 + Rust`)}>版本信息</button><button type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)}>{checkingUpdate ? "检查中…" : updateInfo?.available ? `更新到 ${updateInfo.latestVersion}` : "检查更新"}</button></div>
+              <p className="license-note">PicLite 以 GPL-3.0-or-later 开源；部分自动化工作流改编自 FuzzyIdeas 的 Clop，相关源代码与署名见许可证。</p>
+              <div className="about-links"><button type="button" onClick={() => openReleasePage("https://github.com/amiaoapp/PicLite")}>GitHub 项目</button><button type="button" onClick={() => openReleasePage("https://github.com/amiaoapp/PicLite/blob/main/LICENSE")}>GPLv3 许可</button><button type="button" onClick={() => showToast(`PicLite ${APP_VERSION} · Tauri 2 + Rust`)}>版本信息</button><button type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)}>{checkingUpdate ? "检查中…" : updateInfo?.available ? `更新到 ${updateInfo.latestVersion}` : "检查更新"}</button></div>
             </section>
           </div>
         </section>
