@@ -42,6 +42,7 @@ if ("__TAURI_INTERNALS__" in window) {
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
     },
     selectFolder: (kind) => invoke<string | null>("select_folder", { kind }),
+    suggestScreenshotFolder: () => invoke<string | null>("suggest_screenshot_folder"),
     exportImages: async (payload) => invoke("export_images", {
       payload: {
         ...payload,
@@ -123,6 +124,18 @@ if ("__TAURI_INTERNALS__" in window) {
       let unlisten: (() => void) | undefined;
       let disposed = false;
       void listen<{ data: string }>("clipboard:image", (event) => callback(decodeBase64(event.payload.data))).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
+    onClipboardPaths: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen<string[]>("clipboard:paths", (event) => callback(event.payload)).then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       });
