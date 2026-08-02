@@ -1243,6 +1243,9 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }, [bridge]);
 
   const latestOutput = results.find((result) => result.output && !result.error)?.output;
+  const reprocessDock = useCallback((nextQuality = quality, nextScale = scale, nextFormat = format) => {
+    if (lastPathsRef.current.length) void runCompression(lastPathsRef.current, nextQuality, nextScale, nextFormat);
+  }, [format, quality, runCompression, scale]);
 
   return (
     <main className={`drop-dock layout-${dockLayout} ${results.length ? "has-results" : "is-idle"} ${isDragging ? "dragging" : ""}`} onPointerEnter={clearAutoHide} onPointerLeave={scheduleAutoHide}>
@@ -1273,9 +1276,9 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         )}
       </section>
       <div className={`dock-controls ${results.length ? "" : "idle-controls"}`} onPointerDown={(event) => event.stopPropagation()}>
-        <label htmlFor="dock-quality"><span>画质</span><input id="dock-quality" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onInput={(event) => setQuality(Number(event.currentTarget.value))} onChange={(event) => setQuality(Number(event.currentTarget.value))} /><b>{quality}%</b></label>
-        <label htmlFor="dock-scale"><span>尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onInput={(event) => setScale(Number(event.currentTarget.value))} onChange={(event) => setScale(Number(event.currentTarget.value))} /><b>{formatScale(scale)}</b></label>
-        <label className="dock-format-control" htmlFor="dock-format"><span>格式</span><select id="dock-format" value={format} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => setFormat(event.currentTarget.value as OutputFormat)}><option value="keep">保持原格式</option><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select><b>{format === "keep" ? "原格式" : format.split("/")[1].toUpperCase()}</b></label>
+        <label htmlFor="dock-quality"><span>画质</span><input id="dock-quality" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onInput={(event) => setQuality(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(Number(event.currentTarget.value), scale)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(Number(event.currentTarget.value), scale); }} /><b>{quality}%</b></label>
+        <label htmlFor="dock-scale"><span>尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onInput={(event) => setScale(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(quality, Number(event.currentTarget.value))} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(quality, Number(event.currentTarget.value)); }} /><b>{formatScale(scale)}</b></label>
+        <label className="dock-format-control" htmlFor="dock-format"><span>格式</span><select id="dock-format" value={format} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => { const next = event.currentTarget.value as OutputFormat; setFormat(next); reprocessDock(quality, scale, next); }}><option value="keep">保持原格式</option><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select><b>{format === "keep" ? "原格式" : format.split("/")[1].toUpperCase()}</b></label>
       </div>
       <footer onPointerDown={(event) => event.stopPropagation()}>
         <span title={notice}>{notice}</span>
@@ -1329,6 +1332,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [watcherEvents, setWatcherEvents] = useState<WatcherEvent[]>([]);
   const [galleryItems, setGalleryItems] = useState<GalleryViewItem[]>([]);
   const [galleryRevision, setGalleryRevision] = useState(0);
+  const [gallerySelectedId, setGallerySelectedId] = useState<string | null>(null);
+  const [galleryPreviewId, setGalleryPreviewId] = useState<string | null>(null);
   const [uploadSettings, setUploadSettings] = useState<UploadSettings>(loadUploadSettings);
   const [uploadSecret, setUploadSecret] = useState("");
   const [uploadProfileSaved, setUploadProfileSaved] = useState(false);
@@ -1378,6 +1383,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
   const selected = useMemo(() => items.find((item) => item.id === selectedId) || items[0] || null, [items, selectedId]);
   const selectedTarget = useMemo(() => selected ? getTargetDimensions(selected, settings) : null, [selected, settings]);
+  const galleryPreview = useMemo(() => galleryItems.find((item) => item.id === galleryPreviewId) || null, [galleryItems, galleryPreviewId]);
   const totals = useMemo(() => {
     const original = items.reduce((sum, item) => sum + item.originalBytes, 0);
     const output = items.reduce((sum, item) => sum + (item.outputBytes ?? item.originalBytes), 0);
@@ -1435,6 +1441,46 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   useEffect(() => {
     if (view === "gallery") void refreshGallery();
   }, [galleryRevision, refreshGallery, view]);
+
+  useEffect(() => {
+    if (!galleryItems.length) {
+      setGallerySelectedId(null);
+      setGalleryPreviewId(null);
+      return;
+    }
+    if (!gallerySelectedId || !galleryItems.some((item) => item.id === gallerySelectedId)) setGallerySelectedId(galleryItems[0].id);
+    if (galleryPreviewId && !galleryItems.some((item) => item.id === galleryPreviewId)) setGalleryPreviewId(null);
+  }, [galleryItems, galleryPreviewId, gallerySelectedId]);
+
+  useEffect(() => {
+    const onGalleryShortcut = (event: globalThis.KeyboardEvent) => {
+      if (view !== "gallery") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      const index = galleryItems.findIndex((item) => item.id === (galleryPreviewId || gallerySelectedId));
+      if (event.key === " ") {
+        if (!galleryPreviewId && gallerySelectedId) {
+          event.preventDefault();
+          setGalleryPreviewId(gallerySelectedId);
+        }
+        return;
+      }
+      if (event.key === "Escape" && galleryPreviewId) {
+        event.preventDefault();
+        setGalleryPreviewId(null);
+        return;
+      }
+      if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && galleryItems.length) {
+        event.preventDefault();
+        const offset = event.key === "ArrowLeft" ? -1 : 1;
+        const next = galleryItems[(Math.max(0, index) + offset + galleryItems.length) % galleryItems.length];
+        setGallerySelectedId(next.id);
+        if (galleryPreviewId) setGalleryPreviewId(next.id);
+      }
+    };
+    window.addEventListener("keydown", onGalleryShortcut);
+    return () => window.removeEventListener("keydown", onGalleryShortcut);
+  }, [galleryItems, galleryPreviewId, gallerySelectedId, view]);
 
   useEffect(() => () => galleryUrlsRef.current.forEach((url) => URL.revokeObjectURL(url)), []);
 
@@ -2719,8 +2765,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
           {galleryItems.length ? (
             <div className="gallery-grid">
               {galleryItems.map((record) => (
-                <article className="gallery-card" key={record.id}>
-                  <div className="gallery-preview"><img src={record.previewUrl} alt={record.name} /><span>{record.width} × {record.height}</span></div>
+                <article className={`gallery-card ${gallerySelectedId === record.id ? "selected" : ""}`} key={record.id} tabIndex={0} onClick={() => setGallerySelectedId(record.id)} onDoubleClick={() => { setGallerySelectedId(record.id); setGalleryPreviewId(record.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setGallerySelectedId(record.id); setGalleryPreviewId(record.id); } }}>
+                  <button className="gallery-preview" type="button" tabIndex={-1} onClick={() => setGallerySelectedId(record.id)} onDoubleClick={() => setGalleryPreviewId(record.id)} aria-label={`预览 ${record.name}`}><img src={record.previewUrl} alt={record.name} /><span>{record.width} × {record.height}</span><em>双击预览</em></button>
                   <div className="gallery-card-body">
                     <strong title={record.name}>{record.name}</strong>
                     <small>{new Date(record.createdAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })} · {formatBytes(record.outputBytes)} · {sizeChangeLabel(record.originalBytes, record.outputBytes)}</small>
@@ -2868,6 +2914,11 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       )}
 
       {presetDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPresetDialogOpen(false); }}><form className="preset-dialog" onSubmit={(event) => { event.preventDefault(); saveCustomPreset(); }}><span className="eyebrow">SAVE PRESET</span><h2>保存当前压缩参数</h2><p>画质、尺寸、格式、元数据和水印设置会一起保存，下次启动仍然可用。</p><input autoFocus value={presetName} maxLength={24} placeholder="例如：公众号封面" onChange={(event) => setPresetName(event.target.value)} /><div><button type="button" onClick={() => setPresetDialogOpen(false)}>取消</button><button className="primary" type="submit" disabled={!presetName.trim()}>保存预设</button></div></form></div>}
+      {galleryPreview && <div className="gallery-lightbox" role="dialog" aria-modal="true" aria-label={`预览 ${galleryPreview.name}`} onMouseDown={(event) => { if (event.target === event.currentTarget) setGalleryPreviewId(null); }}>
+        <header><div><span>QUICK LOOK</span><strong title={galleryPreview.name}>{galleryPreview.name}</strong></div><button type="button" aria-label="关闭预览" title="关闭（Esc）" onClick={() => setGalleryPreviewId(null)}>×</button></header>
+        <div className="gallery-lightbox-image"><img src={galleryPreview.previewUrl} alt={galleryPreview.name} /></div>
+        <footer><span>{galleryPreview.width} × {galleryPreview.height} · {formatBytes(galleryPreview.outputBytes)} <b>{sizeChangeLabel(galleryPreview.originalBytes, galleryPreview.outputBytes)}</b></span><div><button type="button" title="上一张（←）" onClick={() => { const index = galleryItems.findIndex((item) => item.id === galleryPreview.id); const next = galleryItems[(index - 1 + galleryItems.length) % galleryItems.length]; setGallerySelectedId(next.id); setGalleryPreviewId(next.id); }}>←</button><button type="button" onClick={() => void copyGalleryResult(galleryPreview)}>⧉ 复制结果图</button>{nativeBridge && (galleryPreview.outputPath || galleryPreview.sourcePath) && <button type="button" onClick={() => void nativeBridge.revealPath(galleryPreview.outputPath || galleryPreview.sourcePath!)}>⌑ 定位</button>}<button type="button" title="下一张（→）" onClick={() => { const index = galleryItems.findIndex((item) => item.id === galleryPreview.id); const next = galleryItems[(index + 1) % galleryItems.length]; setGallerySelectedId(next.id); setGalleryPreviewId(next.id); }}>→</button></div></footer>
+      </div>}
       {dragging && <div className="drag-overlay" onDragLeave={() => setDragging(false)}><div><span>＋</span><strong>松开即可加入图片</strong><small>支持同时导入多张</small></div></div>}
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
     </main>
