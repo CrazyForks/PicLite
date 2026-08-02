@@ -132,5 +132,17 @@ if ("__TAURI_INTERNALS__" in window) {
         unlisten?.();
       };
     },
+    onClipboardPaths: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen<string[]>("clipboard:paths", (event) => callback(event.payload)).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
   };
 }

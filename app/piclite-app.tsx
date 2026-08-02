@@ -154,6 +154,7 @@ type NativeBridge = {
   onTrayAction: (callback: (action: string) => void) => () => void;
   onWatcherEvent: (callback: (event: WatcherEvent) => void) => () => void;
   onClipboardImage: (callback: (data: Uint8Array) => void) => () => void;
+  onClipboardPaths: (callback: (paths: string[]) => void) => () => void;
   checkForUpdates: () => Promise<UpdateInfo>;
   openExternal: (url: string) => Promise<void>;
 };
@@ -1146,6 +1147,16 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   useEffect(() => bridge.onClipboardImage((data) => {
     if (clipboardWatcherEnabled) void compressClipboardImage(data);
   }), [bridge, clipboardWatcherEnabled, compressClipboardImage]);
+
+  useEffect(() => bridge.onClipboardPaths((paths) => {
+    if (!clipboardWatcherEnabled || !paths.length || clipboardBusyRef.current || isProcessing) return;
+    clipboardBusyRef.current = true;
+    setNotice(`检测到剪贴板中的 ${paths.length} 张图片，正在自动压缩…`);
+    void runCompression(paths).finally(() => {
+      clipboardBusyRef.current = false;
+      void bridge.showDropzoneWindow();
+    });
+  }), [bridge, clipboardWatcherEnabled, isProcessing, runCompression]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");

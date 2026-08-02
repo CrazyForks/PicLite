@@ -979,6 +979,20 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
     }))
 }
 
+fn clipboard_image_paths() -> Result<Vec<String>, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    match clipboard.get().file_list() {
+        Ok(paths) => Ok(paths
+            .into_iter()
+            .filter(|path| is_image(path))
+            .map(|path| fs::canonicalize(&path).unwrap_or(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()),
+        Err(arboard::Error::ContentNotAvailable) => Ok(Vec::new()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[tauri::command]
 async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     tauri::async_runtime::spawn_blocking(clipboard_image)
@@ -2571,10 +2585,23 @@ fn start_clipboard_monitor(app: AppHandle) {
                         let _ = app.emit("clipboard:image", image);
                     }
                 }
-                Ok(None) => {
-                    was_enabled = true;
-                    last_fingerprint = None;
-                }
+                Ok(None) => match clipboard_image_paths() {
+                    Ok(paths) if !paths.is_empty() => {
+                        let fingerprint = format!("paths:{}", paths.join("\u{1f}"));
+                        if !was_enabled {
+                            last_fingerprint = Some(fingerprint);
+                            was_enabled = true;
+                        } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                            last_fingerprint = Some(fingerprint);
+                            let _ = app.emit("clipboard:paths", paths);
+                        }
+                    }
+                    Ok(_) => {
+                        was_enabled = true;
+                        last_fingerprint = None;
+                    }
+                    Err(_) => {}
+                },
                 Err(_) => {}
             }
             thread::sleep(Duration::from_millis(800));
