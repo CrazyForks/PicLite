@@ -22,7 +22,6 @@ use image::{
         gif::{GifDecoder, GifEncoder, Repeat},
         jpeg::JpegEncoder,
         png::{CompressionType, FilterType as PngFilterType, PngEncoder},
-        webp::WebPEncoder,
     },
     imageops::FilterType,
     AnimationDecoder, DynamicImage, Frame, GenericImageView, ImageDecoder, ImageEncoder,
@@ -41,6 +40,7 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
+use webp::Encoder as LossyWebPEncoder;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"];
 
@@ -484,14 +484,11 @@ fn encode_static(
         }
         "webp" => {
             let rgba = image.to_rgba8();
-            WebPEncoder::new_lossless(&mut encoded)
-                .write_image(
-                    &rgba,
-                    rgba.width(),
-                    rgba.height(),
-                    image::ExtendedColorType::Rgba8,
-                )
-                .map_err(|error| error.to_string())?;
+            // image-rs exposes a lossless-only WebP encoder. Using libwebp here is
+            // deliberate: the WebP quality control must behave like the JPG slider.
+            let webp = LossyWebPEncoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+                .encode(quality.clamp(1, 100) as f32);
+            encoded.extend_from_slice(webp.as_ref());
         }
         _ => return Err(format!("自动监测暂不支持编码 .{output_extension}")),
     }
@@ -2710,6 +2707,22 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webp_quality_controls_lossy_output_size() {
+        let mut pixels = image::RgbaImage::new(320, 180);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            let noise = ((x * 17 + y * 31 + (x * y) % 251) % 256) as u8;
+            *pixel = image::Rgba([noise, noise.wrapping_add((x % 93) as u8), noise.wrapping_add((y % 71) as u8), 255]);
+        }
+        let image = DynamicImage::ImageRgba8(pixels);
+        let small = encode_static(image.clone(), "webp", 35).expect("encode small webp");
+        let detailed = encode_static(image, "webp", 88).expect("encode detailed webp");
+
+        assert_eq!(&small[8..12], b"WEBP");
+        assert_eq!(&detailed[8..12], b"WEBP");
+        assert!(small.len() < detailed.len(), "low quality WebP should be smaller: {} vs {}", small.len(), detailed.len());
+    }
 
     #[test]
     fn resizing_a_precompressed_jpeg_never_increases_file_size() {
