@@ -30,7 +30,7 @@ type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 type DockLayout = "compact" | "full";
 
-const APP_VERSION = "0.13.1";
+const APP_VERSION = "0.13.2";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -137,6 +137,10 @@ type NativeBridge = {
   uploadImage: (payload: NativeUploadPayload) => Promise<{ url: string; remotePath: string }>;
   loadUploadProfile: () => Promise<StoredUploadProfile | null>;
   saveUploadProfile: (profile: StoredUploadProfile) => Promise<void>;
+  loadAppProfile: () => Promise<NativeAppProfile | null>;
+  saveAppProfile: (profile: NativeAppProfile) => Promise<void>;
+  loadImportedFonts: () => Promise<Array<{ family: string; data: Uint8Array }>>;
+  saveImportedFont: (family: string, data: Uint8Array) => Promise<void>;
   listSystemFonts: () => Promise<SystemFontInfo[]>;
   readSystemFont: (path: string, faceIndex: number) => Promise<{ data: Uint8Array }>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
@@ -144,6 +148,7 @@ type NativeBridge = {
   startDragging: () => Promise<void>;
   startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
   showMainWindow: () => Promise<void>;
+  showGalleryWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
   configureDropzoneWindow: (width: number, height: number) => Promise<void>;
   resizeDropzoneWindow: (width: number, height: number) => Promise<void>;
@@ -187,6 +192,7 @@ type ImageItem = {
   error?: string;
   keptOriginal?: boolean;
   sizeGuardQuality?: number;
+  strategy?: string;
   fileHandle?: FileHandleLike;
   sourcePath?: string;
 };
@@ -248,6 +254,13 @@ type SavedPreset = {
   name: string;
   settings: CompressionSettings;
   custom?: boolean;
+};
+
+type NativeAppProfile = {
+  settings: CompressionSettings;
+  customPresets: SavedPreset[];
+  activePresetId: string;
+  localFonts: string[];
 };
 
 type QuickCompressSettings = {
@@ -846,12 +859,54 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   return { blob: result, width, height };
 }
 
-type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean; sizeGuardQuality?: number };
+type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean; sizeGuardQuality?: number; strategy?: string };
+
+function smartCandidates(item: ImageItem, settings: CompressionSettings) {
+  if (settings.mode === "lossless" || settings.format !== "keep" || item.type === "image/gif") return [settings];
+
+  // These are quality guard rails, not just named presets. We try a small set
+  // of real encodes and retain the smallest result within the mode's visual
+  // budget. PNG is not blindly converted to JPEG because it may be transparent.
+  const formats: OutputFormat[] = ["keep", "image/webp"];
+  const qualityStops = settings.mode === "balanced"
+    ? [Math.min(settings.quality, 86), Math.min(settings.quality, 81), Math.min(settings.quality, 77)]
+    : [Math.min(settings.quality, 68), Math.min(settings.quality, 58), Math.min(settings.quality, 46)];
+  const scaleStops = settings.mode === "balanced"
+    ? [settings.scale, Math.min(settings.scale, 96), Math.min(settings.scale, 92)]
+    : [Math.min(settings.scale, 88), Math.min(settings.scale, 80), Math.min(settings.scale, 72)];
+  const candidates: CompressionSettings[] = [];
+  formats.forEach((format) => qualityStops.forEach((quality, index) => {
+    candidates.push({ ...settings, format, quality: Math.max(1, Math.round(quality)), scale: Math.max(0.1, scaleStops[index]) });
+  }));
+  return candidates.filter((candidate, index, all) => all.findIndex((other) => (
+    other.format === candidate.format && other.quality === candidate.quality && other.scale === candidate.scale
+  )) === index);
+}
+
+function strategyLabel(settings: CompressionSettings) {
+  const format = settings.format === "keep" ? "原格式" : settings.format.split("/")[1].toUpperCase();
+  return `${format} · ${Math.round(settings.quality)}% · ${formatScale(settings.scale)} 尺寸`;
+}
 
 async function compressImage(item: ImageItem, settings: CompressionSettings): Promise<CompressionResult> {
   const encodeCandidate = (candidateSettings: CompressionSettings) => item.type === "image/gif" && candidateSettings.format === "keep"
     ? animatedGifCompress(item, candidateSettings)
     : canvasCompress(item, candidateSettings);
+
+  const candidates = smartCandidates(item, settings);
+  if (candidates.length > 1) {
+    let best: (Awaited<ReturnType<typeof encodeCandidate>> & { settings: CompressionSettings }) | null = null;
+    for (const candidateSettings of candidates) {
+      const result = await encodeCandidate(candidateSettings);
+      if (!best || result.blob.size < best.blob.size) best = { ...result, settings: candidateSettings };
+    }
+    if (!best) throw new Error("未生成可用的智能优化结果");
+    if (settings.preventLarger && best.blob.size >= item.originalBytes) {
+      return { blob: item.file, width: item.width, height: item.height, keptOriginal: true, strategy: "所有高质量候选都更大" };
+    }
+    return { blob: best.blob, width: best.width, height: best.height, strategy: strategyLabel(best.settings) };
+  }
+
   const candidate = await encodeCandidate(settings);
   const hasVisualTransform = candidate.width !== item.width
     || candidate.height !== item.height
@@ -962,6 +1017,17 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       if (autoHideTimerRef.current) window.clearTimeout(autoHideTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void bridge.loadAppProfile().then((profile) => {
+      if (disposed || !profile?.settings) return;
+      setQuality(profile.settings.quality);
+      setScale(profile.settings.scale);
+      setFormat(profile.settings.format);
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+  }, [bridge]);
 
   const saveDockResults = useCallback(async (next: QuickCompressResult[]) => {
     const completed = next.filter((result) => result.output && !result.error);
@@ -1282,7 +1348,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       </div>
       <footer onPointerDown={(event) => event.stopPropagation()}>
         <span title={notice}>{notice}</span>
-        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="在文件夹中显示" disabled={!latestOutput} onClick={() => latestOutput && void bridge.revealPath(latestOutput)}>⌑</button><button className="dock-icon-action" type="button" title="复制压缩文件" disabled={isProcessing || !latestOutput} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "重压"}</button></span>
+        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="打开图库" onClick={() => void bridge.showGalleryWindow()}>▦</button><button className="dock-icon-action" type="button" title="在文件夹中显示" disabled={!latestOutput} onClick={() => latestOutput && void bridge.revealPath(latestOutput)}>⌑</button><button className="dock-icon-action" type="button" title="复制压缩文件" disabled={isProcessing || !latestOutput} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "重压"}</button></span>
       </footer>
       <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
@@ -1341,6 +1407,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [downloadGuideVisible, setDownloadGuideVisible] = useState(true);
+  const [nativeProfileReady, setNativeProfileReady] = useState(() => !nativeBridge);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
   const exportDirectoryRef = useRef<DirectoryHandleLike | null>(null);
@@ -1356,6 +1423,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const savedUploadProfileRef = useRef<string | null>(null);
   const loadedSystemFontsRef = useRef<Set<string>>(new Set());
   const systemFontFilesRef = useRef<Map<string, SystemFontInfo>>(new Map());
+  const hydratedWatermarkFontRef = useRef<string | null>(null);
+  const importedFontsHydratedRef = useRef(false);
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
@@ -1370,6 +1439,26 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     if (!nativeBridge && window.localStorage.getItem("piclite.desktopDownloadGuide.dismissed") === "1") {
       setDownloadGuideVisible(false);
     }
+  }, [nativeBridge]);
+
+  useEffect(() => {
+    if (!nativeBridge) return;
+    let disposed = false;
+    setNativeProfileReady(false);
+    void nativeBridge.loadAppProfile()
+      .then((profile) => {
+        if (disposed || !profile) return;
+        const nextSettings = profile.settings && typeof profile.settings === "object"
+          ? { ...DEFAULT_SETTINGS, ...profile.settings, watermark: { ...DEFAULT_SETTINGS.watermark, ...profile.settings.watermark } }
+          : null;
+        if (nextSettings) setSettings(nextSettings);
+        if (Array.isArray(profile.customPresets)) setPresets([...BUILT_IN_PRESETS, ...profile.customPresets.filter((preset) => preset?.custom && preset.settings)]);
+        if (typeof profile.activePresetId === "string") setActivePresetId(profile.activePresetId);
+        if (Array.isArray(profile.localFonts)) setLocalFonts((current) => Array.from(new Set([...current, ...profile.localFonts.filter((font) => typeof font === "string" && font.trim())])));
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!disposed) setNativeProfileReady(true); });
+    return () => { disposed = true; };
   }, [nativeBridge]);
 
   useEffect(() => {
@@ -1616,6 +1705,16 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   }, [presets]);
 
   useEffect(() => {
+    if (!nativeBridge || !nativeProfileReady) return;
+    void nativeBridge.saveAppProfile({
+      settings,
+      customPresets: presets.filter((preset) => preset.custom),
+      activePresetId,
+      localFonts,
+    }).catch(() => showToast("本机应用配置保存失败"));
+  }, [activePresetId, localFonts, nativeBridge, nativeProfileReady, presets, settings, showToast]);
+
+  useEffect(() => {
     const active = presets.find((preset) => preset.id === activePresetId);
     if (!active || JSON.stringify(active.settings) !== JSON.stringify(settings)) {
       if (activePresetId !== "current") setActivePresetId("current");
@@ -1649,7 +1748,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     window.localStorage.setItem("piclite.compressionSettings.v2", JSON.stringify(settings));
     setItems((current) => current.map((item) => {
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
-      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, sizeGuardQuality: undefined, status: "ready", error: undefined };
+      return { ...item, outputUrl: undefined, outputBlob: undefined, outputBytes: undefined, outputType: undefined, outputWidth: undefined, outputHeight: undefined, keptOriginal: undefined, sizeGuardQuality: undefined, strategy: undefined, status: "ready", error: undefined };
     }));
   }, [settings]);
 
@@ -1696,6 +1795,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
             outputHeight: result.height,
             keptOriginal: result.keptOriginal,
             sizeGuardQuality: result.sizeGuardQuality,
+            strategy: result.strategy,
             status: "done",
           };
         }));
@@ -1763,7 +1863,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     try {
       const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
-      const completed: ImageItem = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" };
+      const completed: ImageItem = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, strategy: result.strategy, status: "done" };
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
@@ -1943,7 +2043,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", error: undefined } : candidate));
       const result = await compressImage(item, settings);
       const outputUrl = URL.createObjectURL(result.blob);
-      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, status: "done" as const };
+      const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, strategy: result.strategy, status: "done" as const };
       setItems((current) => current.map((candidate) => {
         if (candidate.id !== item.id) return candidate;
         if (candidate.outputUrl) URL.revokeObjectURL(candidate.outputUrl);
@@ -2179,7 +2279,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     }
   }, [addSources, nativeBridge]);
 
-  const loadSystemFonts = useCallback(async () => {
+  const loadSystemFonts = useCallback(async (silent = false) => {
     try {
       let families: string[] = [];
       if (nativeBridge) {
@@ -2190,17 +2290,17 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         families = Array.from(new Set((await window.queryLocalFonts()).map((font) => font.family).filter(Boolean))).sort((left, right) => left.localeCompare(right));
       }
       if (!families.length) {
-        showToast(nativeBridge ? "没有在系统字体目录中找到可用字体" : "当前浏览器不支持读取系统字体，可直接导入字体文件");
+        if (!silent) showToast(nativeBridge ? "没有在系统字体目录中找到可用字体" : "当前浏览器不支持读取系统字体，可直接导入字体文件");
         return;
       }
       setLocalFonts((current) => Array.from(new Set([...current, ...families])));
-      showToast(`已读取 ${families.length} 个本地字体`);
+      if (!silent) showToast(`已读取 ${families.length} 个本地字体`);
     } catch {
-      showToast("没有获得本地字体读取权限");
+      if (!silent) showToast("没有获得本地字体读取权限");
     }
   }, [nativeBridge, showToast]);
 
-  const selectSystemFont = useCallback(async (family: string) => {
+  const selectSystemFont = useCallback(async (family: string, silent = false) => {
     try {
       if (!loadedSystemFontsRef.current.has(family)) {
         const systemFont = systemFontFilesRef.current.get(family);
@@ -2216,10 +2316,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         loadedSystemFontsRef.current.add(family);
       }
       setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
-      showToast(`水印字体已切换为：${family}`);
+      if (!silent) showToast(`水印字体已切换为：${family}`);
     } catch {
       setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
-      showToast(`系统字体 ${family} 无法载入，请尝试导入对应字体文件`);
+      if (!silent) showToast(`系统字体 ${family} 无法载入，请尝试导入对应字体文件`);
     }
   }, [nativeBridge, showToast]);
 
@@ -2229,20 +2329,52 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     if (!file) return;
     try {
       const family = `PicLite ${file.name.replace(/\.[^.]+$/, "")}`;
-      const font = new FontFace(family, await file.arrayBuffer());
+      const data = new Uint8Array(await file.arrayBuffer());
+      const font = new FontFace(family, data);
       await font.load();
       document.fonts.add(font);
       loadedSystemFontsRef.current.add(family);
+      if (nativeBridge) await nativeBridge.saveImportedFont(family, data);
       setLocalFonts((current) => Array.from(new Set([...current, family])));
       setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontFamily: family } }));
-      showToast(`已载入字体：${file.name}`);
+      showToast(nativeBridge ? `已载入并保存字体：${file.name}` : `已载入字体：${file.name}`);
     } catch {
       showToast("字体文件无法读取，请使用 TTF、OTF、WOFF 或 WOFF2");
     }
-  }, [showToast]);
+  }, [nativeBridge, showToast]);
+
+  useEffect(() => {
+    if (!nativeBridge || !nativeProfileReady || importedFontsHydratedRef.current) return;
+    importedFontsHydratedRef.current = true;
+    void nativeBridge.loadImportedFonts().then(async (fonts) => {
+      const restored: string[] = [];
+      for (const { family, data } of fonts) {
+        try {
+          const font = new FontFace(family, data);
+          await font.load();
+          document.fonts.add(font);
+          loadedSystemFontsRef.current.add(family);
+          restored.push(family);
+        } catch { /* Keep a corrupt or removed cached font from blocking startup. */ }
+      }
+      if (restored.length) setLocalFonts((current) => Array.from(new Set([...current, ...restored])));
+    }).catch(() => undefined);
+  }, [nativeBridge, nativeProfileReady]);
+
+  useEffect(() => {
+    if (!nativeBridge || !nativeProfileReady) return;
+    const family = settings.watermark.fontFamily;
+    if (!family || hydratedWatermarkFontRef.current === family) return;
+    hydratedWatermarkFontRef.current = family;
+    void (async () => {
+      await loadSystemFonts(true);
+      if (systemFontFilesRef.current.has(family)) await selectSystemFont(family, true);
+    })();
+  }, [loadSystemFonts, nativeBridge, nativeProfileReady, selectSystemFont, settings.watermark.fontFamily]);
 
   const handleComparePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const box = compareRef.current?.getBoundingClientRect();
+    const layer = event.currentTarget.closest(".preview-pan-layer") as HTMLElement | null;
+    const box = layer?.getBoundingClientRect() || compareRef.current?.getBoundingClientRect();
     if (!box) return;
     setCompare(Math.max(0, Math.min(100, ((event.clientX - box.left) / box.width) * 100)));
   }, []);
@@ -2351,6 +2483,10 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     }
     if (action === "watcher_settings") {
       setView("watcher");
+      return;
+    }
+    if (action === "gallery") {
+      setView("gallery");
       return;
     }
     if (action.startsWith("theme_")) {
@@ -2502,19 +2638,19 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
             >
               {selected ? (
                 previewMode === "compare" ? (
-                  <div ref={compareRef} className="compare-canvas" aria-label="拖动中线查看压缩前后对比">
-                    <div className={`preview-pan-layer ${previewFit ? "fit" : "actual"}`} style={{ transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0) scale(${previewZoom / 100})` }}>
-                      <img className="compare-after" src={selected.outputUrl || selected.sourceUrl} alt="优化后预览" />
-                      <div className="compare-before" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={selected.sourceUrl} alt="原图预览" /></div>
-                    </div>
-                    <span className="compare-label before-label">原图 · {formatBytes(selected.originalBytes)}</span>
-                    <span className="compare-label after-label">实时结果 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "计算中"}</span>
-                    <div
-                      className="compare-handle"
-                      style={{ left: `${compare}%` }}
-                      onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); handleComparePointer(event); }}
-                      onPointerMove={(event) => { event.stopPropagation(); if (event.currentTarget.hasPointerCapture(event.pointerId)) handleComparePointer(event); }}
-                    ><span>‹ ›</span></div>
+                    <div ref={compareRef} className="compare-canvas" aria-label="拖动中线查看压缩前后对比">
+                      <div className={`preview-pan-layer ${previewFit ? "fit" : "actual"}`} style={{ transform: `translate3d(${previewPan.x}px, ${previewPan.y}px, 0) scale(${previewZoom / 100})` }}>
+                        <img className="compare-after" src={selected.outputUrl || selected.sourceUrl} alt="优化后预览" />
+                        <div className="compare-before" style={{ clipPath: `inset(0 ${100 - compare}% 0 0)` }}><img src={selected.sourceUrl} alt="原图预览" /></div>
+                        <div
+                          className="compare-handle"
+                          style={{ left: `${compare}%` }}
+                          onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); handleComparePointer(event); }}
+                          onPointerMove={(event) => { event.stopPropagation(); if (event.currentTarget.hasPointerCapture(event.pointerId)) handleComparePointer(event); }}
+                        ><span>‹ ›</span></div>
+                      </div>
+                      <span className="compare-label before-label">原图 · {formatBytes(selected.originalBytes)}</span>
+                      <span className="compare-label after-label">实时结果 · {selected.outputBytes ? formatBytes(selected.outputBytes) : "计算中"}</span>
                     {selected.outputWidth && (selected.outputWidth !== selected.width || selected.outputHeight !== selected.height) && <div className="preview-scale-note">对比模式会对齐显示尺寸；切到“结果”查看缩小后的真实比例</div>}
                     {selected.status === "processing" && <div className="processing-overlay"><i /><strong>正在计算真实输出体积</strong></div>}
                   </div>
@@ -2570,8 +2706,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               <div className="mode-grid">
                 {([
                   ["lossless", 100, "无损优先", "100%", "◌"],
-                  ["balanced", 82, "智能平衡", "82%", "◐"],
-                  ["small", 45, "更小体积", "45%", "●"],
+                  ["balanced", 82, "智能平衡", "实测候选", "◐"],
+                  ["small", 45, "更小体积", "多档试压", "●"],
                 ] as const).map(([value, quality, label, note, icon]) => (
                   <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => {
                     const preset = BUILT_IN_PRESETS.find((candidate) => candidate.id === value);
@@ -2603,9 +2739,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
               <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
                 <span><i /> 实时试压结果</span>
                 <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
-                <small>{selected?.outputBytes ? selected.keptOriginal ? "所有候选都更大，已保留原图" : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 已自动调整编码质量至 ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
+                <small>{selected?.outputBytes ? selected.keptOriginal ? "所有候选都更大，已保留原图" : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 智能选择 ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 已自动调整编码质量至 ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
               </div>
-              <p className="setting-hint"><i /> JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。开启体积保护时，缩放后若候选变大，会自动寻找不超过原文件的合适编码质量。</p>
+              <p className="setting-hint"><i /> 智能平衡会实测原格式、WebP 与几档画质/尺寸，再在保真范围内选择最小结果；PNG / WebP 的透明通道不会被自动丢弃。JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。</p>
             </div>
 
             <div className="setting-section slider-section">

@@ -86,6 +86,38 @@ struct NativeDesktopPreferences {
     clipboard_watcher_enabled: bool,
 }
 
+/// UI preferences live in the native application config directory instead of
+/// only in a webview's localStorage. The main window and the floating dock are
+/// separate webviews, so this gives both of them one durable source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAppProfile {
+    settings: serde_json::Value,
+    custom_presets: serde_json::Value,
+    active_preset_id: String,
+    local_fonts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedFontPayload {
+    family: String,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredImportedFont {
+    family: String,
+    file_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedFontData {
+    family: String,
+    data: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -495,7 +527,12 @@ fn encode_static(
     Ok(encoded)
 }
 
-fn optimize_bytes(path: &Path, settings: &WatcherSettings) -> Result<Vec<u8>, String> {
+struct OptimizedImage {
+    bytes: Vec<u8>,
+    extension: String,
+}
+
+fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedImage, String> {
     let original = fs::read(path).map_err(|error| error.to_string())?;
     let source_extension = extension_for(path, "keep");
     if source_extension == "gif" && settings.format == "keep" {
@@ -510,17 +547,61 @@ fn optimize_bytes(path: &Path, settings: &WatcherSettings) -> Result<Vec<u8>, St
                 for quality in guarded_quality_steps(settings.quality) {
                     let guarded = encode_gif(&original, target_width, target_height, quality)?;
                     if guarded.len() < original.len() {
-                        return Ok(guarded);
+                        return Ok(OptimizedImage { bytes: guarded, extension: source_extension });
                     }
                 }
             }
-            return Ok(original);
+            return Ok(OptimizedImage { bytes: original, extension: source_extension });
         }
-        return Ok(candidate);
+        return Ok(OptimizedImage { bytes: candidate, extension: source_extension });
     }
 
     let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
     let (width, height) = decoded.dimensions();
+    if settings.format == "keep" && matches!(settings.mode.as_str(), "balanced" | "small") {
+        // The desktop auto modes mirror the workbench: encode a short ladder
+        // of format/quality/scale candidates and pick the smallest real file,
+        // while retaining PNG/WebP alpha by never forcing JPEG conversion.
+        let quality_stops: Vec<u8> = if settings.mode == "balanced" {
+            vec![settings.quality.min(86), settings.quality.min(81), settings.quality.min(77)]
+        } else {
+            vec![settings.quality.min(68), settings.quality.min(58), settings.quality.min(46)]
+        };
+        let scale_stops: Vec<f64> = if settings.mode == "balanced" {
+            vec![settings.scale, settings.scale.min(96.0), settings.scale.min(92.0)]
+        } else {
+            vec![settings.scale.min(88.0), settings.scale.min(80.0), settings.scale.min(72.0)]
+        };
+        let source_supported = matches!(source_extension.as_str(), "jpg" | "jpeg" | "png" | "webp");
+        let mut formats = vec![if source_supported { source_extension.clone() } else { "webp".to_string() }];
+        if !formats.iter().any(|format| format == "webp") {
+            formats.push("webp".to_string());
+        }
+        let mut best: Option<OptimizedImage> = None;
+        for output_extension in formats {
+            for (index, quality) in quality_stops.iter().enumerate() {
+                let mut candidate_settings = settings.clone();
+                candidate_settings.quality = (*quality).max(1);
+                candidate_settings.scale = scale_stops[index].clamp(0.1, 100.0);
+                let (candidate_width, candidate_height) = target_dimensions(width, height, &candidate_settings);
+                let resized = if candidate_width != width || candidate_height != height {
+                    decoded.resize_exact(candidate_width, candidate_height, FilterType::Lanczos3)
+                } else {
+                    decoded.clone()
+                };
+                let bytes = encode_static(resized, &output_extension, candidate_settings.quality)?;
+                if best.as_ref().is_none_or(|current| bytes.len() < current.bytes.len()) {
+                    best = Some(OptimizedImage { bytes, extension: output_extension.clone() });
+                }
+            }
+        }
+        let best = best.ok_or_else(|| "未生成可用的智能优化结果".to_string())?;
+        if settings.prevent_larger && best.bytes.len() >= original.len() {
+            return Ok(OptimizedImage { bytes: original, extension: source_extension });
+        }
+        return Ok(best);
+    }
+
     let (target_width, target_height) = target_dimensions(width, height, settings);
     let resized = if target_width != width || target_height != height {
         decoded.resize_exact(target_width, target_height, FilterType::Lanczos3)
@@ -534,15 +615,20 @@ fn optimize_bytes(path: &Path, settings: &WatcherSettings) -> Result<Vec<u8>, St
     if settings.prevent_larger && candidate.len() >= original.len() {
         if visual_transform {
             for quality in guarded_quality_steps(settings.quality) {
-                let guarded = encode_static(resized.clone(), &output_extension, quality)?;
-                if guarded.len() < original.len() {
-                    return Ok(guarded);
+                    let guarded = encode_static(resized.clone(), &output_extension, quality)?;
+                    if guarded.len() < original.len() {
+                        return Ok(OptimizedImage { bytes: guarded, extension: output_extension });
+                    }
                 }
             }
-        }
-        return Ok(original);
+        return Ok(OptimizedImage { bytes: original, extension: source_extension });
     }
-    Ok(candidate)
+    Ok(OptimizedImage { bytes: candidate, extension: output_extension })
+}
+
+#[cfg(test)]
+fn optimize_bytes(path: &Path, settings: &WatcherSettings) -> Result<Vec<u8>, String> {
+    optimize_image(path, settings).map(|optimized| optimized.bytes)
 }
 
 fn native_images_from_paths(
@@ -678,8 +764,8 @@ async fn quick_compress_paths(
             let original_bytes = fs::metadata(&source)
                 .map_err(|error| error.to_string())?
                 .len();
-            let bytes = optimize_bytes(&source, &compression)?;
-            let output_extension = extension_for(&source, &settings.format);
+            let optimized = optimize_image(&source, &compression)?;
+            let output_extension = optimized.extension;
             let base = source
                 .file_stem()
                 .and_then(|value| value.to_str())
@@ -707,12 +793,12 @@ async fn quick_compress_paths(
                 &output_directory,
                 &format!("{base}{suffix}.{output_extension}"),
             )?;
-            fs::write(&output, &bytes).map_err(|error| error.to_string())?;
+            fs::write(&output, &optimized.bytes).map_err(|error| error.to_string())?;
             Ok((
                 output,
                 original_bytes,
-                bytes.len() as u64,
-                bytes.len() as u64 == original_bytes,
+                optimized.bytes.len() as u64,
+                optimized.bytes.len() as u64 == original_bytes,
             ))
         })();
         match result {
@@ -755,6 +841,13 @@ async fn update_desktop_preferences(
 
 #[tauri::command]
 async fn show_main_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "main");
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_gallery_window(app: AppHandle) -> Result<(), String> {
+    app.emit("tray:action", "gallery").map_err(|error| error.to_string())?;
     show_window(&app, "main");
     Ok(())
 }
@@ -819,16 +912,16 @@ fn process_watched_file(
         } else {
             PathBuf::from(&settings.output_folder)
         };
-        let extension = extension_for(&canonical, &settings.format);
+        let optimized = optimize_image(&canonical, &settings)?;
+        let extension = optimized.extension;
         let base = canonical
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("image");
         let output_path =
             available_path(&output_directory, &format!("{base}-piclite.{extension}"))?;
-        let bytes = optimize_bytes(&canonical, &settings)?;
-        fs::write(&output_path, &bytes).map_err(|error| error.to_string())?;
-        Ok((output_path, original_bytes, bytes.len() as u64))
+        fs::write(&output_path, &optimized.bytes).map_err(|error| error.to_string())?;
+        Ok((output_path, original_bytes, optimized.bytes.len() as u64))
     })();
 
     match result {
@@ -1387,6 +1480,119 @@ fn upload_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory.join("upload-profile.json"))
+}
+
+fn app_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("app-profile.json"))
+}
+
+#[tauri::command]
+async fn load_app_profile(app: AppHandle) -> Result<Option<NativeAppProfile>, String> {
+    let path = app_profile_path(&app)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let data = fs::read(&path).map_err(|error| format!("无法读取应用配置：{error}"))?;
+    serde_json::from_slice(&data)
+        .map(Some)
+        .map_err(|error| format!("应用配置已损坏：{error}"))
+}
+
+#[tauri::command]
+async fn save_app_profile(app: AppHandle, profile: NativeAppProfile) -> Result<(), String> {
+    let path = app_profile_path(&app)?;
+    let data = serde_json::to_vec_pretty(&profile).map_err(|error| error.to_string())?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("无法保存应用配置：{error}"))?;
+    file.write_all(&data)
+        .map_err(|error| format!("无法保存应用配置：{error}"))?;
+    file.flush().map_err(|error| error.to_string())
+}
+
+fn imported_fonts_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?
+        .join("watermark-fonts");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn imported_fonts_manifest_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("watermark-fonts.json"))
+}
+
+fn read_imported_font_manifest(app: &AppHandle) -> Result<Vec<StoredImportedFont>, String> {
+    let path = imported_fonts_manifest_path(app)?;
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(path).map_err(|error| format!("无法读取已导入字体：{error}"))?;
+    serde_json::from_slice(&data).map_err(|error| format!("已导入字体记录已损坏：{error}"))
+}
+
+#[tauri::command]
+async fn load_imported_fonts(app: AppHandle) -> Result<Vec<ImportedFontData>, String> {
+    let manifest = read_imported_font_manifest(&app)?;
+    let directory = imported_fonts_directory(&app)?;
+    let mut fonts = Vec::new();
+    for font in manifest {
+        let path = directory.join(&font.file_name);
+        let Ok(data) = fs::read(path) else { continue };
+        if data.len() <= 64 * 1024 * 1024 {
+            fonts.push(ImportedFontData {
+                family: font.family,
+                data: BASE64.encode(data),
+            });
+        }
+    }
+    Ok(fonts)
+}
+
+#[tauri::command]
+async fn save_imported_font(app: AppHandle, payload: ImportedFontPayload) -> Result<(), String> {
+    if payload.family.trim().is_empty() || payload.data.is_empty() || payload.data.len() > 64 * 1024 * 1024 {
+        return Err("字体文件无效或超过 64 MB".to_string());
+    }
+    let file_name = format!("{:x}.font", Sha256::digest(&payload.data));
+    let directory = imported_fonts_directory(&app)?;
+    let path = directory.join(&file_name);
+    if !path.exists() {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(|error| format!("无法缓存字体文件：{error}"))?;
+        file.write_all(&payload.data).map_err(|error| format!("无法保存字体文件：{error}"))?;
+        file.flush().map_err(|error| error.to_string())?;
+    }
+    let mut manifest = read_imported_font_manifest(&app)?;
+    manifest.retain(|font| font.family != payload.family);
+    manifest.push(StoredImportedFont { family: payload.family, file_name });
+    let data = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    fs::write(imported_fonts_manifest_path(&app)?, data).map_err(|error| format!("无法保存字体记录：{error}"))
 }
 
 #[tauri::command]
@@ -2669,6 +2875,10 @@ pub fn run() {
             copy_image_path,
             list_system_fonts,
             read_system_font,
+            load_app_profile,
+            save_app_profile,
+            load_imported_fonts,
+            save_imported_font,
             reveal_path,
             upload_image,
             load_upload_profile,
@@ -2680,6 +2890,7 @@ pub fn run() {
             check_for_updates,
             open_external_url,
             show_main_window,
+            show_gallery_window,
             show_dropzone_window,
             configure_dropzone_window,
             resize_dropzone_window,

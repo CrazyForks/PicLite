@@ -57,6 +57,13 @@ if ("__TAURI_INTERNALS__" in window) {
     uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
     loadUploadProfile: () => invoke("load_upload_profile"),
     saveUploadProfile: (profile) => invoke("save_upload_profile", { profile }),
+    loadAppProfile: () => invoke("load_app_profile"),
+    saveAppProfile: (profile) => invoke("save_app_profile", { profile }),
+    loadImportedFonts: async () => {
+      const fonts = await invoke<Array<{ family: string; data: string }>>("load_imported_fonts");
+      return fonts.map((font) => ({ family: font.family, data: decodeBase64(font.data) }));
+    },
+    saveImportedFont: (family, data) => invoke("save_imported_font", { payload: { family, data: Array.from(data) } }),
     listSystemFonts: () => invoke("list_system_fonts"),
     readSystemFont: async (path, faceIndex) => {
       const result = await invoke<{ data: string }>("read_system_font", { path, faceIndex });
@@ -70,6 +77,7 @@ if ("__TAURI_INTERNALS__" in window) {
     startDragging: () => currentWindow.startDragging(),
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
+    showGalleryWindow: () => invoke("show_gallery_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
