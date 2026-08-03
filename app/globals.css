@@ -1216,3 +1216,183 @@ html[data-theme="dark"] .preference-number input { background: #111714; border-c
 @keyframes lift-in { from { opacity: 0; transform: translateY(9px); } }
 @keyframes hover-float { 50% { transform: translateY(-5px) scale(.78); } }
 @keyframes button-sheen { to { transform: translateX(130%); } }
+
+/* Liquid Glass visual system — shared by the desktop workbench, web app and floating dock. */
+:root {
+  --glass-light: rgba(255,255,255,.64);
+  --glass-strong: rgba(255,255,255,.82);
+  --glass-line: rgba(255,255,255,.78);
+  --glass-shadow: 0 18px 48px rgba(38,64,50,.10), inset 0 1px rgba(255,255,255,.92);
+}
+
+.app-shell,
+.desktop-app {
+  background:
+    radial-gradient(circle at 10% -8%, rgba(218,255,122,.24), transparent 27%),
+    radial-gradient(circle at 96% 3%, rgba(141,205,185,.17), transparent 25%),
+    linear-gradient(135deg, #eef4ef 0%, #e5ece6 52%, #edf1eb 100%);
+}
+.topbar,
+.desktop-app .topbar {
+  border-color: var(--glass-line);
+  background: linear-gradient(115deg, rgba(255,255,255,.82), rgba(247,251,247,.58));
+  box-shadow: 0 10px 36px rgba(36,62,49,.07), inset 0 1px rgba(255,255,255,.95);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+}
+.desktop-app .queue-panel,
+.desktop-app .preview-panel,
+.desktop-app .settings-panel,
+.watcher-log,
+.preference-card,
+.gallery-summary,
+.gallery-card,
+.gallery-empty,
+.desktop-download-guide,
+.update-notice {
+  border-color: var(--glass-line);
+  background: linear-gradient(145deg, var(--glass-strong), var(--glass-light));
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(22px) saturate(1.16);
+  -webkit-backdrop-filter: blur(22px) saturate(1.16);
+}
+.desktop-app .preview-panel { background: rgba(237,244,238,.54); }
+.desktop-app .preview-stage { background: radial-gradient(circle at 50% 42%, rgba(255,255,255,.94), rgba(222,233,225,.57) 63%), linear-gradient(90deg, rgba(40,66,53,.025) 1px, transparent 1px), linear-gradient(rgba(40,66,53,.025) 1px, transparent 1px); }
+.desktop-app .settings-panel > .panel-heading { background: rgba(255,255,255,.72); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); }
+.desktop-app .queue-item.selected { background: rgba(233,247,228,.62); box-shadow: inset 3px 0 #4d8267, 0 9px 25px rgba(29,65,49,.07); }
+.icon-button,
+.privacy-badge,
+.gallery-actions button,
+.gallery-summary button,
+.preset-toolbar > button,
+.shortcut-recorder {
+  border-color: rgba(255,255,255,.82);
+  background: rgba(255,255,255,.56);
+  box-shadow: inset 0 1px rgba(255,255,255,.92), 0 5px 16px rgba(34,57,45,.06);
+}
+
+/* The monitor must remain legible in light mode; it is now a light glass console, not a dark panel. */
+html[data-theme="light"] .watcher-console,
+html:not([data-theme]) .watcher-console {
+  color: #193428;
+  border: 1px solid rgba(255,255,255,.82);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(194,240,127,.31), transparent 35%),
+    linear-gradient(135deg, rgba(255,255,255,.82), rgba(225,241,229,.58));
+  box-shadow: 0 26px 72px rgba(36,72,53,.14), inset 0 1px rgba(255,255,255,.94);
+  backdrop-filter: blur(28px) saturate(1.18);
+  -webkit-backdrop-filter: blur(28px) saturate(1.18);
+}
+html[data-theme="light"] .watcher-console::before,
+html:not([data-theme]) .watcher-console::before { border-color: rgba(77,132,92,.10); }
+html[data-theme="light"] .console-header,
+html:not([data-theme]) .console-header { border-color: rgba(38,73,54,.13); }
+html[data-theme="light"] .console-header span,
+html[data-theme="light"] .console-header small,
+html:not([data-theme]) .console-header span,
+html:not([data-theme]) .console-header small { color: #4d6758; }
+html[data-theme="light"] .console-header i,
+html:not([data-theme]) .console-header i { background: #789385; }
+html[data-theme="light"] .console-header i.active,
+html:not([data-theme]) .console-header i.active { background: #568c6b; box-shadow: 0 0 0 5px rgba(86,140,107,.14); }
+html[data-theme="light"] .watcher-quick-action,
+html:not([data-theme]) .watcher-quick-action { border-color: rgba(50,88,64,.16); background: rgba(255,255,255,.45); }
+html[data-theme="light"] .watcher-quick-action button,
+html:not([data-theme]) .watcher-quick-action button { background: rgba(223,250,188,.72); color: #204a35; box-shadow: inset 0 1px rgba(255,255,255,.72); }
+html[data-theme="light"] .watcher-quick-action small,
+html:not([data-theme]) .watcher-quick-action small { color: #557062; }
+html[data-theme="light"] .folder-route > button,
+html:not([data-theme]) .folder-route > button { border-color: rgba(47,83,61,.16); background: rgba(255,255,255,.42); color: #193428; box-shadow: inset 0 1px rgba(255,255,255,.72); }
+html[data-theme="light"] .folder-route > button:hover:not(:disabled),
+html:not([data-theme]) .folder-route > button:hover:not(:disabled) { border-color: rgba(72,128,92,.52); background: rgba(255,255,255,.68); }
+html[data-theme="light"] .folder-route button small,
+html[data-theme="light"] .route-line span,
+html[data-theme="light"] .watcher-options label > span,
+html:not([data-theme]) .folder-route button small,
+html:not([data-theme]) .route-line span,
+html:not([data-theme]) .watcher-options label > span { color: #5d7869; }
+html[data-theme="light"] .folder-route button b,
+html[data-theme="light"] .watcher-range b,
+html:not([data-theme]) .folder-route button b,
+html:not([data-theme]) .watcher-range b { color: #397454; }
+html[data-theme="light"] .watcher-options select,
+html:not([data-theme]) .watcher-options select { background: rgba(255,255,255,.55); border-color: rgba(47,83,61,.18); color: #274838; }
+html[data-theme="light"] .watcher-range input,
+html[data-theme="light"] .watcher-check input,
+html:not([data-theme]) .watcher-range input,
+html:not([data-theme]) .watcher-check input { accent-color: #4a8a66; }
+html[data-theme="light"] .watcher-check,
+html:not([data-theme]) .watcher-check { color: #345545; }
+html[data-theme="light"] .watcher-dimensions label,
+html:not([data-theme]) .watcher-dimensions label { border-color: rgba(47,83,61,.18); color: #557062; background: rgba(255,255,255,.42); }
+html[data-theme="light"] .watcher-dimensions input,
+html:not([data-theme]) .watcher-dimensions input { color: #1c392b; }
+html[data-theme="light"] .watcher-toggle,
+html:not([data-theme]) .watcher-toggle { background: linear-gradient(105deg, #baf269, #d9ff74); color: #173b30; box-shadow: inset 0 1px rgba(255,255,255,.78), 0 12px 28px rgba(72,127,71,.18); }
+html[data-theme="light"] .console-lock,
+html:not([data-theme]) .console-lock { background: rgba(242,250,243,.66); color: #173b30; }
+html[data-theme="light"] .console-lock p,
+html:not([data-theme]) .console-lock p { color: #5c7466; }
+
+/* Dense floating result card: translucent, rounded and with a deliberate action hierarchy. */
+.drop-dock {
+  --dock-accent: #c8f67a;
+  --dock-muted: #b4c2ba;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 22px;
+  clip-path: inset(0 round 22px);
+  background:
+    radial-gradient(circle at 4% 0%, rgba(202,247,122,.20), transparent 34%),
+    linear-gradient(145deg, rgba(27,39,32,.91), rgba(11,18,14,.82));
+  box-shadow: 0 18px 58px rgba(0,0,0,.30), inset 0 1px rgba(255,255,255,.13);
+  backdrop-filter: blur(34px) saturate(1.28);
+  -webkit-backdrop-filter: blur(34px) saturate(1.28);
+}
+.drop-dock > header { padding-inline: 11px 8px; border-color: rgba(255,255,255,.09); }
+.dock-brand { font-size: 9px; letter-spacing: .25px; }
+.dock-brand i { width: 21px; height: 21px; border-radius: 8px; box-shadow: inset 0 1px rgba(255,255,255,.5), 0 4px 13px rgba(0,0,0,.16); }
+.dock-actions { gap: 4px; }
+.dock-actions button,
+.drop-dock > footer .dock-icon-action { border: 1px solid rgba(255,255,255,.075); border-radius: 8px; background: rgba(255,255,255,.08); color: #dae5df; box-shadow: inset 0 1px rgba(255,255,255,.06); }
+.dock-actions button { width: 24px; height: 24px; }
+.dock-actions button:hover,
+.drop-dock > footer .dock-icon-action:hover { background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.14); }
+.dock-body { padding: 7px 8px; }
+.dock-empty { border-color: rgba(200,246,122,.32); border-radius: 12px; background: rgba(255,255,255,.035); }
+.dock-empty:hover { background: rgba(200,246,122,.07); }
+.dock-results { gap: 5px; }
+.dock-results > div { border-color: rgba(255,255,255,.095); border-radius: 11px; background: rgba(255,255,255,.055); }
+.dock-results > div > img { border: 1px solid rgba(255,255,255,.10); }
+.dock-controls { padding: 2px 11px; border-color: rgba(255,255,255,.085); }
+.dock-controls label { min-height: 22px; grid-template-columns: 29px minmax(0,1fr) 35px; }
+.dock-controls input,
+.dock-controls select,
+.drop-dock button,
+.drop-dock footer { touch-action: manipulation; }
+.dock-controls select { height: 20px; border-radius: 7px; }
+.drop-dock > footer { min-height: 35px; padding-left: 11px; border-color: rgba(255,255,255,.085); }
+.drop-dock > footer button:not(.dock-icon-action) { min-width: 42px; height: 25px; border-radius: 8px; box-shadow: inset 0 1px rgba(255,255,255,.5), 0 5px 13px rgba(15,32,22,.15); }
+html[data-theme="light"] .drop-dock {
+  --dock-accent: #6d9a4d;
+  --dock-muted: #61746a;
+  border-color: rgba(255,255,255,.85);
+  background: linear-gradient(145deg, rgba(255,255,255,.82), rgba(225,239,229,.68));
+  box-shadow: 0 18px 52px rgba(38,67,50,.18), inset 0 1px rgba(255,255,255,.98);
+}
+html[data-theme="light"] .dock-results > div { background: rgba(255,255,255,.54); border-color: rgba(51,83,63,.10); }
+html[data-theme="light"] .dock-actions button,
+html[data-theme="light"] .drop-dock > footer .dock-icon-action { border-color: rgba(49,77,60,.10); background: rgba(255,255,255,.53); color: #496153; }
+html[data-theme="dark"] .app-shell,
+html[data-theme="dark"] .desktop-app { background: radial-gradient(circle at 15% -12%, rgba(174,234,83,.11), transparent 29%), radial-gradient(circle at 100% 0, rgba(62,121,102,.16), transparent 26%), #101713; }
+html[data-theme="dark"] .topbar,
+html[data-theme="dark"] .desktop-app .topbar,
+html[data-theme="dark"] .desktop-app .queue-panel,
+html[data-theme="dark"] .desktop-app .preview-panel,
+html[data-theme="dark"] .desktop-app .settings-panel,
+html[data-theme="dark"] .watcher-log,
+html[data-theme="dark"] .preference-card,
+html[data-theme="dark"] .gallery-summary,
+html[data-theme="dark"] .gallery-card,
+html[data-theme="dark"] .gallery-empty { border-color: rgba(173,208,181,.14); background: linear-gradient(145deg, rgba(27,38,32,.82), rgba(15,22,18,.70)); box-shadow: 0 18px 54px rgba(0,0,0,.27), inset 0 1px rgba(255,255,255,.045); }
+html[data-theme="dark"] .desktop-app .settings-panel > .panel-heading { background: rgba(20,29,24,.76); }
+html[data-theme="dark"] .watcher-console { border-color: rgba(179,218,184,.16); background: radial-gradient(circle at 100% 0, rgba(182,240,102,.12), transparent 34%), linear-gradient(145deg, rgba(31,46,38,.88), rgba(12,20,15,.83)); backdrop-filter: blur(30px) saturate(1.15); -webkit-backdrop-filter: blur(30px) saturate(1.15); }
