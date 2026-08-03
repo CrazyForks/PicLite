@@ -1,6 +1,6 @@
 [package]
 name = "piclite"
-version = "0.13.0"
+version = "0.13.1"
 description = "PicLite local-first image compressor"
 authors = ["PicLite contributors"]
 edition = "2021"
@@ -33,6 +33,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 ttf-parser = "0.25"
 url = "2.5"
+webp = "0.3.1"
 
 [profile.release]
 panic = "abort"

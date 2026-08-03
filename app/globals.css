@@ -1396,3 +1396,15 @@ html[data-theme="dark"] .gallery-card,
 html[data-theme="dark"] .gallery-empty { border-color: rgba(173,208,181,.14); background: linear-gradient(145deg, rgba(27,38,32,.82), rgba(15,22,18,.70)); box-shadow: 0 18px 54px rgba(0,0,0,.27), inset 0 1px rgba(255,255,255,.045); }
 html[data-theme="dark"] .desktop-app .settings-panel > .panel-heading { background: rgba(20,29,24,.76); }
 html[data-theme="dark"] .watcher-console { border-color: rgba(179,218,184,.16); background: radial-gradient(circle at 100% 0, rgba(182,240,102,.12), transparent 34%), linear-gradient(145deg, rgba(31,46,38,.88), rgba(12,20,15,.83)); backdrop-filter: blur(30px) saturate(1.15); -webkit-backdrop-filter: blur(30px) saturate(1.15); }
+
+/* A fixed-height desktop viewport must still let the monitor flow below its controls. */
+.desktop-app .watcher-page {
+  grid-template-rows: max-content max-content;
+  grid-auto-rows: max-content;
+  align-content: start;
+}
+.desktop-app .watcher-console { height: max-content; }
+.desktop-app .watcher-log { align-self: start; min-height: 148px; }
+@media (max-width: 920px) {
+  .desktop-app .watcher-page { grid-template-rows: max-content; grid-auto-rows: max-content; }
+}
