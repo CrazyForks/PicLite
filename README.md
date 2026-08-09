@@ -13,6 +13,26 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 
 [在线体验](https://piclite-image.zwistidjaa331.chatgpt.site) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [报告问题](https://github.com/amiaoapp/PicLite/issues)
 
+## English
+
+PicLite is a privacy-first, self-hostable image and GIF compression workspace for the web, Windows, macOS and Linux. It estimates the actual output size before export and gives you continuous quality and scale controls, so you can keep compressing until a file is as small as you need.
+
+[Try the web app](https://piclite-image.zwistidjaa331.chatgpt.site) · [Download desktop builds](https://github.com/amiaoapp/PicLite/releases) · [Report an issue](https://github.com/amiaoapp/PicLite/issues)
+
+### Highlights
+
+- Local processing by default: images stay in the browser or desktop app unless you explicitly upload them to your own storage.
+- JPEG, PNG, WebP and animated GIF compression; lossless metadata cleanup, format conversion, real output-size preview, unlimited scale and quality controls.
+- Before/after preview with pan, zoom, fit and 1:1 pixel inspection; text watermarking with local and imported fonts.
+- Desktop-only folder watching, clipboard watching, system tray controls, global shortcuts, result gallery and optional WebDAV / S3 / R2 / OSS / FTP / SFTP upload.
+- A compact floating drop dock inspired by Clop’s workflow: drop or select files, adjust quality, scale and format, then copy, reveal, undo or reopen the result from the lower-right corner.
+
+### Desktop quick start
+
+Download the correct installer from [GitHub Releases](https://github.com/amiaoapp/PicLite/releases): `.exe` / `.msi` for Windows, `.dmg` for Apple Silicon or Intel Macs, and `.AppImage` / `.deb` for Linux. The Tauri desktop app uses the operating system WebView instead of bundling Chromium.
+
+For server deployment, see [Self-hosting with Docker](#在服务器上部署). The server only serves the app; client images are still processed locally.
+
 ![PicLite 压缩、水印与导出界面](docs/images/piclite-workspace.png)
 
 ## 功能

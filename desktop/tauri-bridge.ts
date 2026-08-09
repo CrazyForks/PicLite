@@ -78,6 +78,7 @@ if ("__TAURI_INTERNALS__" in window) {
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showGalleryWindow: () => invoke("show_gallery_window"),
+    showPreferencesWindow: () => invoke("show_preferences_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -61,6 +61,10 @@ struct DesktopState {
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
     clipboard_monitor_enabled: AtomicBool,
+    /// Timestamp until which clipboard content was written by PicLite itself.
+    /// The monitor must record it but must not feed the result back through the
+    /// compressor, otherwise a copied result would be compressed repeatedly.
+    clipboard_ignore_until_ms: AtomicU64,
 }
 
 impl Default for DesktopState {
@@ -75,6 +79,7 @@ impl Default for DesktopState {
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
+            clipboard_ignore_until_ms: AtomicU64::new(0),
         }
     }
 }
@@ -96,6 +101,8 @@ struct NativeAppProfile {
     custom_presets: serde_json::Value,
     active_preset_id: String,
     local_fonts: Vec<String>,
+    #[serde(default)]
+    desktop_preferences: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -853,6 +860,12 @@ async fn show_gallery_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "preferences");
+    Ok(())
+}
+
+#[tauri::command]
 async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("dropzone") {
         if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
@@ -1137,8 +1150,9 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-STA",
             "-Command",
-            "Set-Clipboard -LiteralPath $args[0]",
+            "Add-Type -AssemblyName System.Windows.Forms; $files = New-Object System.Collections.Specialized.StringCollection; [void]$files.Add($args[0]); [System.Windows.Forms.Clipboard]::SetFileDropList($files)",
         ])
         .arg(path);
     let status = command
@@ -1149,6 +1163,13 @@ fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
     } else {
         Err("系统未能复制压缩文件".to_string())
     }
+}
+
+fn suppress_next_clipboard_observation(state: &DesktopState) {
+    let until = now_ms().saturating_add(3_000).min(u64::MAX as u128) as u64;
+    state
+        .clipboard_ignore_until_ms
+        .store(until, Ordering::Relaxed);
 }
 
 #[cfg(target_os = "linux")]
@@ -1198,10 +1219,14 @@ fn clipboard_cache_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, Str
 }
 
 #[tauri::command]
-async fn copy_image_data(data: Vec<u8>) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_clipboard_image(&data))
+async fn copy_image_data(data: Vec<u8>, state: State<'_, DesktopState>) -> Result<(), String> {
+    let result = tauri::async_runtime::spawn_blocking(move || write_clipboard_image(&data))
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        suppress_next_clipboard_observation(&state);
+    }
+    result
 }
 
 #[tauri::command]
@@ -1209,28 +1234,45 @@ async fn copy_compressed_data(
     app: AppHandle,
     data: Vec<u8>,
     file_name: String,
+    state: State<'_, DesktopState>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let path = clipboard_cache_path(&app, &file_name)?;
-        fs::write(&path, data).map_err(|error| format!("无法缓存压缩文件：{error}"))?;
-        copy_file_to_clipboard(&path)?;
+        fs::write(&path, &data).map_err(|error| format!("无法缓存压缩文件：{error}"))?;
+        // A real file drop is ideal for clients that accept attachments. Some
+        // Windows clipboard hosts reject CF_HDROP, so always fall back to an
+        // actual bitmap instead of reporting a false copy failure.
+        if copy_file_to_clipboard(&path).is_err() {
+            write_clipboard_image(&data)?;
+        }
         Ok(path.to_string_lossy().to_string())
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        suppress_next_clipboard_observation(&state);
+    }
+    result
 }
 
 #[tauri::command]
-async fn copy_image_path(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+async fn copy_image_path(path: String, state: State<'_, DesktopState>) -> Result<(), String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let path = PathBuf::from(path);
         if !path.is_file() {
             return Err("结果文件已经不存在".to_string());
         }
-        copy_file_to_clipboard(&path)
+        copy_file_to_clipboard(&path).or_else(|_| {
+            let data = fs::read(&path).map_err(|error| error.to_string())?;
+            write_clipboard_image(&data)
+        })
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        suppress_next_clipboard_observation(&state);
+    }
+    result
 }
 
 fn collect_font_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
@@ -2588,10 +2630,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
             "dropzone" => show_window(app, "dropzone"),
-            "preferences" => {
-                show_window(app, "main");
-                let _ = app.emit("tray:action", "preferences");
-            }
+            "preferences" => show_window(app, "preferences"),
             "watcher_settings" => {
                 show_window(app, "main");
                 let _ = app.emit("tray:action", "watcher_settings");
@@ -2760,11 +2799,12 @@ fn start_clipboard_monitor(app: AppHandle) {
         let mut was_enabled = false;
         let mut last_fingerprint: Option<String> = None;
         loop {
-            let (enabled, quitting) = {
+            let (enabled, quitting, ignore_until_ms) = {
                 let state = app.state::<DesktopState>();
                 (
                     state.clipboard_monitor_enabled.load(Ordering::Relaxed),
                     state.quitting.load(Ordering::Relaxed),
+                    state.clipboard_ignore_until_ms.load(Ordering::Relaxed),
                 )
             };
             if quitting {
@@ -2780,23 +2820,29 @@ fn start_clipboard_monitor(app: AppHandle) {
             match clipboard_image() {
                 Ok(Some(image)) => {
                     let fingerprint = format!("{:x}", Sha256::digest(image.data.as_bytes()));
+                    let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
                     if !was_enabled {
                         last_fingerprint = Some(fingerprint);
                         was_enabled = true;
                     } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                         last_fingerprint = Some(fingerprint);
-                        let _ = app.emit("clipboard:image", image);
+                        if !ignored {
+                            let _ = app.emit("clipboard:image", image);
+                        }
                     }
                 }
                 Ok(None) => match clipboard_image_paths() {
                     Ok(paths) if !paths.is_empty() => {
                         let fingerprint = format!("paths:{}", paths.join("\u{1f}"));
+                        let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
                         if !was_enabled {
                             last_fingerprint = Some(fingerprint);
                             was_enabled = true;
                         } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                             last_fingerprint = Some(fingerprint);
-                            let _ = app.emit("clipboard:paths", paths);
+                            if !ignored {
+                                let _ = app.emit("clipboard:paths", paths);
+                            }
                         }
                     }
                     Ok(_) => {
@@ -2891,6 +2937,7 @@ pub fn run() {
             open_external_url,
             show_main_window,
             show_gallery_window,
+            show_preferences_window,
             show_dropzone_window,
             configure_dropzone_window,
             resize_dropzone_window,

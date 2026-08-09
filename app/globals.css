@@ -98,6 +98,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .brand-mark i:nth-child(3) { width: 4px; height: 4px; right: 7px; top: 6px; background: #fff; }
 
 .main-nav { justify-self: center; display: flex; height: 100%; gap: 28px; }
+.standalone-window-title { justify-self: center; display: flex; align-items: baseline; gap: 9px; }
+.standalone-window-title strong { font-size: 15px; letter-spacing: -.2px; }
+.preferences-window { min-height: 100vh; overflow: auto; }
+.preferences-window .topbar { position: sticky; }
+.preferences-window .preferences-page { min-height: calc(100vh - 70px); }
 .main-nav button {
   border: 0;
   border-bottom: 2px solid transparent;
@@ -1372,6 +1377,28 @@ html:not([data-theme]) .console-lock p { color: #5c7466; }
 .dock-controls select { height: 20px; border-radius: 7px; }
 .drop-dock > footer { min-height: 35px; padding-left: 11px; border-color: rgba(255,255,255,.085); }
 .drop-dock > footer button:not(.dock-icon-action) { min-width: 42px; height: 25px; border-radius: 8px; box-shadow: inset 0 1px rgba(255,255,255,.5), 0 5px 13px rgba(15,32,22,.15); }
+.drop-dock .dock-status { flex: 1; color: var(--dock-accent); font-size: 11px; line-height: 1; text-shadow: 0 0 10px color-mix(in srgb, var(--dock-accent) 72%, transparent); }
+.drop-dock .dock-footer-actions { display: flex; align-items: center; gap: 5px; }
+.drop-dock .dock-icon-action { width: 29px; min-width: 29px !important; height: 28px !important; padding: 0; display: grid; place-items: center; font-size: 13px; }
+.drop-dock .dock-reprocess { color: var(--dock-accent); }
+.drop-dock .dock-controls { gap: 8px; padding: 7px 13px; }
+.drop-dock .dock-controls label { min-height: 28px; grid-template-columns: 28px minmax(0,1fr) 46px; }
+.drop-dock .dock-controls label > span { display: grid; place-items: center; font-size: 14px; cursor: help; }
+.drop-dock .dock-controls label > b { font-size: 10px; }
+.drop-dock .dock-controls input { height: 18px; }
+.drop-dock .dock-controls select { height: 26px; font-size: 10px; letter-spacing: .4px; }
+.drop-dock .dock-results > div { min-height: 58px; grid-template-columns: 51px minmax(0,1fr) auto; padding: 7px 8px; }
+.drop-dock .dock-results > div > img,
+.drop-dock .dock-results > div > span { width: 46px; height: 44px; }
+.drop-dock .dock-results strong { font-size: 10px; }
+.drop-dock .dock-results small,
+.drop-dock .dock-results > div > b { font-size: 8px; }
+.drop-dock .dock-empty { min-height: 102px; padding: 10px 13px; }
+.drop-dock .dock-empty strong { font-size: 13px; }
+.drop-dock .dock-empty small { font-size: 9px; }
+.drop-dock.layout-full .dock-results > div { min-height: 66px; grid-template-columns: 59px minmax(0,1fr) auto; }
+.drop-dock.layout-full .dock-results > div > img,
+.drop-dock.layout-full .dock-results > div > span { width: 53px; height: 52px; }
 html[data-theme="light"] .drop-dock {
   --dock-accent: #6d9a4d;
   --dock-muted: #61746a;

@@ -42,6 +42,20 @@
         "shadow": false,
         "transparent": true,
         "backgroundColor": "#00000000"
+      },
+      {
+        "label": "preferences",
+        "title": "PicLite 应用设置",
+        "url": "index.html?window=preferences",
+        "width": 880,
+        "height": 720,
+        "minWidth": 620,
+        "minHeight": 520,
+        "visible": false,
+        "resizable": true,
+        "skipTaskbar": true,
+        "theme": "Light",
+        "backgroundColor": "#e9eeea"
       }
     ],
     "security": {

@@ -149,6 +149,7 @@ type NativeBridge = {
   startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showGalleryWindow: () => Promise<void>;
+  showPreferencesWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
   configureDropzoneWindow: (width: number, height: number) => Promise<void>;
   resizeDropzoneWindow: (width: number, height: number) => Promise<void>;
@@ -247,6 +248,7 @@ type DesktopPreferences = {
   floatingResultSeconds: number;
   clipboardWatcherEnabled: boolean;
   autoCheckUpdates: boolean;
+  language: "zh" | "en";
 };
 
 type SavedPreset = {
@@ -261,6 +263,7 @@ type NativeAppProfile = {
   customPresets: SavedPreset[];
   activePresetId: string;
   localFonts: string[];
+  desktopPreferences?: DesktopPreferences;
 };
 
 type QuickCompressSettings = {
@@ -348,6 +351,7 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   floatingResultSeconds: 10,
   clipboardWatcherEnabled: false,
   autoCheckUpdates: true,
+  language: "zh",
 };
 
 const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
@@ -371,7 +375,7 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
     if (!saved) return DEFAULT_DESKTOP_PREFERENCES;
     const preferences = { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences & { dockLayout?: string };
     // 0.11 之前的“桌宠”偏好自动迁移到紧凑压缩坞。
-    return { ...preferences, dockLayout: preferences.dockLayout === "full" ? "full" : "compact" };
+    return { ...preferences, dockLayout: preferences.dockLayout === "full" ? "full" : "compact", language: preferences.language === "en" ? "en" : "zh" };
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
   }
@@ -1025,6 +1029,13 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       setQuality(profile.settings.quality);
       setScale(profile.settings.scale);
       setFormat(profile.settings.format);
+      if (profile.desktopPreferences) {
+        const preferences = { ...DEFAULT_DESKTOP_PREFERENCES, ...profile.desktopPreferences };
+        setDockTheme(preferences.dockTheme);
+        setDockLayout(preferences.dockLayout === "full" ? "full" : "compact");
+        setFloatingResultSeconds(preferences.floatingResultSeconds);
+        setClipboardWatcherEnabled(preferences.clipboardWatcherEnabled);
+      }
     }).catch(() => undefined);
     return () => { disposed = true; };
   }, [bridge]);
@@ -1114,8 +1125,11 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }, [bridge, clearAutoHide, floatingResultSeconds, isProcessing, results]);
 
   useEffect(() => {
-    const width = results.length ? (dockLayout === "full" ? 390 : 320) : dockLayout === "full" ? 340 : 300;
-    const height = results.length ? (dockLayout === "full" ? 320 : 248) : dockLayout === "full" ? 238 : 188;
+    // Keep the compact card genuinely readable on Windows 125–150% scale.
+    // It is still small enough to live in the lower-right corner, while the
+    // full style makes room for real sliders instead of tiny hit targets.
+    const width = results.length ? (dockLayout === "full" ? 480 : 398) : dockLayout === "full" ? 420 : 360;
+    const height = results.length ? (dockLayout === "full" ? 356 : 300) : dockLayout === "full" ? 274 : 226;
     void bridge.configureDropzoneWindow(width, height);
   }, [bridge, dockLayout, results.length]);
 
@@ -1316,7 +1330,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   return (
     <main className={`drop-dock layout-${dockLayout} ${results.length ? "has-results" : "is-idle"} ${isDragging ? "dragging" : ""}`} onPointerEnter={clearAutoHide} onPointerLeave={scheduleAutoHide}>
       <header onPointerDown={startDockDrag}>
-        <span className="dock-brand"><i>✦</i><b>{results.length ? "压缩结果" : "PicLite"}</b></span>
+        <span className="dock-brand"><i>✦</i><b>{results.length ? "Result" : "PicLite"}</b></span>
         <span className="dock-actions" onPointerDown={(event) => event.stopPropagation()}>
           <button type="button" title={resolveTheme(dockTheme) === "dark" ? "切换浅色" : "切换深色"} onClick={toggleDockTheme}>{resolveTheme(dockTheme) === "dark" ? "☀" : "☾"}</button>
           <button type="button" title="打开主窗口" onClick={() => void bridge.showMainWindow()}>↗</button>
@@ -1327,7 +1341,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         {!results.length ? (
           <button className="dock-empty" type="button" onClick={() => void chooseDockImages()} title="点击选择图片，也可以直接拖入">
             <span className="dock-orbit"><i /><i /><b>＋</b></span>
-            <div><strong>{isDragging ? "松开开始压缩" : "点击或拖入图片"}</strong><small>输出到源文件旁 · 不覆盖原图</small></div>
+            <div><strong>{isDragging ? "松开开始压缩" : "点击或拖入图片"}</strong><small>Drop · Paste · Compress</small></div>
           </button>
         ) : (
           <div className="dock-results">
@@ -1342,13 +1356,13 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         )}
       </section>
       <div className={`dock-controls ${results.length ? "" : "idle-controls"}`} onPointerDown={(event) => event.stopPropagation()}>
-        <label htmlFor="dock-quality"><span>画质</span><input id="dock-quality" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onInput={(event) => setQuality(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(Number(event.currentTarget.value), scale)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(Number(event.currentTarget.value), scale); }} /><b>{quality}%</b></label>
-        <label htmlFor="dock-scale"><span>尺寸</span><input id="dock-scale" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onInput={(event) => setScale(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(quality, Number(event.currentTarget.value))} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(quality, Number(event.currentTarget.value)); }} /><b>{formatScale(scale)}</b></label>
-        <label className="dock-format-control" htmlFor="dock-format"><span>格式</span><select id="dock-format" value={format} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => { const next = event.currentTarget.value as OutputFormat; setFormat(next); reprocessDock(quality, scale, next); }}><option value="keep">保持原格式</option><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select><b>{format === "keep" ? "原格式" : format.split("/")[1].toUpperCase()}</b></label>
+        <label htmlFor="dock-quality"><span title="编码画质">◒</span><input id="dock-quality" aria-label="编码画质" type="range" min="1" max="100" step="1" value={quality} style={{ "--range-progress": `${quality}%` } as CSSProperties} onInput={(event) => setQuality(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(Number(event.currentTarget.value), scale)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(Number(event.currentTarget.value), scale); }} /><b>{quality}%</b></label>
+        <label htmlFor="dock-scale"><span title="等比例尺寸">↘</span><input id="dock-scale" aria-label="等比例尺寸" type="range" min="0.1" max="100" step="0.1" value={scale} style={{ "--range-progress": `${scale}%` } as CSSProperties} onInput={(event) => setScale(Number(event.currentTarget.value))} onPointerUp={(event) => reprocessDock(quality, Number(event.currentTarget.value))} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) reprocessDock(quality, Number(event.currentTarget.value)); }} /><b>{formatScale(scale)}</b></label>
+        <label className="dock-format-control" htmlFor="dock-format"><span title="输出格式">⌁</span><select id="dock-format" aria-label="输出格式" value={format} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => { const next = event.currentTarget.value as OutputFormat; setFormat(next); reprocessDock(quality, scale, next); }}><option value="keep">AUTO</option><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WEBP</option></select><b>{format === "keep" ? "AUTO" : format.split("/")[1].toUpperCase()}</b></label>
       </div>
       <footer onPointerDown={(event) => event.stopPropagation()}>
-        <span title={notice}>{notice}</span>
-        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="打开图库" onClick={() => void bridge.showGalleryWindow()}>▦</button><button className="dock-icon-action" type="button" title="在文件夹中显示" disabled={!latestOutput} onClick={() => latestOutput && void bridge.revealPath(latestOutput)}>⌑</button><button className="dock-icon-action" type="button" title="复制压缩文件" disabled={isProcessing || !latestOutput} onClick={() => void copyLatestResult()}>⧉</button><button type="button" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>{isProcessing ? "处理中…" : "重压"}</button></span>
+        <span className="dock-status" title={notice}>{isProcessing ? "●" : results.some((result) => result.error) ? "!" : "●"}</span>
+        <span className="dock-footer-actions"><button className="dock-icon-action" type="button" title="撤回上一次压缩" aria-label="撤回上一次压缩" disabled={isProcessing || !historyRef.current.length} onClick={undoCompression}>↶</button><button className="dock-icon-action" type="button" title="打开图库" aria-label="打开图库" onClick={() => void bridge.showGalleryWindow()}>▦</button><button className="dock-icon-action" type="button" title="在文件夹中显示" aria-label="在文件夹中显示" disabled={!latestOutput} onClick={() => latestOutput && void bridge.revealPath(latestOutput)}>⌑</button><button className="dock-icon-action" type="button" title="复制压缩结果" aria-label="复制压缩结果" disabled={isProcessing || !latestOutput} onClick={() => void copyLatestResult()}>⧉</button><button className="dock-icon-action dock-reprocess" type="button" title="按当前参数重新压缩" aria-label="重新压缩" disabled={isProcessing || !lastPathsRef.current.length} onClick={() => void runCompression(lastPathsRef.current)}>↻</button></span>
       </footer>
       <button className="dock-resize-handle" type="button" aria-label="调整悬浮窗大小" title="拖动调整大小" onPointerDown={startDockResize}><i /><i /><i /></button>
     </main>
@@ -1357,11 +1371,12 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
 
 export function PicLiteApp() {
   const bridge = typeof window !== "undefined" ? window.picLite : undefined;
-  return bridge?.windowLabel === "dropzone" ? <TrayDropDock bridge={bridge} /> : <PicLiteWorkbench nativeBridge={bridge} />;
+  if (bridge?.windowLabel === "dropzone") return <TrayDropDock bridge={bridge} />;
+  return <PicLiteWorkbench nativeBridge={bridge} initialView={bridge?.windowLabel === "preferences" ? "preferences" : "workspace"} standalonePreferences={bridge?.windowLabel === "preferences"} />;
 }
 
-function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
-  const [view, setView] = useState<ViewName>("workspace");
+function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standalonePreferences = false }: { nativeBridge?: NativeBridge; initialView?: ViewName; standalonePreferences?: boolean }) {
+  const [view, setView] = useState<ViewName>(initialView);
   const [items, setItems] = useState<ImageItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settings, setSettings] = useState<CompressionSettings>(loadStoredSettings);
@@ -1428,6 +1443,11 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
   const desktopPlatform = nativeBridge
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
+  const t = (zh: string, en: string) => desktopPreferences.language === "en" ? en : zh;
+
+  useEffect(() => {
+    document.documentElement.lang = desktopPreferences.language === "en" ? "en" : "zh-CN";
+  }, [desktopPreferences.language]);
 
   useEffect(() => {
     if (!nativeBridge) return;
@@ -1455,6 +1475,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         if (Array.isArray(profile.customPresets)) setPresets([...BUILT_IN_PRESETS, ...profile.customPresets.filter((preset) => preset?.custom && preset.settings)]);
         if (typeof profile.activePresetId === "string") setActivePresetId(profile.activePresetId);
         if (Array.isArray(profile.localFonts)) setLocalFonts((current) => Array.from(new Set([...current, ...profile.localFonts.filter((font) => typeof font === "string" && font.trim())])));
+        if (profile.desktopPreferences && typeof profile.desktopPreferences === "object") setDesktopPreferences({ ...DEFAULT_DESKTOP_PREFERENCES, ...profile.desktopPreferences, dockLayout: profile.desktopPreferences.dockLayout === "full" ? "full" : "compact", language: profile.desktopPreferences.language === "en" ? "en" : "zh" });
       })
       .catch(() => undefined)
       .finally(() => { if (!disposed) setNativeProfileReady(true); });
@@ -1711,8 +1732,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       customPresets: presets.filter((preset) => preset.custom),
       activePresetId,
       localFonts,
+      desktopPreferences,
     }).catch(() => showToast("本机应用配置保存失败"));
-  }, [activePresetId, localFonts, nativeBridge, nativeProfileReady, presets, settings, showToast]);
+  }, [activePresetId, desktopPreferences, localFonts, nativeBridge, nativeProfileReady, presets, settings, showToast]);
 
   useEffect(() => {
     const active = presets.find((preset) => preset.id === activePresetId);
@@ -2033,9 +2055,9 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     showToast("已从图库记录中移除，不会删除本地文件");
   }, [showToast]);
 
-  const prepareAllForExport = useCallback(async () => {
+  const prepareItemsForExport = useCallback(async (sourceItems: ImageItem[]) => {
     const prepared: Array<{ item: ImageItem; blob: Blob }> = [];
-    for (const item of itemsRef.current) {
+    for (const item of sourceItems) {
       if (item.outputBlob) {
         prepared.push({ item, blob: item.outputBlob });
         continue;
@@ -2078,43 +2100,51 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     }
   }, [nativeBridge, showToast]);
 
-  const exportAll = useCallback(async () => {
-    if (!itemsRef.current.length || exporting) return;
-    if (exportMode === "overwrite" && settings.format !== "keep") {
+  const exportItems = useCallback(async (requestedItems: ImageItem[]) => {
+    if (!requestedItems.length || exporting) return;
+    let effectiveExportMode = exportMode;
+    if (effectiveExportMode === "overwrite" && settings.format !== "keep") {
       showToast("覆盖源文件时请将输出格式设为“保持原格式”");
       return;
     }
-    if (exportMode === "overwrite" && (!nativeBridge || desktopPreferences.confirmOverwrite) && !window.confirm("确认覆盖源图片？该操作无法在 PicLite 中撤销。")) return;
+    if (effectiveExportMode === "overwrite" && (!nativeBridge || desktopPreferences.confirmOverwrite) && !window.confirm("确认覆盖源图片？该操作无法在 PicLite 中撤销。")) return;
 
     setExporting(true);
     try {
-      if (!nativeBridge && exportMode === "overwrite") {
-        const handles = itemsRef.current.map((item) => item.fileHandle);
+      if (!nativeBridge && effectiveExportMode === "overwrite") {
+        const handles = requestedItems.map((item) => item.fileHandle);
         if (handles.some((handle) => !handle)) throw new Error("覆盖需要通过“添加图片”重新选择源文件并授权写入");
         for (const handle of handles) {
           if (handle?.requestPermission && await handle.requestPermission({ mode: "readwrite" }) !== "granted") throw new Error("没有获得源文件写入权限");
         }
       }
-      if (!nativeBridge && (exportMode === "same-folder" || exportMode === "fixed-folder") && !exportDirectoryRef.current && !(await chooseExportFolder())) return;
-      if (nativeBridge && exportMode === "fixed-folder" && !exportFolderName && !(await chooseExportFolder())) return;
+      // Clipboard and browser-imported images have no source folder. They are
+      // still valid export targets: quietly switch this batch to the user’s
+      // fixed folder instead of refusing the entire export.
+      if (nativeBridge && (effectiveExportMode === "overwrite" || effectiveExportMode === "same-folder") && requestedItems.some((item) => !item.sourcePath)) {
+        effectiveExportMode = "fixed-folder";
+        showToast("部分图片没有源路径，已改为固定文件夹导出");
+      }
+      if (!nativeBridge && (effectiveExportMode === "same-folder" || effectiveExportMode === "fixed-folder") && !exportDirectoryRef.current && !(await chooseExportFolder())) return;
+      if (nativeBridge && effectiveExportMode === "fixed-folder" && !exportFolderName && !(await chooseExportFolder())) return;
 
-      const prepared = await prepareAllForExport();
+      const prepared = await prepareItemsForExport(requestedItems);
       const suffix = cleanSuffix(exportSuffix);
-      if (exportMode === "download") {
+      if (effectiveExportMode === "download") {
         prepared.forEach(({ item, blob }, index) => window.setTimeout(() => downloadItem(item, blob), index * 160));
         showToast(`正在下载 ${prepared.length} 张图片`);
         return;
       }
 
       if (nativeBridge) {
-        if ((exportMode === "overwrite" || exportMode === "same-folder") && prepared.some(({ item }) => !item.sourcePath)) {
+        if ((effectiveExportMode === "overwrite" || effectiveExportMode === "same-folder") && prepared.some(({ item }) => !item.sourcePath)) {
           throw new Error("有图片不是通过“添加图片”导入，无法定位源文件夹");
         }
         const payloadItems: NativeExportItem[] = [];
         for (const { item, blob } of prepared) {
           payloadItems.push({ sourcePath: item.sourcePath, outputName: outputName(item, suffix), data: new Uint8Array(await blob.arrayBuffer()) });
         }
-        const result = await nativeBridge.exportImages({ mode: exportMode, suffix, fixedFolder: exportFolderName || undefined, items: payloadItems });
+        const result = await nativeBridge.exportImages({ mode: effectiveExportMode, suffix, fixedFolder: exportFolderName || undefined, items: payloadItems });
         if (!result.ok) throw new Error(result.error || "导出失败");
         for (let index = 0; index < prepared.length; index += 1) {
           const { item, blob } = prepared[index];
@@ -2124,7 +2154,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
         return;
       }
 
-      if (exportMode === "overwrite") {
+      if (effectiveExportMode === "overwrite") {
         if (prepared.some(({ item }) => !item.fileHandle)) throw new Error("覆盖需要通过“添加图片”重新选择源文件并授权写入");
         for (const { item, blob } of prepared) {
           const writable = await item.fileHandle!.createWritable();
@@ -2147,7 +2177,12 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
     } finally {
       setExporting(false);
     }
-  }, [chooseExportFolder, desktopPreferences.confirmOverwrite, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareAllForExport, saveItemToGallery, settings.format, showToast]);
+  }, [chooseExportFolder, desktopPreferences.confirmOverwrite, downloadItem, exportFolderName, exportMode, exportSuffix, exporting, nativeBridge, prepareItemsForExport, saveItemToGallery, settings.format, showToast]);
+
+  const exportAll = useCallback(() => void exportItems(itemsRef.current), [exportItems]);
+  const exportSelected = useCallback(() => {
+    if (selected) void exportItems([selected]);
+  }, [exportItems, selected]);
 
   const removeItem = useCallback((id: string) => {
     const item = items.find((candidate) => candidate.id === id);
@@ -2527,7 +2562,7 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
 
   return (
     <main
-      className={`app-shell ${nativeBridge ? "desktop-app" : "web-app"}`}
+      className={`app-shell ${nativeBridge ? "desktop-app" : "web-app"} ${standalonePreferences ? "preferences-window" : ""}`}
       onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
       onDragOver={(event) => event.preventDefault()}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
@@ -2537,19 +2572,18 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       <input ref={fontInputRef} className="visually-hidden" type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={onFontSelected} />
 
       <header className="topbar">
-        <button className="brand" type="button" onClick={() => setView("workspace")}>
+        <button className="brand" type="button" onClick={() => standalonePreferences ? void nativeBridge?.hideCurrentWindow() : setView("workspace")}>
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <span><strong>PicLite</strong><small>图轻</small></span>
         </button>
-        <nav className="main-nav" aria-label="主要功能">
-          <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{nativeBridge ? "工作台" : "压缩工作台"}</button>
-          <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>文件夹监测{watcherActive && <span className="live-dot" aria-label="监测中" />}</button>
-          <button className={view === "gallery" ? "active" : ""} type="button" onClick={() => setView("gallery")}>图库</button>
-          {nativeBridge && <button className={view === "preferences" ? "active" : ""} type="button" onClick={() => setView("preferences")}>应用设置</button>}
-        </nav>
+        {standalonePreferences ? <div className="standalone-window-title"><span className="eyebrow">PREFERENCES</span><strong>{t("应用设置", "Preferences")}</strong></div> : <nav className="main-nav" aria-label={t("主要功能", "Main navigation")}>
+          <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{t(nativeBridge ? "工作台" : "压缩工作台", "Workspace")}</button>
+          <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>{t("文件夹监测", "Folder watch")}{watcherActive && <span className="live-dot" aria-label={t("监测中", "Watching")} />}</button>
+          <button className={view === "gallery" ? "active" : ""} type="button" onClick={() => setView("gallery")}>{t("图库", "Library")}</button>
+          {nativeBridge && <button className={view === "preferences" ? "active" : ""} type="button" onClick={() => void nativeBridge.showPreferencesWindow()}>{t("应用设置", "Preferences")}</button>}
+        </nav>}
         <div className="topbar-actions">
-          <span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : "本地处理，图片不上传"}</span>
-          <IconButton label="帮助" symbol="?" onClick={() => showToast("支持 JPG、PNG、WebP、动态 GIF；可拖入或按 Ctrl + V")} />
+          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <><span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : t("本地处理，图片不上传", "Local processing")}</span><IconButton label={t("帮助", "Help")} symbol="?" onClick={() => showToast(t("支持 JPG、PNG、WebP、动态 GIF；可拖入或按 Ctrl + V", "Supports JPG, PNG, WebP and animated GIF. Drag files in or paste from the clipboard."))} /></>}
         </div>
       </header>
 
@@ -2567,22 +2601,22 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
       </aside>}
 
       {view === "workspace" ? (
-        <section className="workspace" aria-label="图片压缩工作台">
+        <section className="workspace" aria-label={t("图片压缩工作台", "Image compression workspace")}>
           <aside className="queue-panel">
             <div className="panel-heading">
-              <div><span className="eyebrow">任务队列</span><strong>{items.length ? `${items.length} 张图片` : "等待导入"}</strong></div>
-              {items.length > 0 && <button className="text-button" type="button" onClick={clearAll}>清空</button>}
+              <div><span className="eyebrow">{t("任务队列", "QUEUE")}</span><strong>{items.length ? t(`${items.length} 张图片`, `${items.length} images`) : t("等待导入", "Ready to import")}</strong></div>
+              {items.length > 0 && <button className="text-button" type="button" onClick={clearAll}>{t("清空", "Clear")}</button>}
             </div>
 
-            <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> 添加图片</button>
+            <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> {t("添加图片", "Add images")}</button>
 
             <div className="queue-list">
               {items.length === 0 ? (
                 <div className="queue-empty">
                   <div className="empty-stack" aria-hidden="true"><i /><i /><i /></div>
-                  <strong>队列还是空的</strong>
-                  <p>拖入图片，或从剪贴板粘贴</p>
-                  <button type="button" onClick={addDemo}>载入演示图片</button>
+                  <strong>{t("队列还是空的", "Your queue is empty")}</strong>
+                  <p>{t("拖入图片，或从剪贴板粘贴", "Drop images here or paste from the clipboard")}</p>
+                  <button type="button" onClick={addDemo}>{t("载入演示图片", "Load a sample image")}</button>
                 </div>
               ) : items.map((item) => (
                 <button className={`queue-item ${selected?.id === item.id ? "selected" : ""}`} type="button" key={item.id} onClick={() => setSelectedId(item.id)}>
@@ -2603,8 +2637,8 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
             </div>
 
             <div className="queue-footer">
-              <button className="paste-button" type="button" onClick={importFromClipboard}><span>⌘</span> 从剪贴板粘贴</button>
-              <small>也可随时按 Ctrl + V</small>
+              <button className="paste-button" type="button" onClick={importFromClipboard}><span>⌘</span> {t("从剪贴板粘贴", "Paste from clipboard")}</button>
+              <small>{t("也可随时按 Ctrl + V", "You can also press Ctrl + V")}</small>
             </div>
           </aside>
 
@@ -2681,11 +2715,12 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
             </div>
 
             <div className="result-strip">
-              <div><span>原始体积</span><strong>{formatBytes(totals.original)}</strong></div>
+              <div><span>{t("原始体积", "Original")}</span><strong>{formatBytes(totals.original)}</strong></div>
               <span className="result-arrow">→</span>
-              <div><span>当前实时结果</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
-              <div className={`savings-pill ${totals.saved < 0 ? "larger" : ""}`}><span>{totals.saved < 0 ? "体积增加" : "共节省"}</span><strong>{sizeChangeLabel(totals.original, totals.output)}</strong></div>
-              <button className="export-button" type="button" disabled={!items.length || exporting} onClick={exportAll}><span>↓</span> {exporting ? "正在导出" : "导出全部"}</button>
+              <div><span>{t("当前实时结果", "Result")}</span><strong>{items.some((item) => item.outputBytes) ? formatBytes(totals.output) : "—"}</strong></div>
+              <div className={`savings-pill ${totals.saved < 0 ? "larger" : ""}`}><span>{totals.saved < 0 ? t("体积增加", "Larger") : t("共节省", "Saved")}</span><strong>{sizeChangeLabel(totals.original, totals.output)}</strong></div>
+              <IconButton label={t("仅导出当前图片", "Export selected image")} symbol="↓" disabled={!selected || exporting} onClick={exportSelected} />
+              <button className="export-button" type="button" disabled={!items.length || exporting} onClick={exportAll}><span>↓</span> {exporting ? t("正在导出", "Exporting") : t("导出全部", "Export all")}</button>
             </div>
           </section>
 
@@ -2971,6 +3006,13 @@ function PicLiteWorkbench({ nativeBridge }: { nativeBridge?: NativeBridge }) {
                 <div><strong>主题</strong><small>可跟随 Windows / macOS 系统外观</small></div>
                 <div className="preference-segments">
                   {([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([value, label]) => <button className={desktopPreferences.theme === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, theme: value }))}>{label}</button>)}
+                </div>
+              </div>
+              <div className="preference-row column">
+                <div><strong>语言 / Language</strong><small>切换主导航、工作台、悬浮压缩坞与常用操作的显示语言</small></div>
+                <div className="preference-segments">
+                  <button className={desktopPreferences.language === "zh" ? "active" : ""} type="button" onClick={() => setDesktopPreferences((current) => ({ ...current, language: "zh" }))}>中文</button>
+                  <button className={desktopPreferences.language === "en" ? "active" : ""} type="button" onClick={() => setDesktopPreferences((current) => ({ ...current, language: "en" }))}>English</button>
                 </div>
               </div>
               <div className="preference-row column">
