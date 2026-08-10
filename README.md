@@ -11,27 +11,14 @@
 
 PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，支持 Web、Windows、macOS 和 Linux。它可以在执行前实时预估输出体积，并用连续的画质和尺寸控制把文件压到你需要的大小。
 
-[在线体验](https://piclite-image.zwistidjaa331.chatgpt.site) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [报告问题](https://github.com/amiaoapp/PicLite/issues)
+[在线体验](https://piclite-image.zwistidjaa331.chatgpt.site) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [报告问题](https://github.com/amiaoapp/PicLite/issues) · [English README](README.en-US.md)
 
-## English
+## 适用人群
 
-PicLite is a privacy-first, self-hostable image and GIF compression workspace for the web, Windows, macOS and Linux. It estimates the actual output size before export and gives you continuous quality and scale controls, so you can keep compressing until a file is as small as you need.
+- **自媒体工作人员**：批量压缩配图、封面、动图和截图，直接复制结果或上传到自己的图床，适合发布到微信公众号、小红书、微博、博客与内容管理系统。
+- **开发人员**：优化 README、文档、产品页和仓库中的图片资源；可使用文件夹监测、剪贴板监听、全局快捷键、图库和自托管网页端融入日常工作流。
 
-[Try the web app](https://piclite-image.zwistidjaa331.chatgpt.site) · [Download desktop builds](https://github.com/amiaoapp/PicLite/releases) · [Report an issue](https://github.com/amiaoapp/PicLite/issues)
-
-### Highlights
-
-- Local processing by default: images stay in the browser or desktop app unless you explicitly upload them to your own storage.
-- JPEG, PNG, WebP and animated GIF compression; lossless metadata cleanup, format conversion, real output-size preview, unlimited scale and quality controls.
-- Before/after preview with pan, zoom, fit and 1:1 pixel inspection; text watermarking with local and imported fonts.
-- Desktop-only folder watching, clipboard watching, system tray controls, global shortcuts, result gallery and optional WebDAV / S3 / R2 / OSS / FTP / SFTP upload.
-- A compact floating drop dock inspired by Clop’s workflow: drop or select files, adjust quality, scale and format, then copy, reveal, undo or reopen the result from the lower-right corner.
-
-### Desktop quick start
-
-Download the correct installer from [GitHub Releases](https://github.com/amiaoapp/PicLite/releases): `.exe` / `.msi` for Windows, `.dmg` for Apple Silicon or Intel Macs, and `.AppImage` / `.deb` for Linux. The Tauri desktop app uses the operating system WebView instead of bundling Chromium.
-
-For server deployment, see [Self-hosting with Docker](#在服务器上部署). The server only serves the app; client images are still processed locally.
+英文说明、下载表格和英文部署教程请见独立页面：[README.en-US.md](README.en-US.md)。
 
 ![PicLite 压缩、水印与导出界面](docs/images/piclite-workspace.png)
 
@@ -84,7 +71,7 @@ For server deployment, see [Self-hosting with Docker](#在服务器上部署). T
 
 启动桌面版后，PicLite 只在 Windows 系统托盘、macOS 菜单栏或 Linux 状态区显示图标，不在 Windows 任务栏或 macOS Dock 保留图标。左键恢复主窗口，右键可以打开悬浮压缩坞、切换快速预设、主题与界面密度、启动或停止文件夹监测，以及完全退出应用。应用设置中还可以开启开机自启动并录制全局快捷键。
 
-标准系统托盘 API 在 Windows、macOS 和 Linux 上没有统一的文件拖放事件，因此 PicLite 使用托盘菜单唤起一个无任务栏图标、始终置顶的“悬浮压缩坞”。压缩完成、剪贴板监听或文件夹监测产生结果后，会在当前屏幕右下角展开结果卡片；画质、尺寸和 JPG / PNG / WebP / 原格式选项每次都从原图重算，支持回撤、预览、复制压缩文件、定位文件，并可设置 0–120 秒后自动收起。
+桌面端会在屏幕右下角常驻一个轻量拖放热区：将图片拖入即可自动展开“悬浮压缩坞”并按当前参数压缩。压缩完成、剪贴板监听或文件夹监测产生结果后，也会在当前屏幕右下角展开结果卡片；画质、尺寸和 JPG / PNG / WebP / 原格式选项每次都从原图重算，支持回撤、预览、复制压缩文件、定位文件，并可设置 0–120 秒后自动收起。
 
 ### 图床上传与图库
 

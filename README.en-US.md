@@ -15,6 +15,11 @@ PicLite is a local-first, self-hostable image and GIF compression workspace, sup
 
 [Try Online](https://piclite-image.zwistidjaa331.chatgpt.site) · [Download Desktop App](https://github.com/amiaoapp/PicLite/releases) · [Report Issues](https://github.com/amiaoapp/PicLite/issues)
 
+## Who it is for
+
+- **Content creators and social-media teams** who need to shrink post images, covers, GIFs, and screenshots; copy the result directly or publish it through their own image host for CMS, blogs, newsletters, and social platforms.
+- **Developers** who optimize images in READMEs, documentation, product pages, and repositories; folder watching, clipboard monitoring, global shortcuts, a result library, and self-hosting fit naturally into technical workflows.
+
 ![PicLite 压缩、水印与导出界面](docs/images/piclite-workspace.png)
 
 ## Features
@@ -66,7 +71,7 @@ Current macOS packages use ad-hoc signing and are not notarized with an Apple De
 
 After launching the desktop app, PicLite only shows an icon in the Windows system tray, macOS menu bar, or Linux status area, and does not retain an icon in the Windows taskbar or macOS Dock. Left-click restores the main window, right-click opens the floating compression dock, toggles quick presets, themes, and UI density, starts or stops folder monitoring, and fully quits the app. You can also enable auto-start on boot and record global hotkeys in App Settings.
 
-Standard system tray APIs lack unified file drag-and-drop events across Windows, macOS, and Linux, so PicLite uses the tray menu to summon a floating compression dock that is always on top and has no taskbar icon. After compression, clipboard monitoring, or folder monitoring yields results, a result card expands in the bottom-right corner of the current screen; quality, dimensions, and JPG / PNG / WebP / Original format options are recalculated from the original image every time, supporting undo, preview, copy compressed file, locate file, and auto-collapse after 0–120 seconds.
+The desktop app keeps a small drop target in the lower-right corner of the screen. Drop images on it to automatically open the floating compression dock and compress them with the current settings. After compression, clipboard monitoring, or folder monitoring yields results, a result card expands in the bottom-right corner; quality, dimensions, and JPG / PNG / WebP / Original format options are recalculated from the original image every time, supporting undo, preview, copy compressed file, locate file, and auto-collapse after 0–120 seconds.
 
 ### Image Host Upload & Gallery
 

@@ -30,7 +30,7 @@ type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 type DockLayout = "compact" | "full";
 
-const APP_VERSION = "0.13.3";
+const APP_VERSION = "0.13.4";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -151,12 +151,14 @@ type NativeBridge = {
   showGalleryWindow: () => Promise<void>;
   showPreferencesWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
+  submitCornerDrop: (paths: string[]) => Promise<void>;
   configureDropzoneWindow: (width: number, height: number) => Promise<void>;
   resizeDropzoneWindow: (width: number, height: number) => Promise<void>;
   setAlwaysOnTop: (enabled: boolean) => Promise<void>;
   hideCurrentWindow: () => Promise<void>;
   quitApplication: () => Promise<void>;
   onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
+  onCornerDrop: (callback: (paths: string[]) => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
   onWatcherEvent: (callback: (event: WatcherEvent) => void) => () => void;
   onClipboardImage: (callback: (data: Uint8Array) => void) => () => void;
@@ -1125,11 +1127,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }, [bridge, clearAutoHide, floatingResultSeconds, isProcessing, results]);
 
   useEffect(() => {
-    // Keep the compact card genuinely readable on Windows 125–150% scale.
-    // It is still small enough to live in the lower-right corner, while the
-    // full style makes room for real sliders instead of tiny hit targets.
-    const width = results.length ? (dockLayout === "full" ? 480 : 398) : dockLayout === "full" ? 420 : 360;
-    const height = results.length ? (dockLayout === "full" ? 356 : 300) : dockLayout === "full" ? 274 : 226;
+    // Keep the result card sized to its real content.  A tall window made the
+    // controls appear detached from the result, especially at 125–150% DPI.
+    const width = results.length ? (dockLayout === "full" ? 500 : 398) : dockLayout === "full" ? 420 : 360;
+    const height = results.length ? (dockLayout === "full" ? 322 : 252) : dockLayout === "full" ? 274 : 226;
     void bridge.configureDropzoneWindow(width, height);
   }, [bridge, dockLayout, results.length]);
 
@@ -1155,6 +1156,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     }
     setIsDragging(event.type === "over");
     if (event.type === "drop" && event.paths?.length) void runCompression(event.paths);
+  }), [bridge, runCompression]);
+
+  useEffect(() => bridge.onCornerDrop((paths) => {
+    if (paths.length) void runCompression(paths);
   }), [bridge, runCompression]);
 
   useEffect(() => bridge.onWatcherEvent((event) => {
@@ -1369,9 +1374,36 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   );
 }
 
+function CornerDropTarget({ bridge }: { bridge: NativeBridge }) {
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.classList.add("dropzone-root");
+    return () => document.documentElement.classList.remove("dropzone-root");
+  }, []);
+
+  useEffect(() => bridge.onFileDrop((event) => {
+    if (event.type === "over") setDragging(true);
+    if (event.type === "leave") setDragging(false);
+    if (event.type === "drop") {
+      setDragging(false);
+      if (event.paths?.length) void bridge.submitCornerDrop(event.paths);
+    }
+  }), [bridge]);
+
+  return <button
+    className={`corner-drop-target ${dragging ? "dragging" : ""}`}
+    type="button"
+    aria-label="将图片拖到这里压缩"
+    title="拖入图片即可压缩"
+    onClick={() => void bridge.showDropzoneWindow()}
+  ><span>{dragging ? "↓" : "＋"}</span></button>;
+}
+
 export function PicLiteApp() {
   const bridge = typeof window !== "undefined" ? window.picLite : undefined;
   if (bridge?.windowLabel === "dropzone") return <TrayDropDock bridge={bridge} />;
+  if (bridge?.windowLabel === "corner-drop-target") return <CornerDropTarget bridge={bridge} />;
   return <PicLiteWorkbench nativeBridge={bridge} initialView={bridge?.windowLabel === "preferences" ? "preferences" : "workspace"} standalonePreferences={bridge?.windowLabel === "preferences"} />;
 }
 
@@ -1444,6 +1476,12 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     ? ({ win32: "Windows", darwin: "macOS", linux: "Linux" }[nativeBridge.platform] || "桌面")
     : "桌面";
   const t = (zh: string, en: string) => desktopPreferences.language === "en" ? en : zh;
+  const toggleHeaderTheme = useCallback(() => {
+    setDesktopPreferences((current) => ({ ...current, theme: resolveTheme(current.theme) === "dark" ? "light" : "dark" }));
+  }, []);
+  const toggleHeaderLanguage = useCallback(() => {
+    setDesktopPreferences((current) => ({ ...current, language: current.language === "zh" ? "en" : "zh" }));
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = desktopPreferences.language === "en" ? "en" : "zh-CN";
@@ -2580,10 +2618,9 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{t(nativeBridge ? "工作台" : "压缩工作台", "Workspace")}</button>
           <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>{t("文件夹监测", "Folder watch")}{watcherActive && <span className="live-dot" aria-label={t("监测中", "Watching")} />}</button>
           <button className={view === "gallery" ? "active" : ""} type="button" onClick={() => setView("gallery")}>{t("图库", "Library")}</button>
-          {nativeBridge && <button className={view === "preferences" ? "active" : ""} type="button" onClick={() => void nativeBridge.showPreferencesWindow()}>{t("应用设置", "Preferences")}</button>}
         </nav>}
         <div className="topbar-actions">
-          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <><span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : t("本地处理，图片不上传", "Local processing")}</span><IconButton label={t("帮助", "Help")} symbol="?" onClick={() => showToast(t("支持 JPG、PNG、WebP、动态 GIF；可拖入或按 Ctrl + V", "Supports JPG, PNG, WebP and animated GIF. Drag files in or paste from the clipboard."))} /></>}
+          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <><span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : t("本地处理，图片不上传", "Local processing")}</span><span className="topbar-quick-controls"><button type="button" title={t("切换浅色 / 深色主题", "Toggle light / dark theme")} aria-label={t("切换主题", "Toggle theme")} onClick={toggleHeaderTheme}>{resolveTheme(desktopPreferences.theme) === "dark" ? "☀" : "☾"}</button><button type="button" title={t("切换中文 / English", "Switch Chinese / English")} aria-label={t("切换语言", "Switch language")} onClick={toggleHeaderLanguage}>{desktopPreferences.language === "zh" ? "EN" : "中"}</button></span></>}
         </div>
       </header>
 
@@ -2725,24 +2762,24 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           </section>
 
           <aside className="settings-panel">
-            <div className="panel-heading"><div><span className="eyebrow">实时试压</span><strong>滑动即预览体积</strong></div><button className="reset-button" type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>重置</button></div>
+            <div className="panel-heading"><div><span className="eyebrow">{t("实时试压", "LIVE TEST")}</span><strong>{t("滑动即预览体积", "Preview output size as you slide")}</strong></div><button className="reset-button" type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>{t("重置", "Reset")}</button></div>
 
             <div className="preset-toolbar">
-              <div className="select-wrap"><select aria-label="压缩预设" value={activePresetId} onChange={(event) => {
+              <div className="select-wrap"><select aria-label={t("压缩预设", "Compression preset")} value={activePresetId} onChange={(event) => {
                 const preset = presets.find((candidate) => candidate.id === event.target.value);
                 if (preset) applyPreset(preset);
-              }}><option value="current">当前参数（自动保存）</option>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.custom ? `自定义 · ${preset.name}` : preset.name}</option>)}</select></div>
-              <button type="button" title="保存当前参数为预设" onClick={() => setPresetDialogOpen(true)}>＋ 保存</button>
-              {presets.find((preset) => preset.id === activePresetId)?.custom && <button className="preset-delete" type="button" title="删除当前预设" onClick={deleteActivePreset}>删除</button>}
+              }}><option value="current">{t("当前参数（自动保存）", "Current settings (saved automatically)")}</option>{presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.custom ? `${t("自定义", "Custom")} · ${preset.name}` : preset.name}</option>)}</select></div>
+              <button type="button" title={t("保存当前参数为预设", "Save current settings as a preset")} onClick={() => setPresetDialogOpen(true)}>＋ {t("保存", "Save")}</button>
+              {presets.find((preset) => preset.id === activePresetId)?.custom && <button className="preset-delete" type="button" title={t("删除当前预设", "Delete current preset")} onClick={deleteActivePreset}>{t("删除", "Delete")}</button>}
             </div>
 
             <div className="setting-section">
-              <label className="setting-label">快速方案</label>
+              <label className="setting-label">{t("快速方案", "Quick modes")}</label>
               <div className="mode-grid">
                 {([
-                  ["lossless", 100, "无损优先", "100%", "◌"],
-                  ["balanced", 82, "智能平衡", "实测候选", "◐"],
-                  ["small", 45, "更小体积", "多档试压", "●"],
+                  ["lossless", 100, t("无损优先", "Lossless"), "100%", "◌"],
+                  ["balanced", 82, t("智能平衡", "Smart balance"), t("实测候选", "Measured candidates"), "◐"],
+                  ["small", 45, t("更小体积", "Smaller files"), t("多档试压", "Multi-pass test"), "●"],
                 ] as const).map(([value, quality, label, note, icon]) => (
                   <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => {
                     const preset = BUILT_IN_PRESETS.find((candidate) => candidate.id === value);
@@ -2755,7 +2792,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
             </div>
 
             <div className="setting-section slider-section">
-              <div className="slider-heading"><label className="setting-label" htmlFor="quality-range">画质 / 编码质量</label><output htmlFor="quality-range">{settings.quality}%</output></div>
+              <div className="slider-heading"><label className="setting-label" htmlFor="quality-range">{t("画质 / 编码质量", "Quality / encoding")}</label><output htmlFor="quality-range">{settings.quality}%</output></div>
               <input
                 id="quality-range"
                 className="compression-range"
@@ -2770,17 +2807,17 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                   setSettings((current) => ({ ...current, quality, mode: modeFromQuality(quality) }));
                 }}
               />
-              <div className="range-labels"><span>更小文件</span><span>更多细节</span></div>
+              <div className="range-labels"><span>{t("更小文件", "Smaller file")}</span><span>{t("更多细节", "More detail")}</span></div>
               <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
-                <span><i /> 实时试压结果</span>
-                <strong>{selected?.status === "processing" ? "计算中…" : selected?.outputBytes ? formatBytes(selected.outputBytes) : "导入图片后显示"}</strong>
-                <small>{selected?.outputBytes ? selected.keptOriginal ? "所有候选都更大，已保留原图" : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 智能选择 ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · 已自动调整编码质量至 ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? "节省" : "增加"} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : "显示的是本机实际编码后的文件大小"}</small>
+                <span><i /> {t("实时试压结果", "Live result")}</span>
+                <strong>{selected?.status === "processing" ? t("计算中…", "Calculating…") : selected?.outputBytes ? formatBytes(selected.outputBytes) : t("导入图片后显示", "Shown after import")}</strong>
+                <small>{selected?.outputBytes ? selected.keptOriginal ? t("所有候选都更大，已保留原图", "Every candidate was larger; original kept") : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("智能选择", "Smart choice")} ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("已自动调整编码质量至", "Quality adjusted to")} ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? t("节省", "Saved") : t("增加", "Larger")} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : t("显示的是本机实际编码后的文件大小", "Actual local encoding result")}</small>
               </div>
-              <p className="setting-hint"><i /> 智能平衡会实测原格式、WebP 与几档画质/尺寸，再在保真范围内选择最小结果；PNG / WebP 的透明通道不会被自动丢弃。JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。</p>
+              <p className="setting-hint"><i /> {t("智能平衡会实测原格式、WebP 与几档画质/尺寸，再在保真范围内选择最小结果；PNG / WebP 的透明通道不会被自动丢弃。JPG / WebP 调整编码质量；PNG 减少颜色级数；GIF 调整每帧色板。", "Smart balance measures the original format, WebP, and several quality/scale candidates before choosing the smallest faithful result. PNG/WebP alpha is preserved.")}</p>
             </div>
 
             <div className="setting-section slider-section">
-              <div className="slider-heading"><label className="setting-label" htmlFor="scale-range">等比例尺寸</label><output htmlFor="scale-range">{formatScale(settings.scale)}</output></div>
+              <div className="slider-heading"><label className="setting-label" htmlFor="scale-range">{t("等比例尺寸", "Scale")}</label><output htmlFor="scale-range">{formatScale(settings.scale)}</output></div>
               <input
                 id="scale-range"
                 className="compression-range scale-range"
@@ -2792,58 +2829,58 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 style={{ "--range-progress": `${settings.scale}%` } as CSSProperties}
                 onChange={(event) => setSettings((current) => ({ ...current, scale: Number(event.target.value) }))}
               />
-              <div className="range-labels"><span>0.1% · 极小</span><span>100% · 原尺寸</span></div>
+              <div className="range-labels"><span>{t("0.1% · 极小", "0.1% · tiny")}</span><span>{t("100% · 原尺寸", "100% · original")}</span></div>
               <div className="scale-presets">
                 {[100, 50, 25, 10].map((scale) => <button className={settings.scale === scale ? "active" : ""} type="button" key={scale} onClick={() => setSettings((current) => ({ ...current, scale }))}>{scale}%</button>)}
-                <button type="button" onClick={() => setSettings((current) => ({ ...current, scale: Math.max(0.1, Math.round(current.scale * 5) / 10) }))}>继续减半</button>
+                <button type="button" onClick={() => setSettings((current) => ({ ...current, scale: Math.max(0.1, Math.round(current.scale * 5) / 10) }))}>{t("继续减半", "Halve again")}</button>
               </div>
-              <div className="dimension-preview"><span>预计像素</span><strong>{selectedTarget ? `${selectedTarget.width} × ${selectedTarget.height} px` : "导入图片后显示"}</strong></div>
-              <p className="setting-hint">可反复继续减半，始终从原图生成；最小会收敛到 1 × 1 像素。</p>
+              <div className="dimension-preview"><span>{t("预计像素", "Estimated pixels")}</span><strong>{selectedTarget ? `${selectedTarget.width} × ${selectedTarget.height} px` : t("导入图片后显示", "Shown after import")}</strong></div>
+              <p className="setting-hint">{t("可反复继续减半，始终从原图生成；最小会收敛到 1 × 1 像素。", "You can keep halving from the original; the minimum converges at 1 × 1 px.")}</p>
             </div>
 
             <div className="setting-section">
-              <label className="setting-label" htmlFor="output-format">输出格式</label>
+              <label className="setting-label" htmlFor="output-format">{t("输出格式", "Output format")}</label>
               <div className="select-wrap">
                 <select id="output-format" value={settings.format} onChange={(event) => setSettings((current) => ({ ...current, format: event.target.value as OutputFormat }))}>
-                  <option value="keep">保持原格式</option>
-                  <option value="image/jpeg">JPG · 适合照片</option>
-                  <option value="image/png">PNG · 透明与无损</option>
-                  <option value="image/webp">WebP · 适合网页</option>
+                  <option value="keep">{t("保持原格式", "Keep original")}</option>
+                  <option value="image/jpeg">{t("JPG · 适合照片", "JPG · photos")}</option>
+                  <option value="image/png">{t("PNG · 透明与无损", "PNG · alpha/lossless")}</option>
+                  <option value="image/webp">{t("WebP · 适合网页", "WebP · web")}</option>
                 </select>
               </div>
             </div>
 
             <div className="setting-section">
-              <div className="label-row"><label className="setting-label" htmlFor="resize-toggle">最大像素边界（可选）</label><button id="resize-toggle" className={`switch ${settings.resize ? "on" : ""}`} type="button" role="switch" aria-checked={settings.resize} onClick={() => setSettings((current) => ({ ...current, resize: !current.resize }))}><i /></button></div>
+              <div className="label-row"><label className="setting-label" htmlFor="resize-toggle">{t("最大像素边界（可选）", "Maximum pixels (optional)")}</label><button id="resize-toggle" className={`switch ${settings.resize ? "on" : ""}`} type="button" role="switch" aria-checked={settings.resize} onClick={() => setSettings((current) => ({ ...current, resize: !current.resize }))}><i /></button></div>
               <div className={`dimension-grid ${settings.resize ? "" : "disabled"}`}>
-                <label>最大宽度 <span><input type="number" min="1" value={settings.width} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, width: Number(event.target.value) }))} /> px</span></label>
-                <button className={settings.lockRatio ? "locked" : ""} type="button" disabled={!settings.resize} aria-label="锁定宽高比" onClick={() => setSettings((current) => ({ ...current, lockRatio: !current.lockRatio }))}>↕</button>
-                <label>最大高度 <span><input type="number" min="1" value={settings.height} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, height: Number(event.target.value) }))} /> px</span></label>
+                <label>{t("最大宽度", "Max width")} <span><input type="number" min="1" value={settings.width} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, width: Number(event.target.value) }))} /> px</span></label>
+                <button className={settings.lockRatio ? "locked" : ""} type="button" disabled={!settings.resize} aria-label={t("锁定宽高比", "Lock aspect ratio")} onClick={() => setSettings((current) => ({ ...current, lockRatio: !current.lockRatio }))}>↕</button>
+                <label>{t("最大高度", "Max height")} <span><input type="number" min="1" value={settings.height} disabled={!settings.resize} onChange={(event) => setSettings((current) => ({ ...current, height: Number(event.target.value) }))} /> px</span></label>
               </div>
-              <p className="setting-hint">会与上方比例同时生效，且不会放大小图；开启 ↕ 时保持原始宽高比。</p>
+              <p className="setting-hint">{t("会与上方比例同时生效，且不会放大小图；开启 ↕ 时保持原始宽高比。", "Works with scale above and never enlarges small images. ↕ keeps the original aspect ratio.")}</p>
             </div>
 
             <div className="setting-section watermark-section">
-              <div className="label-row"><label className="setting-label" htmlFor="watermark-toggle">文字水印</label><button id="watermark-toggle" className={`switch ${settings.watermark.enabled ? "on" : ""}`} type="button" role="switch" aria-checked={settings.watermark.enabled} onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, enabled: !current.watermark.enabled } }))}><i /></button></div>
+              <div className="label-row"><label className="setting-label" htmlFor="watermark-toggle">{t("文字水印", "Text watermark")}</label><button id="watermark-toggle" className={`switch ${settings.watermark.enabled ? "on" : ""}`} type="button" role="switch" aria-checked={settings.watermark.enabled} onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, enabled: !current.watermark.enabled } }))}><i /></button></div>
               {settings.watermark.enabled && <div className="watermark-controls">
-                <input className="watermark-text-input" aria-label="水印文字" value={settings.watermark.text} placeholder="输入水印文字" onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, text: event.target.value } }))} />
-                <div className="segmented-control" aria-label="水印铺设方式">
-                  <button className={settings.watermark.layout === "tile" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "tile" } }))}>全屏重复</button>
-                  <button className={settings.watermark.layout === "single" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "single" } }))}>单点定位</button>
+                <input className="watermark-text-input" aria-label={t("水印文字", "Watermark text")} value={settings.watermark.text} placeholder={t("输入水印文字", "Enter watermark text")} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, text: event.target.value } }))} />
+                <div className="segmented-control" aria-label={t("水印铺设方式", "Watermark layout")}>
+                  <button className={settings.watermark.layout === "tile" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "tile" } }))}>{t("全屏重复", "Tile")}</button>
+                  <button className={settings.watermark.layout === "single" ? "active" : ""} type="button" onClick={() => setSettings((current) => ({ ...current, watermark: { ...current.watermark, layout: "single" } }))}>{t("单点定位", "Position")}</button>
                 </div>
                 <div className="font-picker-row">
                   <div className="select-wrap"><select aria-label="水印字体" value={settings.watermark.fontFamily} onChange={(event) => void selectSystemFont(event.target.value)}>{localFonts.map((font) => <option value={font} key={font} style={{ fontFamily: `"${font.replaceAll('"', "")}"` }}>{font}</option>)}</select></div>
-                  <button type="button" onClick={loadSystemFonts}>系统字体</button>
-                  <button type="button" onClick={() => fontInputRef.current?.click()}>导入字体</button>
+                  <button type="button" onClick={loadSystemFonts}>{t("系统字体", "System fonts")}</button>
+                  <button type="button" onClick={() => fontInputRef.current?.click()}>{t("导入字体", "Import font")}</button>
                 </div>
-                <label className="mini-range"><span>字号 <b>{settings.watermark.fontScale.toFixed(1)}%</b></span><input type="range" min="1" max="20" step="0.5" value={settings.watermark.fontScale} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontScale: Number(event.target.value) } }))} /></label>
-                <label className="mini-range"><span>方向 <b>{settings.watermark.rotation}°</b></span><input type="range" min="-180" max="180" step="1" value={settings.watermark.rotation} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, rotation: Number(event.target.value) } }))} /></label>
-                {settings.watermark.layout === "tile" ? <label className="mini-range"><span>铺设密度（越低越稀疏） <b>{settings.watermark.density}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.density} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, density: Number(event.target.value) } }))} /></label> : <>
-                  <label className="mini-range"><span>水平位置 <b>{settings.watermark.positionX}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionX} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionX: Number(event.target.value) } }))} /></label>
-                  <label className="mini-range"><span>垂直位置 <b>{settings.watermark.positionY}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionY} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionY: Number(event.target.value) } }))} /></label>
+                <label className="mini-range"><span>{t("字号", "Font size")} <b>{settings.watermark.fontScale.toFixed(1)}%</b></span><input type="range" min="1" max="20" step="0.5" value={settings.watermark.fontScale} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, fontScale: Number(event.target.value) } }))} /></label>
+                <label className="mini-range"><span>{t("方向", "Angle")} <b>{settings.watermark.rotation}°</b></span><input type="range" min="-180" max="180" step="1" value={settings.watermark.rotation} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, rotation: Number(event.target.value) } }))} /></label>
+                {settings.watermark.layout === "tile" ? <label className="mini-range"><span>{t("铺设密度（越低越稀疏）", "Tile density (lower is sparser)")} <b>{settings.watermark.density}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.density} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, density: Number(event.target.value) } }))} /></label> : <>
+                  <label className="mini-range"><span>{t("水平位置", "Horizontal position")} <b>{settings.watermark.positionX}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionX} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionX: Number(event.target.value) } }))} /></label>
+                  <label className="mini-range"><span>{t("垂直位置", "Vertical position")} <b>{settings.watermark.positionY}%</b></span><input type="range" min="0" max="100" step="1" value={settings.watermark.positionY} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, positionY: Number(event.target.value) } }))} /></label>
                 </>}
-                <div className="watermark-color-row"><label>文字色 <input type="color" value={settings.watermark.color} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, color: event.target.value } }))} /></label><label className="mini-range"><span>透明度 <b>{settings.watermark.opacity}%</b></span><input type="range" min="1" max="100" step="1" value={settings.watermark.opacity} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, opacity: Number(event.target.value) } }))} /></label></div>
-                <div className="shadow-row"><label><input type="checkbox" checked={settings.watermark.shadow} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadow: event.target.checked } }))} /> 阴影</label>{settings.watermark.shadow && <><input aria-label="阴影颜色" type="color" value={settings.watermark.shadowColor} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowColor: event.target.value } }))} /><label className="mini-range"><span>模糊 <b>{settings.watermark.shadowBlur}px</b></span><input type="range" min="0" max="40" step="1" value={settings.watermark.shadowBlur} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowBlur: Number(event.target.value) } }))} /></label></> }</div>
+                <div className="watermark-color-row"><label>{t("文字色", "Text color")} <input type="color" value={settings.watermark.color} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, color: event.target.value } }))} /></label><label className="mini-range"><span>{t("透明度", "Opacity")} <b>{settings.watermark.opacity}%</b></span><input type="range" min="1" max="100" step="1" value={settings.watermark.opacity} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, opacity: Number(event.target.value) } }))} /></label></div>
+                <div className="shadow-row"><label><input type="checkbox" checked={settings.watermark.shadow} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadow: event.target.checked } }))} /> {t("阴影", "Shadow")}</label>{settings.watermark.shadow && <><input aria-label={t("阴影颜色", "Shadow color")} type="color" value={settings.watermark.shadowColor} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowColor: event.target.value } }))} /><label className="mini-range"><span>{t("模糊", "Blur")} <b>{settings.watermark.shadowBlur}px</b></span><input type="range" min="0" max="40" step="1" value={settings.watermark.shadowBlur} onChange={(event) => setSettings((current) => ({ ...current, watermark: { ...current.watermark, shadowBlur: Number(event.target.value) } }))} /></label></> }</div>
               </div>}
             </div>
 

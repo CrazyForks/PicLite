@@ -701,6 +701,20 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
     }
 }
 
+fn show_corner_drop_target(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("corner-drop-target") {
+        let _ = window.set_size(LogicalSize::new(88.0, 88.0));
+        let _ = window.show();
+        position_dropzone(&window, 88.0, 88.0);
+    }
+}
+
+fn hide_corner_drop_target(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("corner-drop-target") {
+        let _ = window.hide();
+    }
+}
+
 fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
     if let Some(window) = app.get_webview_window("dropzone") {
         let width = width.clamp(190.0, 520.0);
@@ -867,6 +881,7 @@ async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
+    hide_corner_drop_target(&app);
     if let Some(window) = app.get_webview_window("dropzone") {
         if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
             let logical = size.to_logical::<f64>(monitor.scale_factor());
@@ -874,6 +889,19 @@ async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
         }
     }
     show_window(&app, "dropzone");
+    Ok(())
+}
+
+#[tauri::command]
+async fn submit_corner_drop(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    hide_corner_drop_target(&app);
+    resize_and_position_dropzone(&app, 398.0, 252.0);
+    show_window(&app, "dropzone");
+    app.emit("dropzone:paths", paths)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -890,8 +918,12 @@ async fn resize_dropzone_window(app: AppHandle, width: f64, height: f64) -> Resu
 }
 
 #[tauri::command]
-async fn hide_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|error| error.to_string())
+async fn hide_current_window(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|error| error.to_string())?;
+    if window.label() == "dropzone" {
+        show_corner_drop_target(&app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2629,7 +2661,10 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
-            "dropzone" => show_window(app, "dropzone"),
+            "dropzone" => {
+                hide_corner_drop_target(app);
+                show_window(app, "dropzone");
+            }
             "preferences" => show_window(app, "preferences"),
             "watcher_settings" => {
                 show_window(app, "main");
@@ -2881,6 +2916,7 @@ pub fn run() {
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
 
             start_clipboard_monitor(app.handle().clone());
+            show_corner_drop_target(app.handle());
 
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
@@ -2939,6 +2975,7 @@ pub fn run() {
             show_gallery_window,
             show_preferences_window,
             show_dropzone_window,
+            submit_corner_drop,
             configure_dropzone_window,
             resize_dropzone_window,
             hide_current_window,

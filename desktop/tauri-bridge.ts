@@ -22,7 +22,7 @@ function platformName() {
 if ("__TAURI_INTERNALS__" in window) {
   const currentWindow = getCurrentWindow();
   const currentWebview = getCurrentWebview();
-  document.documentElement.classList.add(currentWindow.label === "dropzone" ? "dropzone-root" : "desktop-root");
+  document.documentElement.classList.add(["dropzone", "corner-drop-target"].includes(currentWindow.label) ? "dropzone-root" : "desktop-root");
   window.picLite = {
     platform: platformName(),
     windowLabel: currentWindow.label,
@@ -80,6 +80,7 @@ if ("__TAURI_INTERNALS__" in window) {
     showGalleryWindow: () => invoke("show_gallery_window"),
     showPreferencesWindow: () => invoke("show_preferences_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
+    submitCornerDrop: (paths) => invoke("submit_corner_drop", { paths }),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
@@ -99,6 +100,18 @@ if ("__TAURI_INTERNALS__" in window) {
         else unlisten = stop;
       }).catch((error) => {
         if (!disposed) callback({ type: "error", error: error instanceof Error ? error.message : String(error) });
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
+    onCornerDrop: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen<string[]>("dropzone:paths", (event) => callback(event.payload)).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
       });
       return () => {
         disposed = true;
