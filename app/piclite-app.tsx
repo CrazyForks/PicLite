@@ -17,6 +17,7 @@ import {
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { register as registerGlobalShortcut, unregisterAll as unregisterAllGlobalShortcuts } from "@tauri-apps/plugin-global-shortcut";
+import { isSmartCompressionWorthwhile, minimumSmartSavingsBytes } from "./compression-policy";
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
@@ -31,7 +32,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "shortcuts" | "about";
 
-const APP_VERSION = "0.13.4";
+const APP_VERSION = "0.13.5";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -898,8 +899,18 @@ async function compressImage(item: ImageItem, settings: CompressionSettings): Pr
       if (!best || result.blob.size < best.blob.size) best = { ...result, settings: candidateSettings };
     }
     if (!best) throw new Error("未生成可用的智能优化结果");
-    if (settings.preventLarger && best.blob.size >= item.originalBytes) {
-      return { blob: item.file, width: item.width, height: item.height, keptOriginal: true, strategy: "所有高质量候选都更大" };
+    const smartMode = settings.mode === "small" ? "small" : "balanced";
+    if (!isSmartCompressionWorthwhile(item.originalBytes, best.blob.size, smartMode)) {
+      const minimum = minimumSmartSavingsBytes(item.originalBytes, smartMode);
+      return {
+        blob: item.file,
+        width: item.width,
+        height: item.height,
+        keptOriginal: true,
+        strategy: best.blob.size >= item.originalBytes
+          ? "所有高质量候选都更大"
+          : `候选仅节省 ${formatBytes(item.originalBytes - best.blob.size)}，低于 ${formatBytes(minimum)} 的保真门槛`,
+      };
     }
     return { blob: best.blob, width: best.width, height: best.height, strategy: strategyLabel(best.settings) };
   }
@@ -975,12 +986,20 @@ function fileNameFromPath(path: string) {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function browserDownloadLabel(language: "zh" | "en") {
-  if (typeof navigator === "undefined") return language === "en" ? "Download desktop app" : "下载桌面版";
+type BrowserPlatform = "generic" | "windows" | "macos" | "linux";
+
+function detectBrowserPlatform(): BrowserPlatform {
   const agent = navigator.userAgent.toLowerCase();
-  if (agent.includes("windows")) return language === "en" ? "Download for Windows" : "下载 Windows 版";
-  if (agent.includes("macintosh") || agent.includes("mac os")) return language === "en" ? "Download for macOS" : "下载 macOS 版";
-  if (agent.includes("linux")) return language === "en" ? "Download for Linux" : "下载 Linux 版";
+  if (agent.includes("windows")) return "windows";
+  if (agent.includes("macintosh") || agent.includes("mac os")) return "macos";
+  if (agent.includes("linux")) return "linux";
+  return "generic";
+}
+
+function browserDownloadLabel(language: "zh" | "en", platform: BrowserPlatform) {
+  if (platform === "windows") return language === "en" ? "Download for Windows" : "下载 Windows 版";
+  if (platform === "macos") return language === "en" ? "Download for macOS" : "下载 macOS 版";
+  if (platform === "linux") return language === "en" ? "Download for Linux" : "下载 Linux 版";
   return language === "en" ? "Download desktop app" : "下载桌面版";
 }
 
@@ -1488,6 +1507,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [downloadGuideVisible, setDownloadGuideVisible] = useState(true);
+  const [browserPlatform, setBrowserPlatform] = useState<BrowserPlatform>("generic");
   const [nativeProfileReady, setNativeProfileReady] = useState(() => !nativeBridge);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
@@ -1531,6 +1551,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     if (!nativeBridge && window.localStorage.getItem("piclite.desktopDownloadGuide.dismissed") === "1") {
       setDownloadGuideVisible(false);
     }
+  }, [nativeBridge]);
+
+  useEffect(() => {
+    if (!nativeBridge) setBrowserPlatform(detectBrowserPlatform());
   }, [nativeBridge]);
 
   useEffect(() => {
@@ -2661,7 +2685,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       {!nativeBridge && downloadGuideVisible && <aside className="desktop-download-guide" aria-label={t("PicLite 桌面端下载引导", "Download PicLite for desktop")}>
         <span className="download-mark brand-mark" aria-hidden="true"><i /><i /><i /></span>
         <span><strong>{t("桌面端可以监测文件夹和剪贴板", "Watch folders and the clipboard on desktop")}</strong><small>{t("已识别当前系统，可在本机后台自动压缩图片。", "PicLite can optimise images automatically in the background on this device.")}</small></span>
-        <button className="download-guide-primary" type="button" onClick={() => openReleasePage()}>{browserDownloadLabel(desktopPreferences.language)}</button>
+        <button className="download-guide-primary" type="button" onClick={() => openReleasePage()}>{browserDownloadLabel(desktopPreferences.language, browserPlatform)}</button>
         <button className="download-guide-close" type="button" aria-label={t("关闭桌面端下载引导", "Dismiss desktop download guide")} onClick={dismissDownloadGuide}>×</button>
       </aside>}
 
@@ -2845,7 +2869,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               <div className={`live-size-card ${selected?.status === "processing" ? "calculating" : ""}`}>
                 <span><i /> {t("实时试压结果", "Live result")}</span>
                 <strong>{selected?.status === "processing" ? t("计算中…", "Calculating…") : selected?.outputBytes ? formatBytes(selected.outputBytes) : t("导入图片后显示", "Shown after import")}</strong>
-                <small>{selected?.outputBytes ? selected.keptOriginal ? t("所有候选都更大，已保留原图", "Every candidate was larger; original kept") : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("智能选择", "Smart choice")} ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("已自动调整编码质量至", "Quality adjusted to")} ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? t("节省", "Saved") : t("增加", "Larger")} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : t("显示的是本机实际编码后的文件大小", "Actual local encoding result")}</small>
+                <small>{selected?.outputBytes ? selected.keptOriginal ? selected.strategy || t("所有候选都更大，已保留原图", "Every candidate was larger; original kept") : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("智能选择", "Smart choice")} ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("已自动调整编码质量至", "Quality adjusted to")} ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? t("节省", "Saved") : t("增加", "Larger")} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : t("显示的是本机实际编码后的文件大小", "Actual local encoding result")}</small>
               </div>
               <p className="setting-hint"><i /> {t("智能平衡会实测原格式、WebP 与几档画质/尺寸，再在保真范围内选择最小结果；PNG 始终保持像素无损，JPG / WebP 调整编码质量，GIF 调整每帧色板。", "Smart balance measures the original format, WebP, and several quality/scale candidates before choosing the smallest faithful result. PNG stays pixel-lossless; JPG/WebP use encoding quality and GIF adjusts its frame palette.")}</p>
             </div>
