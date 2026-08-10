@@ -175,6 +175,8 @@ struct QuickCompressResult {
 #[serde(rename_all = "camelCase")]
 struct WatcherSettings {
     input_folder: String,
+    #[serde(default)]
+    input_folders: Vec<String>,
     output_folder: String,
     mode: String,
     quality: u8,
@@ -706,9 +708,9 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
 
 fn show_corner_drop_target(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.set_size(LogicalSize::new(140.0, 140.0));
+        let _ = window.set_size(LogicalSize::new(96.0, 96.0));
         let _ = window.show();
-        position_dropzone(&window, 140.0, 140.0);
+        position_dropzone(&window, 96.0, 96.0);
     }
 }
 
@@ -744,6 +746,7 @@ fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
 fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
     WatcherSettings {
         input_folder: String::new(),
+        input_folders: Vec::new(),
         output_folder: String::new(),
         mode: if value.quality >= 96 {
             "lossless".to_string()
@@ -909,7 +912,7 @@ async fn submit_corner_drop(
         .lock()
         .map_err(|_| "拖放队列不可用".to_string())? = paths;
     hide_corner_drop_target(&app);
-    resize_and_position_dropzone(&app, 360.0, 320.0);
+    resize_and_position_dropzone(&app, 420.0, 320.0);
     show_window(&app, "dropzone");
     app.emit_to("dropzone", "dropzone:paths-ready", ())
         .map_err(|error| error.to_string())?;
@@ -972,7 +975,12 @@ fn process_watched_file(
     let result = (|| -> Result<(PathBuf, u64, u64), String> {
         let metadata = fs::metadata(&canonical).map_err(|error| error.to_string())?;
         let original_bytes = metadata.len();
-        let output_directory = if settings.output_folder.is_empty() {
+        let output_directory = if settings.output_folder == "@same-folder" {
+            canonical
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "无法定位源文件夹".to_string())?
+        } else if settings.output_folder.is_empty() {
             PathBuf::from(&settings.input_folder).join("PicLite")
         } else {
             PathBuf::from(&settings.output_folder)
@@ -997,7 +1005,7 @@ fn process_watched_file(
             event.original_bytes = Some(original_bytes);
             event.output_bytes = Some(output_bytes);
             emit_event(&app, event);
-            resize_and_position_dropzone(&app, 320.0, 228.0);
+            resize_and_position_dropzone(&app, 420.0, 320.0);
             if let Some(window) = app.get_webview_window("dropzone") {
                 let _ = window.show();
             }
@@ -1305,6 +1313,25 @@ async fn copy_compressed_data(
         suppress_next_clipboard_observation(&state);
     }
     result
+}
+
+#[tauri::command]
+async fn cache_image_data(
+    app: AppHandle,
+    data: Vec<u8>,
+    file_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if data.is_empty() || data.len() > 128 * 1024 * 1024 {
+            return Err("剪贴板图片无效或超过 128 MB".to_string());
+        }
+        image::load_from_memory(&data).map_err(|error| format!("无法读取剪贴板图片：{error}"))?;
+        let path = clipboard_cache_path(&app, &file_name)?;
+        fs::write(&path, &data).map_err(|error| format!("无法缓存剪贴板图片：{error}"))?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2455,50 +2482,64 @@ async fn start_watcher(
     state: State<'_, DesktopState>,
 ) -> Result<CommandResult, String> {
     let result = (|| -> Result<(), String> {
-        if settings.input_folder.is_empty() {
+        let requested_inputs = if settings.input_folders.is_empty() {
+            (!settings.input_folder.is_empty())
+                .then(|| vec![settings.input_folder.clone()])
+                .unwrap_or_default()
+        } else {
+            settings.input_folders.clone()
+        };
+        if requested_inputs.is_empty() {
             return Err("请选择来源文件夹".to_string());
         }
-        let input =
-            fs::canonicalize(&settings.input_folder).map_err(|_| "来源文件夹不存在".to_string())?;
-        let folders = state
-            .folders
-            .lock()
-            .map_err(|_| "文件夹状态不可用".to_string())?;
-        if folders.input.as_ref() != Some(&input) {
-            return Err("请通过文件夹选择器确认来源位置".to_string());
-        }
-        let output = if settings.output_folder.is_empty() {
-            input.join("PicLite")
-        } else {
-            PathBuf::from(&settings.output_folder)
-        };
-        drop(folders);
+        let inputs = requested_inputs
+            .iter()
+            .map(|input| {
+                fs::canonicalize(input)
+                    .map_err(|_| format!("监测文件夹不存在：{input}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let fixed_output = (!settings.output_folder.is_empty()
+            && settings.output_folder != "@same-folder")
+            .then(|| PathBuf::from(&settings.output_folder));
 
-        if let Some(mut previous) = state
+        if let Some(previous) = state
             .watcher
             .lock()
             .map_err(|_| "监测状态不可用".to_string())?
             .take()
         {
-            let _ = previous.unwatch(&input);
+            drop(previous);
         }
         let app_handle = app.clone();
         let watcher_settings = settings.clone();
         let processing = state.processing.clone();
-        let input_for_callback = input.clone();
-        let output_for_callback = output.clone();
+        let inputs_for_callback = inputs.clone();
+        let output_for_callback = fixed_output.clone();
         let mut watcher = notify::recommended_watcher(
             move |result: notify::Result<notify::Event>| match result {
                 Ok(event) if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) => {
                     for path in event.paths {
+                        let source_root = inputs_for_callback
+                            .iter()
+                            .filter(|input| path.starts_with(input))
+                            .max_by_key(|input| input.components().count())
+                            .cloned();
+                        let Some(source_root) = source_root else { continue };
+                        let default_output = source_root.join("PicLite");
+                        let already_optimised = path
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|value| value.contains("-piclite"));
                         if !is_image(&path)
-                            || path.starts_with(&output_for_callback)
-                            || !path.starts_with(&input_for_callback)
+                            || already_optimised
+                            || path.starts_with(output_for_callback.as_ref().unwrap_or(&default_output))
                         {
                             continue;
                         }
                         let app = app_handle.clone();
-                        let settings = watcher_settings.clone();
+                        let mut settings = watcher_settings.clone();
+                        settings.input_folder = source_root.to_string_lossy().to_string();
                         let processing = processing.clone();
                         thread::spawn(move || {
                             process_watched_file(app, path, settings, processing)
@@ -2512,9 +2553,11 @@ async fn start_watcher(
             },
         )
         .map_err(|error| error.to_string())?;
-        watcher
-            .watch(&input, RecursiveMode::Recursive)
-            .map_err(|error| error.to_string())?;
+        for input in &inputs {
+            watcher
+                .watch(input, RecursiveMode::Recursive)
+                .map_err(|error| format!("无法监测 {}：{error}", input.display()))?;
+        }
         *state
             .watcher
             .lock()
@@ -2527,7 +2570,7 @@ async fn start_watcher(
             &app,
             watcher_event(
                 "started",
-                Some(format!("正在监测 {}", input.to_string_lossy())),
+                Some(format!("正在监测 {} 个文件夹", inputs.len())),
             ),
         );
         Ok(())
@@ -2588,125 +2631,70 @@ async fn get_watcher_state(state: State<'_, DesktopState>) -> Result<WatcherStat
 }
 
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示 PicLite", true, None::<&str>)?;
-    let dropzone = MenuItem::with_id(app, "dropzone", "打开悬浮压缩坞", true, None::<&str>)?;
-    let preferences = MenuItem::with_id(app, "preferences", "应用设置…", true, None::<&str>)?;
-    let watcher = MenuItem::with_id(
+    let preferences = MenuItem::with_id(app, "preferences", "设置…", true, None::<&str>)?;
+    let batch = MenuItem::with_id(app, "show", "批量优化器", true, None::<&str>)?;
+    let launch = MenuItem::with_id(app, "launch_at_login", "登录时启动", true, None::<&str>)?;
+
+    let optimise = MenuItem::with_id(app, "optimise_clipboard", "优化", true, None::<&str>)?;
+    let aggressive = MenuItem::with_id(
         app,
-        "watcher_settings",
-        "打开文件夹监测设置…",
+        "optimise_clipboard_aggressive",
+        "激进优化",
         true,
         None::<&str>,
     )?;
-
-    let preset_last = MenuItem::with_id(app, "preset_last", "上次使用", true, None::<&str>)?;
-    let preset_lossless =
-        MenuItem::with_id(app, "preset_lossless", "无损优先", true, None::<&str>)?;
-    let preset_balanced =
-        MenuItem::with_id(app, "preset_balanced", "智能平衡", true, None::<&str>)?;
-    let preset_small = MenuItem::with_id(app, "preset_small", "更小体积", true, None::<&str>)?;
-    let presets = Submenu::with_items(
+    let downscale = MenuItem::with_id(
         app,
-        "快速预设",
-        true,
-        &[
-            &preset_last,
-            &preset_lossless,
-            &preset_balanced,
-            &preset_small,
-        ],
-    )?;
-
-    let theme_system = MenuItem::with_id(app, "theme_system", "跟随系统", true, None::<&str>)?;
-    let theme_light = MenuItem::with_id(app, "theme_light", "浅色", true, None::<&str>)?;
-    let theme_dark = MenuItem::with_id(app, "theme_dark", "深色", true, None::<&str>)?;
-    let themes = Submenu::with_items(
-        app,
-        "外观主题",
-        true,
-        &[&theme_system, &theme_light, &theme_dark],
-    )?;
-
-    let density_auto =
-        MenuItem::with_id(app, "density_auto", "自动适应高分屏", true, None::<&str>)?;
-    let density_comfortable =
-        MenuItem::with_id(app, "density_comfortable", "标准", true, None::<&str>)?;
-    let density_compact = MenuItem::with_id(app, "density_compact", "紧凑", true, None::<&str>)?;
-    let densities = Submenu::with_items(
-        app,
-        "界面密度",
-        true,
-        &[&density_auto, &density_comfortable, &density_compact],
-    )?;
-
-    let close_to_tray = MenuItem::with_id(
-        app,
-        "close_to_tray_status",
-        "关闭时留在托盘  ✓",
-        false,
-        None::<&str>,
-    )?;
-    let minimize_to_tray = MenuItem::with_id(
-        app,
-        "toggle_minimize_to_tray",
-        "最小化时留在托盘",
+        "downscale_clipboard",
+        "缩小尺寸",
         true,
         None::<&str>,
     )?;
+    let quicklook = MenuItem::with_id(app, "quicklook_clipboard", "快速预览", true, None::<&str>)?;
+    let clipboard = Submenu::with_items(
+        app,
+        "剪贴板操作",
+        true,
+        &[&optimise, &aggressive, &downscale, &quicklook],
+    )?;
+
+    let open_workdir = MenuItem::with_id(app, "open_workdir", "打开工作目录", true, None::<&str>)?;
+    let bring_back = MenuItem::with_id(app, "bring_back_result", "恢复上一个结果", true, None::<&str>)?;
+    let backups = Submenu::with_items(app, "备份", true, &[&open_workdir, &bring_back])?;
+
+    let pause = MenuItem::with_id(app, "pause_automatic", "暂停自动优化", true, None::<&str>)?;
+    let check_updates = MenuItem::with_id(app, "check_updates", "检查更新", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, "about", "关于 PicLite", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "完全退出 PicLite", true, None::<&str>)?;
     let separator_one = PredefinedMenuItem::separator(app)?;
     let separator_two = PredefinedMenuItem::separator(app)?;
+    let separator_three = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
         &[
-            &show,
-            &dropzone,
-            &separator_one,
-            &presets,
-            &themes,
-            &densities,
-            &watcher,
             &preferences,
-            &close_to_tray,
-            &minimize_to_tray,
+            &batch,
+            &launch,
+            &separator_one,
+            &clipboard,
+            &backups,
             &separator_two,
+            &pause,
+            &about,
+            &check_updates,
+            &separator_three,
             &quit,
         ],
     )?;
 
     TrayIconBuilder::with_id("piclite-tray")
-        .tooltip("PicLite 图轻 · 拖图到悬浮压缩坞")
+        .tooltip("PicLite · Drop to optimise")
         .icon(app.default_window_icon().expect("missing app icon").clone())
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
-            "dropzone" => {
-                hide_corner_drop_target(app);
-                show_window(app, "dropzone");
-            }
             "preferences" => show_window(app, "preferences"),
-            "watcher_settings" => {
-                show_window(app, "main");
-                let _ = app.emit("tray:action", "watcher_settings");
-            }
-            "theme_light" => {
-                apply_tray_icon_theme(app, false);
-                let _ = app.emit("tray:action", "theme_light");
-            }
-            "theme_dark" => {
-                apply_tray_icon_theme(app, true);
-                let _ = app.emit("tray:action", "theme_dark");
-            }
-            "theme_system" => {
-                let dark = app
-                    .get_webview_window("main")
-                    .and_then(|window| window.theme().ok())
-                    .map(|theme| theme == Theme::Dark)
-                    .unwrap_or(false);
-                apply_tray_icon_theme(app, dark);
-                let _ = app.emit("tray:action", "theme_system");
-            }
             "quit" => {
                 app.state::<DesktopState>()
                     .quitting
@@ -2714,6 +2702,13 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
                 app.exit(0);
             }
             action => {
+                if matches!(
+                    action,
+                    "optimise_clipboard" | "optimise_clipboard_aggressive" | "downscale_clipboard"
+                ) {
+                    hide_corner_drop_target(app);
+                    show_window(app, "dropzone");
+                }
                 let _ = app.emit("tray:action", action.to_string());
             }
         })
@@ -2974,6 +2969,7 @@ pub fn run() {
             read_clipboard_image,
             copy_image_data,
             copy_compressed_data,
+            cache_image_data,
             copy_image_path,
             list_system_fonts,
             read_system_font,
@@ -3091,6 +3087,7 @@ mod tests {
         fs::write(&path, &original).expect("write source jpeg");
         let settings = WatcherSettings {
             input_folder: String::new(),
+            input_folders: Vec::new(),
             output_folder: String::new(),
             mode: "lossless".to_string(),
             quality: 100,

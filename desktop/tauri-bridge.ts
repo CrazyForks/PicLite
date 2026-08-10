@@ -32,6 +32,7 @@ if ("__TAURI_INTERNALS__" in window) {
     },
     copyImageData: (data) => invoke("copy_image_data", { data: Array.from(data) }),
     copyCompressedData: (data, fileName) => invoke("copy_compressed_data", { data: Array.from(data), fileName }),
+    cacheImageData: (data, fileName) => invoke("cache_image_data", { data: Array.from(data), fileName }),
     copyImagePath: (path) => invoke("copy_image_path", { path }),
     selectImages: async () => {
       const images = await invoke<EncodedImage[]>("select_images");
@@ -42,40 +43,16 @@ if ("__TAURI_INTERNALS__" in window) {
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
     },
     selectFolder: (kind) => invoke<string | null>("select_folder", { kind }),
-    suggestScreenshotFolder: () => invoke<string | null>("suggest_screenshot_folder"),
-    exportImages: async (payload) => invoke("export_images", {
-      payload: {
-        ...payload,
-        items: payload.items.map((item) => ({ ...item, data: Array.from(item.data) })),
-      },
-    }),
     startWatcher: (settings) => invoke("start_watcher", { settings }),
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
     revealPath: (path) => invoke("reveal_path", { path }),
-    uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
-    loadUploadProfile: () => invoke("load_upload_profile"),
-    saveUploadProfile: (profile) => invoke("save_upload_profile", { profile }),
-    loadAppProfile: () => invoke("load_app_profile"),
-    saveAppProfile: (profile) => invoke("save_app_profile", { profile }),
-    loadImportedFonts: async () => {
-      const fonts = await invoke<Array<{ family: string; data: string }>>("load_imported_fonts");
-      return fonts.map((font) => ({ family: font.family, data: decodeBase64(font.data) }));
-    },
-    saveImportedFont: (family, data) => invoke("save_imported_font", { payload: { family, data: Array.from(data) } }),
-    listSystemFonts: () => invoke("list_system_fonts"),
-    readSystemFont: async (path, faceIndex) => {
-      const result = await invoke<{ data: string }>("read_system_font", { path, faceIndex });
-      return { data: decodeBase64(result.data) };
-    },
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: async (theme) => {
       await currentWindow.setTheme(theme === "system" ? null : theme);
       await invoke("set_tray_theme", { theme });
     },
-    startDragging: () => currentWindow.startDragging(),
-    startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showGalleryWindow: () => invoke("show_gallery_window"),
     showPreferencesWindow: () => invoke("show_preferences_window"),
@@ -131,18 +108,6 @@ if ("__TAURI_INTERNALS__" in window) {
         unlisten?.();
       };
     },
-    onWatcherEvent: (callback) => {
-      let unlisten: (() => void) | undefined;
-      let disposed = false;
-      void listen("watcher:event", (event) => callback(event.payload as Parameters<typeof callback>[0])).then((stop) => {
-        if (disposed) stop();
-        else unlisten = stop;
-      });
-      return () => {
-        disposed = true;
-        unlisten?.();
-      };
-    },
     onClipboardImage: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
@@ -167,5 +132,58 @@ if ("__TAURI_INTERNALS__" in window) {
         unlisten?.();
       };
     },
+    onWatcherEvent: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen("watcher:event", (event) => callback(event.payload as Parameters<typeof callback>[0])).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
+  };
+} else if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+  const label = new URLSearchParams(location.search).get("window") || "main";
+  const noop = async () => undefined;
+  window.picLite = {
+    platform: platformName(),
+    windowLabel: label,
+    readClipboardImage: async () => null,
+    copyImageData: noop,
+    copyCompressedData: async (_data, fileName) => `/preview/${fileName}`,
+    cacheImageData: async (_data, fileName) => `/preview/${fileName}`,
+    copyImagePath: noop,
+    selectImages: async () => [],
+    readImagesFromPaths: async () => [],
+    selectFolder: async () => null,
+    startWatcher: async () => ({ ok: true }),
+    stopWatcher: async () => ({ ok: true }),
+    getWatcherState: async () => ({ active: false }),
+    quickCompressPaths: async () => [],
+    revealPath: noop,
+    updateDesktopPreferences: noop,
+    setWindowTheme: noop,
+    showMainWindow: noop,
+    showGalleryWindow: noop,
+    showPreferencesWindow: noop,
+    showDropzoneWindow: noop,
+    submitCornerDrop: noop,
+    takePendingCornerDrop: async () => [],
+    configureDropzoneWindow: noop,
+    resizeDropzoneWindow: noop,
+    setAlwaysOnTop: noop,
+    hideCurrentWindow: noop,
+    quitApplication: noop,
+    checkForUpdates: async () => ({ currentVersion: "0.13.4", latestVersion: "0.13.4", available: false, releaseUrl: "" }),
+    openExternal: noop,
+    onFileDrop: () => () => undefined,
+    onCornerDrop: () => () => undefined,
+    onTrayAction: () => () => undefined,
+    onClipboardImage: () => () => undefined,
+    onClipboardPaths: () => () => undefined,
+    onWatcherEvent: () => () => undefined,
   };
 }
