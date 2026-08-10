@@ -1526,3 +1526,145 @@ html[data-theme="light"] .corner-drop-target span { background: #6e9e52; color: 
 @media (max-width: 920px) {
   .desktop-app .watcher-page { grid-template-rows: max-content; grid-auto-rows: max-content; }
 }
+
+/* Clop-inspired image-only floating results.  PicLite keeps its own colour,
+   branding and implementation while matching the compact result/action flow. */
+.clop-dock {
+  --dock-surface: rgba(24, 23, 22, .88);
+  --dock-card: rgba(15, 15, 14, .82);
+  grid-template-rows: 36px minmax(0, 1fr) 34px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 22px;
+  background: var(--dock-surface);
+  box-shadow: 0 24px 70px rgba(0,0,0,.32), inset 0 1px rgba(255,255,255,.16);
+  backdrop-filter: blur(30px) saturate(1.28);
+  -webkit-backdrop-filter: blur(30px) saturate(1.28);
+}
+.clop-dock > header { padding: 0 7px 0 12px; background: rgba(255,255,255,.035); }
+.clop-dock .dock-body { min-height: 0; padding: 8px !important; overflow: auto; }
+.clop-dock .dock-result-stack { display: flex; flex-direction: column; gap: 7px; }
+.clop-dock .dock-result-card { position: relative; min-height: 218px; overflow: hidden; border: 1px solid rgba(255,255,255,.10); border-radius: 17px; background: var(--dock-card); box-shadow: inset 0 1px rgba(255,255,255,.08); }
+.clop-dock.layout-full .dock-result-card { min-height: 270px; }
+.clop-dock .dock-result-card > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: rgba(0,0,0,.2); }
+.clop-dock .dock-result-card::after { content: ""; position: absolute; inset: 44% 0 0; pointer-events: none; background: linear-gradient(transparent, rgba(7,7,7,.50) 32%, rgba(7,7,7,.92)); }
+.clop-dock .dock-result-placeholder { position: absolute; inset: 0; display: grid; place-items: center; font-size: 24px; color: rgba(255,255,255,.55); }
+.clop-dock .dock-result-top-actions { position: absolute; z-index: 3; top: 9px; left: 9px; right: 9px; display: flex; justify-content: space-between; }
+.clop-dock .dock-result-top-actions button,
+.clop-dock .dock-action-panel button { width: 34px; height: 34px; padding: 0; border: 1px solid rgba(255,255,255,.18); border-radius: 999px; color: #181817; background: rgba(252,250,246,.92); box-shadow: 0 5px 15px rgba(0,0,0,.18); font-weight: 800; cursor: pointer; }
+.clop-dock .dock-result-top-actions button:last-child { font-size: 10px; letter-spacing: 1px; }
+.clop-dock .dock-progress { position: absolute; z-index: 3; inset: auto 16px 60px; display: grid; gap: 5px; color: #fff; font-size: 11px; font-weight: 750; }
+.clop-dock .dock-progress i { display: block; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.22); }
+.clop-dock .dock-progress i::after { content: ""; display: block; width: 42%; height: 100%; border-radius: inherit; background: #d4ff75; animation: dock-progress 1.15s ease-in-out infinite alternate; }
+@keyframes dock-progress { from { transform: translateX(-25%); } to { transform: translateX(165%); } }
+.clop-dock .dock-result-caption { position: absolute; z-index: 3; left: 13px; right: 13px; bottom: 28px; min-width: 0; display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 2px 8px; color: #fff; }
+.clop-dock .dock-result-caption > strong { grid-column: 1 / -1; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.clop-dock .dock-result-caption > span { display: flex; align-items: center; gap: 6px; font-size: 16px; font-weight: 900; }
+.clop-dock .dock-result-caption > span b { color: #ff5e67; }
+.clop-dock .dock-result-caption > span em { color: #f2d66d; font-style: normal; }
+.clop-dock .dock-result-caption > span i { font-style: normal; opacity: .82; }
+.clop-dock .dock-result-caption > small { padding: 2px 5px; border-radius: 6px; color: #123c57; background: #b7e6ff; font-size: 9px; font-weight: 900; }
+.clop-dock .dock-format-tabs { position: absolute; z-index: 4; right: 10px; bottom: 7px; left: 10px; display: flex; justify-content: center; gap: 3px; }
+.clop-dock .dock-format-tabs button { min-width: 0; padding: 2px 7px; border: 0; border-radius: 7px; color: rgba(255,255,255,.68); background: transparent; font-size: 8px; font-weight: 900; cursor: pointer; }
+.clop-dock .dock-format-tabs button.active { color: #232321; background: rgba(248,247,242,.9); }
+.clop-dock .dock-result-count { padding: 4px 8px; color: var(--dock-muted); font-size: 9px; text-align: center; }
+.clop-dock .dock-action-panel { padding: 7px 12px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid rgba(255,255,255,.09); border-radius: 16px; background: rgba(16,16,15,.55); }
+.clop-dock .dock-action-panel button { width: 36px; height: 36px; font-size: 15px; }
+.clop-dock .dock-action-panel button.active { outline: 2px solid #cfff74; }
+.clop-dock .dock-action-panel button:disabled { opacity: .35; cursor: default; }
+.clop-dock .dock-parameter-panel { padding: 9px 10px; display: grid; gap: 7px; border: 1px solid rgba(255,255,255,.09); border-radius: 14px; background: rgba(14,14,13,.60); }
+.clop-dock .dock-parameter-panel label { display: grid; grid-template-columns: 48px 1fr 44px; align-items: center; gap: 7px; color: #dce4df; font-size: 9px; }
+.clop-dock .dock-parameter-panel label b { text-align: right; }
+.clop-dock .dock-parameter-panel input { width: 100%; accent-color: #cfff74; }
+.clop-dock .dock-parameter-panel > button { height: 29px; border: 0; border-radius: 9px; background: #d1ff74; color: #142119; font-size: 9px; font-weight: 850; }
+.clop-dock > footer { min-height: 34px; padding: 0 9px 0 12px; }
+.clop-dock > footer .dock-status { min-width: 0; overflow: hidden; color: var(--dock-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.clop-dock .dock-add-more { width: 24px; min-width: 24px; height: 24px; padding: 0; border-radius: 8px; }
+.clop-dock .clop-drop-zone { min-height: 174px; display: grid; place-items: center; align-content: center; gap: 9px; border: 1px dashed rgba(255,255,255,.20); border-radius: 18px; background: rgba(255,255,255,.035); }
+.clop-dock .clop-drop-zone > strong { color: #f4f5f3; font-size: 16px; }
+.clop-dock .clop-drop-zone > small { color: var(--dock-muted); font-size: 9px; }
+.clop-dock .drop-target-glyph { position: relative; width: 48px; height: 48px; display: grid; place-items: center; }
+.clop-dock .drop-target-glyph i { position: absolute; inset: 0; border: 2px dotted #ff6171; border-radius: 50%; animation: drop-target-spin 5s linear infinite; }
+.clop-dock .drop-target-glyph b { color: #ff6171; font-size: 27px; }
+@keyframes drop-target-spin { to { transform: rotate(360deg); } }
+html[data-theme="light"] .clop-dock { --dock-surface: rgba(248,248,246,.91); --dock-card: rgba(230,233,230,.8); border-color: rgba(50,55,50,.12); color: #20231f; }
+html[data-theme="light"] .clop-dock .dock-result-card { border-color: rgba(40,50,42,.12); }
+html[data-theme="light"] .clop-dock .dock-action-panel,
+html[data-theme="light"] .clop-dock .dock-parameter-panel { border-color: rgba(40,50,42,.11); background: rgba(255,255,255,.58); }
+html[data-theme="light"] .clop-dock .dock-parameter-panel label { color: #314037; }
+html[data-theme="light"] .clop-dock .clop-drop-zone { border-color: rgba(55,75,61,.20); background: rgba(255,255,255,.42); }
+html[data-theme="light"] .clop-dock .clop-drop-zone > strong { color: #213328; }
+
+/* The visible pill remains small, while the 140px transparent webview gives
+   Windows and Linux a forgiving native drop hit area. */
+.corner-drop-target { right: 8px; bottom: 8px; width: 62px; height: 62px; border-radius: 21px; }
+.corner-drop-target > span { width: 34px; height: 34px; border-radius: 12px; }
+.corner-drop-target > span b { font-size: 20px; }
+.corner-drop-target > span em { display: none; }
+.corner-drop-target.dragging { right: 5px; bottom: 5px; width: 126px; height: 126px; border-radius: 28px; }
+.corner-drop-target.dragging > span { width: auto; height: auto; padding: 15px; display: grid; gap: 7px; background: transparent; animation: none; }
+.corner-drop-target.dragging > span b { font-size: 38px; }
+.corner-drop-target.dragging > span em { display: block; color: #eaffbb; font-size: 10px; font-style: normal; white-space: nowrap; }
+
+/* Native settings use a persistent category sidebar and compact platform-like
+   rows, mirroring the information architecture users expect from Clop. */
+.desktop-app .clop-preferences,
+.preferences-window .clop-preferences {
+  width: 100%;
+  max-width: none;
+  height: calc(100vh - var(--desktop-bar));
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  gap: 0;
+  overflow: hidden;
+  background: rgba(247,248,247,.84);
+}
+.preferences-sidebar { min-height: 0; padding: 22px 12px 18px; display: flex; flex-direction: column; border-right: 1px solid rgba(61,75,66,.12); background: rgba(233,236,234,.84); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); }
+.preferences-sidebar-title { height: 42px; padding: 0 10px; display: flex; align-items: center; gap: 10px; }
+.preferences-sidebar-title .brand-mark { width: 29px; height: 29px; border-radius: 9px; }
+.preferences-sidebar-title > strong { font-size: 16px; }
+.preferences-sidebar nav { margin-top: 14px; display: grid; gap: 3px; }
+.preferences-sidebar nav button { width: 100%; min-height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 11px; border: 0; border-radius: 9px; background: transparent; color: #253129; font-size: 12px; font-weight: 700; text-align: left; cursor: pointer; }
+.preferences-sidebar nav button > span { width: 20px; color: #718077; text-align: center; }
+.preferences-sidebar nav button:hover { background: rgba(255,255,255,.55); }
+.preferences-sidebar nav button.active { color: #fff; background: #1478ed; box-shadow: inset 0 1px rgba(255,255,255,.25), 0 4px 12px rgba(20,120,237,.16); }
+.preferences-sidebar nav button.active > span { color: #fff; }
+.preferences-sidebar > small { margin: auto 10px 0; color: #939b96; font-size: 8px; line-height: 1.55; }
+.desktop-app .clop-preferences-content,
+.preferences-window .clop-preferences-content { min-width: 0; max-width: 1080px; width: 100%; height: 100%; margin: 0 auto; padding: 42px clamp(28px, 5vw, 72px) 80px; gap: 22px; overflow-y: auto; }
+.clop-preferences-content .preference-card { border: 0; border-radius: 13px; background: rgba(238,239,238,.83); box-shadow: none; }
+.clop-preferences-content .preference-card-heading { min-height: auto; padding: 0 2px 12px; border: 0; background: transparent; }
+.clop-preferences-content .preference-card-heading span { font-size: 20px; }
+.clop-preferences-content .preference-card-heading small { font-size: 9px; }
+.clop-preferences-content .preference-row { min-height: 58px; margin: 0 14px; padding: 10px 0; border-color: rgba(70,80,73,.10); }
+.clop-preferences-content .preference-row > div > strong { font-size: 12px; }
+.clop-preferences-content .preference-row > div > small { margin-top: 2px; font-size: 9px; line-height: 1.4; }
+.clop-preferences-content .preference-segments { max-width: 620px; }
+.clop-preferences-content .upload-grid { padding: 14px; }
+.clop-preferences-content .upload-save-row { padding: 12px 14px 14px; }
+.clop-preferences-content .about-product,
+.clop-preferences-content .about-card > p,
+.clop-preferences-content .about-links { margin-right: 14px; margin-left: 14px; }
+html[data-theme="dark"] .desktop-app .clop-preferences,
+html[data-theme="dark"] .preferences-window .clop-preferences { background: #181b19; }
+html[data-theme="dark"] .preferences-sidebar { border-color: rgba(255,255,255,.08); background: rgba(31,34,32,.88); }
+html[data-theme="dark"] .preferences-sidebar nav button { color: #d8ddda; }
+html[data-theme="dark"] .preferences-sidebar nav button:hover { background: rgba(255,255,255,.06); }
+html[data-theme="dark"] .preferences-sidebar nav button.active { color: #fff; background: #146fe0; }
+html[data-theme="dark"] .clop-preferences-content .preference-card { border: 0; background: rgba(41,45,42,.86); box-shadow: none; }
+@media (max-width: 720px) {
+  .desktop-app .clop-preferences,
+  .preferences-window .clop-preferences { grid-template-columns: 62px minmax(0,1fr); }
+  .preferences-sidebar { padding-inline: 7px; }
+  .preferences-sidebar-title > strong,
+  .preferences-sidebar nav button:not(.active) { font-size: 0; }
+  .preferences-sidebar nav button { justify-content: center; padding: 0; }
+  .preferences-sidebar nav button > span { font-size: 14px; }
+  .preferences-sidebar nav button.active { font-size: 0; }
+  .preferences-sidebar > small { display: none; }
+  .desktop-app .clop-preferences-content,
+  .preferences-window .clop-preferences-content { padding: 28px 16px 60px; }
+}

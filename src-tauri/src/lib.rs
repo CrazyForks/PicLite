@@ -61,6 +61,10 @@ struct DesktopState {
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
     clipboard_monitor_enabled: AtomicBool,
+    /// File drops can arrive before the hidden result webview has attached its
+    /// event listener. Keep one durable hand-off queue so the drop is never
+    /// lost while the floating window is being shown.
+    pending_corner_drop: Mutex<Vec<String>>,
     /// Timestamp until which clipboard content was written by PicLite itself.
     /// The monitor must record it but must not feed the result back through the
     /// compressor, otherwise a copied result would be compressed repeatedly.
@@ -79,6 +83,7 @@ impl Default for DesktopState {
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
+            pending_corner_drop: Mutex::new(Vec::new()),
             clipboard_ignore_until_ms: AtomicU64::new(0),
         }
     }
@@ -484,7 +489,7 @@ fn encode_gif(original: &[u8], width: u32, height: u32, quality: u8) -> Result<V
 }
 
 fn encode_static(
-    mut image: DynamicImage,
+    image: DynamicImage,
     output_extension: &str,
     quality: u8,
 ) -> Result<Vec<u8>, String> {
@@ -502,11 +507,9 @@ fn encode_static(
                 .map_err(|error| error.to_string())?;
         }
         "png" => {
-            if quality < 100 {
-                let mut rgba = image.to_rgba8();
-                quantize_rgba(&mut rgba, quality);
-                image = DynamicImage::ImageRgba8(rgba);
-            }
+            // PNG conversion is lossless. Do not quantize RGBA based on the
+            // generic quality slider: that previously caused WebP -> PNG
+            // conversions to lose colour fidelity.
             let rgba = image.to_rgba8();
             PngEncoder::new_with_quality(
                 &mut encoded,
@@ -703,9 +706,9 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
 
 fn show_corner_drop_target(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.set_size(LogicalSize::new(88.0, 88.0));
+        let _ = window.set_size(LogicalSize::new(140.0, 140.0));
         let _ = window.show();
-        position_dropzone(&window, 88.0, 88.0);
+        position_dropzone(&window, 140.0, 140.0);
     }
 }
 
@@ -893,16 +896,33 @@ async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn submit_corner_drop(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+async fn submit_corner_drop(
+    app: AppHandle,
+    paths: Vec<String>,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
+    *state
+        .pending_corner_drop
+        .lock()
+        .map_err(|_| "拖放队列不可用".to_string())? = paths;
     hide_corner_drop_target(&app);
-    resize_and_position_dropzone(&app, 398.0, 252.0);
+    resize_and_position_dropzone(&app, 360.0, 320.0);
     show_window(&app, "dropzone");
-    app.emit("dropzone:paths", paths)
+    app.emit_to("dropzone", "dropzone:paths-ready", ())
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<String>, String> {
+    let mut pending = state
+        .pending_corner_drop
+        .lock()
+        .map_err(|_| "拖放队列不可用".to_string())?;
+    Ok(std::mem::take(&mut *pending))
 }
 
 #[tauri::command]
@@ -2976,6 +2996,7 @@ pub fn run() {
             show_preferences_window,
             show_dropzone_window,
             submit_corner_drop,
+            take_pending_corner_drop,
             configure_dropzone_window,
             resize_dropzone_window,
             hide_current_window,
@@ -3017,6 +3038,37 @@ mod tests {
         assert_eq!(&small[8..12], b"WEBP");
         assert_eq!(&detailed[8..12], b"WEBP");
         assert!(small.len() < detailed.len(), "low quality WebP should be smaller: {} vs {}", small.len(), detailed.len());
+    }
+
+    #[test]
+    fn png_conversion_preserves_decoded_pixels_at_every_quality() {
+        let mut pixels = image::RgbaImage::new(48, 32);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = image::Rgba([
+                ((x * 11 + y * 3) % 256) as u8,
+                ((x * 5 + y * 17) % 256) as u8,
+                ((x * 19 + y * 7) % 256) as u8,
+                if (x + y) % 5 == 0 { 128 } else { 255 },
+            ]);
+        }
+
+        let webp = encode_static(DynamicImage::ImageRgba8(pixels), "webp", 92)
+            .expect("encode webp source");
+        let decoded_webp = image::load_from_memory(&webp).expect("decode webp source");
+        let expected = decoded_webp.to_rgba8();
+
+        for quality in [1, 25, 80, 100] {
+            let png = encode_static(decoded_webp.clone(), "png", quality)
+                .expect("encode png result");
+            let actual = image::load_from_memory(&png)
+                .expect("decode png result")
+                .to_rgba8();
+            assert_eq!(
+                actual.as_raw(),
+                expected.as_raw(),
+                "PNG quality {quality} must not quantize or recolor pixels"
+            );
+        }
     }
 
     #[test]

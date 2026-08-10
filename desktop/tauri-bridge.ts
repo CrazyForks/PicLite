@@ -81,6 +81,7 @@ if ("__TAURI_INTERNALS__" in window) {
     showPreferencesWindow: () => invoke("show_preferences_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     submitCornerDrop: (paths) => invoke("submit_corner_drop", { paths }),
+    takePendingCornerDrop: () => invoke("take_pending_corner_drop"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
@@ -109,7 +110,7 @@ if ("__TAURI_INTERNALS__" in window) {
     onCornerDrop: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
-      void listen<string[]>("dropzone:paths", (event) => callback(event.payload)).then((stop) => {
+      void listen("dropzone:paths-ready", () => callback()).then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       });
