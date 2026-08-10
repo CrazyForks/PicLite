@@ -99,6 +99,7 @@ export type PicLiteBridge = {
   revealPath: (path: string) => Promise<void>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
   setWindowTheme: (theme: Appearance) => Promise<void>;
+  startResizeDragging: (direction: "SouthEast") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showGalleryWindow: () => Promise<void>;
   showPreferencesWindow: () => Promise<void>;
@@ -119,9 +120,3 @@ export type PicLiteBridge = {
   checkForUpdates: () => Promise<{ currentVersion: string; latestVersion: string; available: boolean; releaseUrl: string }>;
   openExternal: (url: string) => Promise<void>;
 };
-
-declare global {
-  interface Window {
-    picLite?: PicLiteBridge;
-  }
-}

@@ -43,16 +43,40 @@ if ("__TAURI_INTERNALS__" in window) {
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
     },
     selectFolder: (kind) => invoke<string | null>("select_folder", { kind }),
+    suggestScreenshotFolder: () => invoke<string | null>("suggest_screenshot_folder"),
+    exportImages: async (payload) => invoke("export_images", {
+      payload: {
+        ...payload,
+        items: payload.items.map((item) => ({ ...item, data: Array.from(item.data) })),
+      },
+    }),
     startWatcher: (settings) => invoke("start_watcher", { settings }),
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
     revealPath: (path) => invoke("reveal_path", { path }),
+    uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
+    loadUploadProfile: () => invoke("load_upload_profile"),
+    saveUploadProfile: (profile) => invoke("save_upload_profile", { profile }),
+    loadAppProfile: () => invoke("load_app_profile"),
+    saveAppProfile: (profile) => invoke("save_app_profile", { profile }),
+    loadImportedFonts: async () => {
+      const fonts = await invoke<Array<{ family: string; data: string }>>("load_imported_fonts");
+      return fonts.map((font) => ({ family: font.family, data: decodeBase64(font.data) }));
+    },
+    saveImportedFont: (family, data) => invoke("save_imported_font", { payload: { family, data: Array.from(data) } }),
+    listSystemFonts: () => invoke("list_system_fonts"),
+    readSystemFont: async (path, faceIndex) => {
+      const result = await invoke<{ data: string }>("read_system_font", { path, faceIndex });
+      return { data: decodeBase64(result.data) };
+    },
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: async (theme) => {
       await currentWindow.setTheme(theme === "system" ? null : theme);
       await invoke("set_tray_theme", { theme });
     },
+    startDragging: () => currentWindow.startDragging(),
+    startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showGalleryWindow: () => invoke("show_gallery_window"),
     showPreferencesWindow: () => invoke("show_preferences_window"),
@@ -159,13 +183,26 @@ if ("__TAURI_INTERNALS__" in window) {
     selectImages: async () => [],
     readImagesFromPaths: async () => [],
     selectFolder: async () => null,
+    suggestScreenshotFolder: async () => null,
+    exportImages: async () => ({ ok: true, paths: [] }),
     startWatcher: async () => ({ ok: true }),
     stopWatcher: async () => ({ ok: true }),
     getWatcherState: async () => ({ active: false }),
     quickCompressPaths: async () => [],
     revealPath: noop,
+    uploadImage: async () => ({ url: "", remotePath: "" }),
+    loadUploadProfile: async () => null,
+    saveUploadProfile: noop,
+    loadAppProfile: async () => null,
+    saveAppProfile: noop,
+    loadImportedFonts: async () => [],
+    saveImportedFont: noop,
+    listSystemFonts: async () => [],
+    readSystemFont: async () => ({ data: new Uint8Array() }),
     updateDesktopPreferences: noop,
     setWindowTheme: noop,
+    startDragging: noop,
+    startResizeDragging: noop,
     showMainWindow: noop,
     showGalleryWindow: noop,
     showPreferencesWindow: noop,

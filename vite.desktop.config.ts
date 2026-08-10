@@ -4,7 +4,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: "desktop",
   base: "./",
-  publicDir: false,
+  publicDir: "../public",
   plugins: [react()],
   server: {
     port: 1420,
