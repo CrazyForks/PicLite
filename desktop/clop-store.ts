@@ -33,7 +33,8 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   watchFolders: [],
   pauseAutomaticOptimisations: false,
   preset: {
-    quality: 82,
+    mode: "auto",
+    quality: 86,
     scale: 100,
     format: "keep",
     stripMetadata: true,
@@ -49,6 +50,7 @@ export function loadSettings(): DesktopSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Partial<DesktopSettings>;
     const preset = { ...DEFAULT_SETTINGS.preset, ...(parsed.preset || {}) } as OptimisationPreset;
+    if (preset.mode !== "manual") preset.mode = "auto";
     if (!validFormat(preset.format)) preset.format = "keep";
     return {
       ...DEFAULT_SETTINGS,
@@ -98,4 +100,3 @@ export function formatBytes(value?: number) {
 export function fileName(path: string) {
   return path.split(/[\\/]/).pop() || path;
 }
-

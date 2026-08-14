@@ -5,6 +5,7 @@ export type FilePlacement = "same-folder" | "fixed-folder";
 export type ImageFormat = "keep" | "jpeg" | "png" | "webp";
 
 export type OptimisationPreset = {
+  mode: "auto" | "manual";
   quality: number;
   scale: number;
   format: ImageFormat;
@@ -45,6 +46,7 @@ export type DesktopSettings = {
 };
 
 export type QuickCompressSettings = {
+  mode?: "auto" | "balanced" | "small" | "lossless" | "manual";
   quality: number;
   scale: number;
   format: string;

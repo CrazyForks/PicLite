@@ -7,6 +7,9 @@ import type { DesktopSettings, ImageFormat, Language, OptimisationPreset, PicLit
 type ResultItem = QuickCompressResult & {
   id: string;
   preview?: string;
+  width?: number;
+  height?: number;
+  history?: ResultItem[];
   status: "working" | "done" | "error";
 };
 
@@ -43,10 +46,12 @@ function percentage(item: QuickCompressResult) {
 }
 
 function nativeSettings(settings: DesktopSettings) {
+  const automatic = settings.preset.mode === "auto";
   return {
-    quality: settings.preset.quality,
-    scale: settings.preset.scale,
-    format: toNativeFormat(settings.preset.format),
+    mode: automatic ? "auto" : "manual",
+    quality: automatic ? 86 : settings.preset.quality,
+    scale: automatic ? 100 : settings.preset.scale,
+    format: automatic ? "keep" : toNativeFormat(settings.preset.format),
     stripMetadata: settings.preset.stripMetadata,
     preventLarger: settings.preset.preventLarger,
     exportMode: settings.filePlacement,
@@ -61,12 +66,24 @@ async function attachPreviews(items: ResultItem[], api: PicLiteBridge) {
   try {
     const images = await api.readImagesFromPaths(paths);
     const byPath = new Map(images.map((image) => [image.path, image]));
-    return items.map((item) => {
+    const withPreviews = items.map((item) => {
       const image = item.output ? byPath.get(item.output) : undefined;
       if (!image) return item;
-      const preview = URL.createObjectURL(new Blob([image.data.slice().buffer as ArrayBuffer], { type: image.type }));
+      const blob = new Blob([image.data.slice().buffer as ArrayBuffer], { type: image.type });
+      const preview = URL.createObjectURL(blob);
       return { ...item, preview };
     });
+    return await Promise.all(withPreviews.map(async (item) => {
+      if (!item.preview) return item;
+      try {
+        const bitmap = await createImageBitmap(await (await fetch(item.preview)).blob());
+        const detailed = { ...item, width: bitmap.width, height: bitmap.height };
+        bitmap.close();
+        return detailed;
+      } catch {
+        return item;
+      }
+    }));
   } catch {
     return items;
   }
@@ -106,10 +123,11 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     try {
       const [output] = await api.quickCompressPaths([source], nativeSettings(effectiveSettings));
       if (!output) throw new Error(tr(settings.language, "没有生成压缩结果", "No optimised result was created"));
-      const [finished] = await attachPreviews([{ ...output, id: item.id, status: output.error ? "error" : "done" }], api);
+      const snapshot: ResultItem = { ...item, history: undefined };
+      const [next] = await attachPreviews([{ ...output, id: item.id, status: output.error ? "error" : "done" }], api);
+      const finished = { ...next, history: [...(item.history || []), snapshot] };
       setResults((current) => current.map((candidate) => {
         if (candidate.id !== item.id) return candidate;
-        if (candidate.preview && candidate.preview !== finished.preview) URL.revokeObjectURL(candidate.preview);
         return finished;
       }));
     } catch (error) {
@@ -156,46 +174,66 @@ function CornerDropTarget({ api }: { api: PicLiteBridge }) {
   return <main className="corner-drop-root"><DropSurface language={settings.language} active={active} compact /></main>;
 }
 
-function ResultActions({ item, api, settings, onDownscale, onReoptimise }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onReoptimise: () => void }) {
+function ResultActions({ item, api, settings, onDownscale, onUndo, onToggleControls }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onUndo: () => void; onToggleControls: () => void }) {
   const language = settings.language;
   const copy = async () => {
     if (item.output) await api.copyImagePath(item.output);
   };
   return <div className="result-actions">
     <button title={tr(language, "再缩小一半", "Downscale by half again")} onClick={onDownscale}><Icon name="minus" /></button>
-    <button title={tr(language, "按当前参数重新优化", "Optimise again")} onClick={onReoptimise}><Icon name="sliders" /></button>
-    <button title={tr(language, "预览", "Quick Look")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="eye" /></button>
-    <button title={tr(language, "在文件夹中显示", "Show in folder")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="folder" /></button>
+    <button disabled={!item.history?.length} title={tr(language, "撤销上一次压缩", "Undo last optimisation")} onClick={onUndo}><Icon name="undo" /></button>
+    <button title={tr(language, "调整参数", "Adjust parameters")} onClick={onToggleControls}><Icon name="sliders" /></button>
     <button title={tr(language, "复制优化结果", "Copy optimised result")} onClick={() => void copy()}><Icon name="copy" /></button>
+    <button title={tr(language, "预览结果", "Quick Look")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="eye" /></button>
+    <button title={tr(language, "在文件夹中显示", "Show in folder")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="folder" /></button>
   </div>;
 }
 
-function ResultCard({ item, api, settings, remove, downscale, reoptimise }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; remove: () => void; downscale: () => void; reoptimise: () => void }) {
-  const saved = percentage(item);
-  return <article className={`result-card ${settings.floatingLayout} ${item.status}`}>
-    <div className="result-preview">{item.preview ? <img src={item.preview} alt="" /> : <Icon name={item.status === "working" ? "spark" : "image"} />}</div>
-    <div className="result-body">
-      <div className="result-title"><strong title={fileName(item.source)}>{fileName(item.source)}</strong><span className="format-chip">{fileName(item.output || item.source).split(".").pop()?.toUpperCase()}</span></div>
-      {item.status === "working" ? <><span className="result-state"><T language={settings.language} zh="正在优化…" en="Optimising…" /></span><div className="progress"><i /></div></> : item.error ? <span className="result-error">{item.error}</span> : <>
-        <div className="result-metrics"><b>{formatBytes(item.originalBytes)}</b><span>→</span><b>{formatBytes(item.outputBytes)}</b>{saved != null && <em className={saved < 0 ? "bad" : ""}>{saved > 0 ? `−${saved}%` : saved === 0 ? "0%" : `+${Math.abs(saved)}%`}</em>}</div>
-        <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onReoptimise={reoptimise} />
-      </>}
-    </div>
-    <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={remove}><Icon name="close" /></button>
-  </article>;
+function resultFormat(item: ResultItem) {
+  const extension = fileName(item.output || item.source).split(".").pop()?.toLowerCase();
+  return extension === "jpg" ? "jpeg" : extension;
 }
 
-function FormatBar({ settings, update }: { settings: DesktopSettings; update: (format: ImageFormat) => void }) {
+function FormatBar({ value, update }: { value?: string; update: (format: ImageFormat) => void }) {
   return <div className="format-bar">
-    {(["keep", "jpeg", "webp", "png"] as ImageFormat[]).map((format) => <button key={format} className={settings.preset.format === format ? "active" : ""} onClick={() => update(format)}>{format === "keep" ? "AUTO" : format.toUpperCase()}</button>)}
+    {(["keep", "jpeg", "webp", "png"] as ImageFormat[]).map((format) => <button key={format} className={(format === "keep" ? value === "auto" : value === format) ? "active" : ""} onClick={(event) => { event.stopPropagation(); update(format); }}>{format === "keep" ? "AUTO" : format.toUpperCase()}</button>)}
   </div>;
+}
+
+function ResultCard({ item, api, settings, active, controlsOpen, remove, select, downscale, undo, toggleControls, updateFormat, updateManual }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; controlsOpen: boolean; remove: () => void; select: () => void; downscale: () => void; undo: () => void; toggleControls: () => void; updateFormat: (format: ImageFormat) => void; updateManual: (value: Partial<OptimisationPreset>) => void }) {
+  const saved = percentage(item);
+  const format = resultFormat(item);
+  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select}>
+    <div className="result-preview">
+      {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
+      <div className="result-overlay">
+        <strong className="result-name" title={fileName(item.source)}>{fileName(item.source)}</strong>
+        {item.status === "working" ? <><span className="result-state"><T language={settings.language} zh="正在自动选择最优结果…" en="Choosing the best result…" /></span><div className="progress"><i /></div></> : item.error ? <span className="result-error">{item.error}</span> : <>
+          <div className="result-metrics"><b>{formatBytes(item.originalBytes)}</b><span>→</span><b>{formatBytes(item.outputBytes)}</b>{saved != null && <em className={saved < 0 ? "bad" : ""}>{saved > 0 ? `−${saved}%` : saved === 0 ? "0%" : `+${Math.abs(saved)}%`}</em>}</div>
+          {(item.width && item.height) ? <small className="result-dimensions"><Icon name="image" /> {item.width.toLocaleString()} × {item.height.toLocaleString()}</small> : null}
+          <FormatBar value={settings.preset.mode === "auto" && item.keptOriginal ? "auto" : format} update={updateFormat} />
+        </>}
+      </div>
+    </div>
+    <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
+    {active && item.status === "done" && <section className="result-control-deck" onClick={(event) => event.stopPropagation()}>
+      <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onUndo={undo} onToggleControls={toggleControls} />
+      {controlsOpen && <div className="result-parameters">
+        <label><span><T language={settings.language} zh="画质" en="Quality" /></span><b>{settings.preset.quality}%</b><input type="range" min="30" max="100" value={settings.preset.quality} onChange={(event) => updateManual({ mode: "manual", quality: Number(event.target.value) })} /></label>
+        <label><span><T language={settings.language} zh="尺寸" en="Scale" /></span><b>{settings.preset.scale}%</b><input type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => updateManual({ mode: "manual", scale: Number(event.target.value) })} /></label>
+      </div>}
+    </section>}
+  </article>;
 }
 
 function FloatingResults({ api }: { api: PicLiteBridge }) {
   const [settings, setSettings] = useDesktopSettings();
   const { results, setResults, optimise, reoptimise, remove, clear, working } = useOptimiser(api, settings);
   const [dragging, setDragging] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [controlsId, setControlsId] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
+  const parameterTimer = useRef<number | null>(null);
 
   const handlePending = useCallback(async () => {
     const paths = await api.takePendingCornerDrop();
@@ -203,7 +241,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   }, [api, optimise]);
 
   useEffect(() => {
-    void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 420 : 360, settings.floatingLayout === "compact" ? 320 : 520);
+    void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 390 : 370, settings.floatingLayout === "compact" ? 440 : 590);
   }, [api, settings.floatingLayout]);
   useEffect(() => api.onCornerDrop(() => void handlePending()), [api, handlePending]);
   useEffect(() => { void handlePending(); }, [handlePending]);
@@ -237,11 +275,15 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     void api.readClipboardImage().then(async (image) => {
       if (!image) return;
       const path = await api.cacheImageData(image.data, `clipboard-${Date.now()}.png`);
-      if (action === "optimise_clipboard_aggressive") setSettings((current) => ({ ...current, preset: { ...current.preset, quality: 45 } }));
-      if (action === "downscale_clipboard") setSettings((current) => ({ ...current, preset: { ...current.preset, scale: Math.max(10, Math.round(current.preset.scale / 2)) } }));
-      await optimise([path], !settings.keepClipboardResults);
+      const overrides: Partial<OptimisationPreset> = action === "optimise_clipboard_aggressive"
+        ? { mode: "manual", quality: 45 }
+        : action === "downscale_clipboard"
+          ? { mode: "manual", scale: Math.max(10, Math.round(settings.preset.scale / 2)) }
+          : {};
+      if (Object.keys(overrides).length) setSettings((current) => ({ ...current, preset: { ...current.preset, ...overrides } }));
+      await optimise([path], !settings.keepClipboardResults, overrides);
     });
-  }), [api, optimise, setSettings, settings.keepClipboardResults]);
+  }), [api, optimise, setSettings, settings.keepClipboardResults, settings.preset.scale]);
   useEffect(() => {
     if (!settings.autoHideResults || !results.length || working) return;
     if (timer.current) window.clearTimeout(timer.current);
@@ -249,15 +291,29 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     return () => { if (timer.current) window.clearTimeout(timer.current); };
   }, [api, results.length, settings.autoHideResults, settings.autoHideSeconds, working]);
 
-  const updateFormat = async (format: ImageFormat) => {
-    setSettings((current) => ({ ...current, preset: { ...current.preset, format } }));
-    for (const item of results.filter((candidate) => candidate.status === "done")) await reoptimise(item, { format, preventLarger: false });
+  const updateFormat = async (item: ResultItem, format: ImageFormat) => {
+    setSettings((current) => ({ ...current, preset: { ...current.preset, mode: format === "keep" ? "auto" : "manual", format, scale: format === "keep" ? 100 : current.preset.scale } }));
+    await reoptimise(item, { mode: format === "keep" ? "auto" : "manual", format, scale: format === "keep" ? 100 : settings.preset.scale, preventLarger: format === "keep" });
+  };
+  const undo = (item: ResultItem) => setResults((current) => current.map((candidate) => {
+    if (candidate.id !== item.id || !candidate.history?.length) return candidate;
+    const restored = candidate.history[candidate.history.length - 1];
+    if (candidate.preview && candidate.preview !== restored.preview) URL.revokeObjectURL(candidate.preview);
+    return { ...restored, history: candidate.history.slice(0, -1) };
+  }));
+  const updateManual = (item: ResultItem, value: Partial<OptimisationPreset>) => {
+    setSettings((current) => ({ ...current, preset: { ...current.preset, ...value, mode: "manual" } }));
+    if (parameterTimer.current) window.clearTimeout(parameterTimer.current);
+    parameterTimer.current = window.setTimeout(() => void reoptimise(item, { ...value, mode: "manual", preventLarger: false }), 420);
   };
   return <main className={`floating-results ${settings.floatingLayout}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
     {!results.length ? <button className="floating-empty" onClick={() => void api.showMainWindow()}><DropSurface language={settings.language} active={dragging} /><span><T language={settings.language} zh="点击打开批量优化器" en="Click to open batch optimiser" /></span></button> : <>
-      <div className="floating-list">{results.map((item) => <ResultCard key={item.id} item={item} api={api} settings={settings} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { scale: 50, preventLarger: false })} reoptimise={() => void reoptimise(item, { preventLarger: false })} />)}</div>
+      <div className="floating-list">{results.map((item, index) => {
+        const active = selectedId ? selectedId === item.id : index === 0;
+        return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} controlsOpen={controlsId === item.id} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} toggleControls={() => setControlsId((current) => current === item.id ? null : item.id)} updateFormat={(format) => void updateFormat(item, format)} updateManual={(value) => updateManual(item, value)} />;
+      })}</div>
       <footer className="floating-footer">
-        <FormatBar settings={settings} update={(format) => void updateFormat(format)} />
+        <span className="automatic-badge"><Icon name="spark" /><T language={settings.language} zh="首次自动择优" en="Smart first pass" /></span>
         <div><button title={tr(settings.language, "打开批量优化器", "Open batch optimiser")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="close" /></button>}</div>
       </footer>
     </>}
@@ -342,7 +398,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         inputFolder: settings.watchFolders[0],
         inputFolders: settings.watchFolders,
         outputFolder: settings.filePlacement === "fixed-folder" ? settings.outputFolder : "@same-folder",
-        mode: settings.preset.quality >= 96 ? "lossless" : settings.preset.quality >= 65 ? "balanced" : "small",
+        mode: settings.preset.mode === "auto" ? "balanced" : settings.preset.quality >= 96 ? "lossless" : settings.preset.quality >= 65 ? "balanced" : "small",
         quality: settings.preset.quality,
         scale: settings.preset.scale,
         format: toNativeFormat(settings.preset.format),
@@ -409,9 +465,10 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       </SettingsCard>}
       {section === "images" && <>
         <SettingsCard title={<T language={language} zh="图片优化规则" en="Image optimisation rules" />}>
-          <SettingsRow title={<T language={language} zh="压缩质量" en="Compression quality" />} note={`${settings.preset.quality}%`}><input type="range" min="5" max="100" value={settings.preset.quality} onChange={(event) => patchPreset({ quality: Number(event.target.value) })} /></SettingsRow>
-          <SettingsRow title={<T language={language} zh="缩放" en="Downscale" />} note={`${settings.preset.scale}%`}><input type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => patchPreset({ scale: Number(event.target.value) })} /></SettingsRow>
-          <SettingsRow title={<T language={language} zh="输出格式" en="Output format" />}><Select label="format" value={settings.preset.format} onChange={(value) => patchPreset({ format: value })}><option value="keep">{tr(language, "自动 / 保持原格式", "Auto / Keep original")}</option><option value="jpeg">JPEG</option><option value="webp">WebP</option><option value="png">PNG</option></Select></SettingsRow>
+          <SettingsRow title={<T language={language} zh="智能首次优化" en="Smart first pass" />} note={<T language={language} zh="保持原尺寸，实测高质量原格式、WebP、JPEG/PNG，自动采用最小且有实际收益的结果" en="Keep original dimensions, test high-quality source, WebP and JPEG/PNG candidates, then use the smallest meaningful result" />}><Switch label="automatic optimisation" checked={settings.preset.mode === "auto"} onChange={(value) => patchPreset({ mode: value ? "auto" : "manual", format: value ? "keep" : settings.preset.format, scale: value ? 100 : settings.preset.scale })} /></SettingsRow>
+          <SettingsRow title={<T language={language} zh="压缩质量" en="Compression quality" />} note={settings.preset.mode === "auto" ? tr(language, "自动", "Automatic") : `${settings.preset.quality}%`}><input disabled={settings.preset.mode === "auto"} type="range" min="5" max="100" value={settings.preset.quality} onChange={(event) => patchPreset({ mode: "manual", quality: Number(event.target.value) })} /></SettingsRow>
+          <SettingsRow title={<T language={language} zh="缩放" en="Downscale" />} note={settings.preset.mode === "auto" ? "100%" : `${settings.preset.scale}%`}><input disabled={settings.preset.mode === "auto"} type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => patchPreset({ mode: "manual", scale: Number(event.target.value) })} /></SettingsRow>
+          <SettingsRow title={<T language={language} zh="输出格式" en="Output format" />}><Select label="format" value={settings.preset.mode === "auto" ? "keep" : settings.preset.format} onChange={(value) => patchPreset({ mode: value === "keep" ? "auto" : "manual", format: value, scale: value === "keep" ? 100 : settings.preset.scale })}><option value="keep">{tr(language, "自动择优", "Automatic best format")}</option><option value="jpeg">JPEG</option><option value="webp">WebP</option><option value="png">PNG</option></Select></SettingsRow>
         </SettingsCard>
         <SettingsCard title={<T language={language} zh="监测路径" en="Watch paths" />} note={watchStatus || <T language={language} zh="图片出现在这些目录时自动优化" en="Optimise images as they appear in these folders" />}>
           <div className="watch-list">{settings.watchFolders.length ? settings.watchFolders.map((path) => <div key={path}><Icon name="folder" /><span>{path}</span><button onClick={() => patch("watchFolders", settings.watchFolders.filter((item) => item !== path))}><Icon name="minus" /></button></div>) : <p><T language={language} zh="尚未添加监测目录" en="No watched folders" /></p>}</div>
@@ -431,7 +488,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="布局" en="Layout" />}><div className="segmented"><button className={settings.floatingLayout === "compact" ? "active" : ""} onClick={() => patch("floatingLayout", "compact")}>{tr(language, "紧凑", "Compact")}</button><button className={settings.floatingLayout === "full" ? "active" : ""} onClick={() => patch("floatingLayout", "full")}>{tr(language, "完整", "Full")}</button></div></SettingsRow>
         <SettingsRow title={<T language={language} zh="自动隐藏" en="Auto hide" />}><Switch label="hide" checked={settings.autoHideResults} onChange={(value) => patch("autoHideResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="结果保留时间" en="Dismiss result after" />}><span className="number-field"><input type="number" min="1" max="300" value={settings.autoHideSeconds} onChange={(event) => patch("autoHideSeconds", Math.max(1, Number(event.target.value)))} /> {tr(language, "秒", "seconds")}</span></SettingsRow>
-        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done" }} api={api} settings={settings} remove={() => undefined} downscale={() => undefined} reoptimise={() => undefined} /></div>
+        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active controlsOpen={false} select={() => undefined} remove={() => undefined} downscale={() => undefined} undo={() => undefined} toggleControls={() => undefined} updateFormat={() => undefined} updateManual={() => undefined} /></div>
       </SettingsCard>}
       {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />}><SettingsRow title={<T language={language} zh="优化剪贴板" en="Optimise clipboard" />}><kbd>{api.platform === "darwin" ? "⌥⌘C" : "Ctrl+Alt+C"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="激进优化" en="Optimise aggressively" />}><kbd>{api.platform === "darwin" ? "⌥⌘A" : "Ctrl+Alt+A"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="缩小剪贴板图片" en="Downscale clipboard image" />}><kbd>{api.platform === "darwin" ? "⌥⌘−" : "Ctrl+Alt+-"}</kbd></SettingsRow><SettingsRow title="Quick Look"><kbd>{api.platform === "darwin" ? "⌥⌘Space" : "Ctrl+Alt+Space"}</kbd></SettingsRow></SettingsCard>}
       {section === "updates" && <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>}

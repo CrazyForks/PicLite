@@ -150,6 +150,8 @@ struct GithubRelease {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QuickCompressSettings {
+    #[serde(default = "default_manual_mode")]
+    mode: String,
     quality: u8,
     scale: f64,
     format: String,
@@ -192,6 +194,10 @@ struct WatcherSettings {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_manual_mode() -> String {
+    "manual".to_string()
 }
 
 #[derive(Serialize)]
@@ -461,6 +467,15 @@ fn guarded_quality_steps(quality: u8) -> Vec<u8> {
     steps
 }
 
+fn has_meaningful_savings(original: usize, candidate: usize) -> bool {
+    if candidate >= original {
+        return false;
+    }
+    let saved = original - candidate;
+    let minimum_bytes = if original < 32 * 1024 { 96 } else { 256 };
+    saved >= minimum_bytes && candidate.saturating_mul(100) <= original.saturating_mul(98)
+}
+
 fn encode_gif(original: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, String> {
     let decoder = GifDecoder::new(BufReader::new(Cursor::new(original)))
         .map_err(|error| error.to_string())?;
@@ -559,13 +574,22 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
                 for quality in guarded_quality_steps(settings.quality) {
                     let guarded = encode_gif(&original, target_width, target_height, quality)?;
                     if guarded.len() < original.len() {
-                        return Ok(OptimizedImage { bytes: guarded, extension: source_extension });
+                        return Ok(OptimizedImage {
+                            bytes: guarded,
+                            extension: source_extension,
+                        });
                     }
                 }
             }
-            return Ok(OptimizedImage { bytes: original, extension: source_extension });
+            return Ok(OptimizedImage {
+                bytes: original,
+                extension: source_extension,
+            });
         }
-        return Ok(OptimizedImage { bytes: candidate, extension: source_extension });
+        return Ok(OptimizedImage {
+            bytes: candidate,
+            extension: source_extension,
+        });
     }
 
     let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
@@ -575,41 +599,83 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
         // of format/quality/scale candidates and pick the smallest real file,
         // while retaining PNG/WebP alpha by never forcing JPEG conversion.
         let quality_stops: Vec<u8> = if settings.mode == "balanced" {
-            vec![settings.quality.min(86), settings.quality.min(81), settings.quality.min(77)]
+            vec![90, settings.quality.clamp(82, 88), 82]
         } else {
-            vec![settings.quality.min(68), settings.quality.min(58), settings.quality.min(46)]
+            vec![
+                settings.quality.min(68),
+                settings.quality.min(58),
+                settings.quality.min(46),
+            ]
         };
         let scale_stops: Vec<f64> = if settings.mode == "balanced" {
-            vec![settings.scale, settings.scale.min(96.0), settings.scale.min(92.0)]
+            // The first automatic pass must not silently reduce resolution.
+            // Downscaling remains an explicit/repeatable action in the result card.
+            vec![100.0]
         } else {
-            vec![settings.scale.min(88.0), settings.scale.min(80.0), settings.scale.min(72.0)]
+            vec![
+                settings.scale.min(88.0),
+                settings.scale.min(80.0),
+                settings.scale.min(72.0),
+            ]
         };
         let source_supported = matches!(source_extension.as_str(), "jpg" | "jpeg" | "png" | "webp");
-        let mut formats = vec![if source_supported { source_extension.clone() } else { "webp".to_string() }];
+        let mut formats = vec![if source_supported {
+            source_extension.clone()
+        } else {
+            "webp".to_string()
+        }];
         if !formats.iter().any(|format| format == "webp") {
             formats.push("webp".to_string());
         }
+        let has_alpha = decoded
+            .to_rgba8()
+            .pixels()
+            .any(|pixel| pixel.0[3] != u8::MAX);
+        let fallback = if has_alpha { "png" } else { "jpg" };
+        if !formats
+            .iter()
+            .any(|format| format == fallback || (fallback == "jpg" && format == "jpeg"))
+        {
+            formats.push(fallback.to_string());
+        }
         let mut best: Option<OptimizedImage> = None;
         for output_extension in formats {
-            for (index, quality) in quality_stops.iter().enumerate() {
-                let mut candidate_settings = settings.clone();
-                candidate_settings.quality = (*quality).max(1);
-                candidate_settings.scale = scale_stops[index].clamp(0.1, 100.0);
-                let (candidate_width, candidate_height) = target_dimensions(width, height, &candidate_settings);
-                let resized = if candidate_width != width || candidate_height != height {
-                    decoded.resize_exact(candidate_width, candidate_height, FilterType::Lanczos3)
-                } else {
-                    decoded.clone()
-                };
-                let bytes = encode_static(resized, &output_extension, candidate_settings.quality)?;
-                if best.as_ref().is_none_or(|current| bytes.len() < current.bytes.len()) {
-                    best = Some(OptimizedImage { bytes, extension: output_extension.clone() });
+            for quality in &quality_stops {
+                for scale in &scale_stops {
+                    let mut candidate_settings = settings.clone();
+                    candidate_settings.quality = (*quality).max(1);
+                    candidate_settings.scale = scale.clamp(0.1, 100.0);
+                    let (candidate_width, candidate_height) =
+                        target_dimensions(width, height, &candidate_settings);
+                    let resized = if candidate_width != width || candidate_height != height {
+                        decoded.resize_exact(
+                            candidate_width,
+                            candidate_height,
+                            FilterType::Lanczos3,
+                        )
+                    } else {
+                        decoded.clone()
+                    };
+                    let bytes =
+                        encode_static(resized, &output_extension, candidate_settings.quality)?;
+                    if best
+                        .as_ref()
+                        .is_none_or(|current| bytes.len() < current.bytes.len())
+                    {
+                        best = Some(OptimizedImage {
+                            bytes,
+                            extension: output_extension.clone(),
+                        });
+                    }
                 }
             }
         }
         let best = best.ok_or_else(|| "未生成可用的智能优化结果".to_string())?;
-        if settings.prevent_larger && best.bytes.len() >= original.len() {
-            return Ok(OptimizedImage { bytes: original, extension: source_extension });
+        if settings.prevent_larger && !has_meaningful_savings(original.len(), best.bytes.len()) {
+            return Ok(OptimizedImage {
+                bytes: original,
+                extension: source_extension,
+            });
         }
         return Ok(best);
     }
@@ -627,15 +693,24 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
     if settings.prevent_larger && candidate.len() >= original.len() {
         if visual_transform {
             for quality in guarded_quality_steps(settings.quality) {
-                    let guarded = encode_static(resized.clone(), &output_extension, quality)?;
-                    if guarded.len() < original.len() {
-                        return Ok(OptimizedImage { bytes: guarded, extension: output_extension });
-                    }
+                let guarded = encode_static(resized.clone(), &output_extension, quality)?;
+                if guarded.len() < original.len() {
+                    return Ok(OptimizedImage {
+                        bytes: guarded,
+                        extension: output_extension,
+                    });
                 }
             }
-        return Ok(OptimizedImage { bytes: original, extension: source_extension });
+        }
+        return Ok(OptimizedImage {
+            bytes: original,
+            extension: source_extension,
+        });
     }
-    Ok(OptimizedImage { bytes: candidate, extension: output_extension })
+    Ok(OptimizedImage {
+        bytes: candidate,
+        extension: output_extension,
+    })
 }
 
 #[cfg(test)]
@@ -744,16 +819,21 @@ fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
 }
 
 fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
+    let inferred_mode = if value.quality >= 96 {
+        "lossless"
+    } else if value.quality >= 65 {
+        "balanced"
+    } else {
+        "small"
+    };
     WatcherSettings {
         input_folder: String::new(),
         input_folders: Vec::new(),
         output_folder: String::new(),
-        mode: if value.quality >= 96 {
-            "lossless".to_string()
-        } else if value.quality >= 65 {
-            "balanced".to_string()
-        } else {
-            "small".to_string()
+        mode: match value.mode.as_str() {
+            "auto" => "balanced".to_string(),
+            "balanced" | "small" | "lossless" => value.mode.clone(),
+            _ => inferred_mode.to_string(),
         },
         quality: value.quality.clamp(1, 100),
         scale: value.scale.clamp(0.1, 100.0),
@@ -3019,6 +3099,58 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_first_pass_keeps_dimensions_and_selects_a_smaller_format() {
+        let mut pixels = image::RgbImage::new(640, 360);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            let noise = ((x * 17 + y * 31 + (x * y) % 251) % 256) as u8;
+            *pixel = image::Rgb([
+                noise,
+                noise.wrapping_add((x % 93) as u8),
+                noise.wrapping_add((y % 71) as u8),
+            ]);
+        }
+        let original = encode_static(DynamicImage::ImageRgb8(pixels), "png", 100)
+            .expect("encode source png");
+        let path = std::env::temp_dir().join(format!(
+            "piclite-auto-first-pass-{}-{}.png",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::write(&path, &original).expect("write source png");
+        let settings = WatcherSettings {
+            input_folder: String::new(),
+            input_folders: Vec::new(),
+            output_folder: String::new(),
+            mode: "balanced".to_string(),
+            quality: 86,
+            scale: 100.0,
+            format: "keep".to_string(),
+            resize: false,
+            max_width: u32::MAX,
+            max_height: u32::MAX,
+            strip_metadata: true,
+            prevent_larger: true,
+        };
+
+        let optimized = optimize_image(&path, &settings).expect("automatic optimisation");
+        let dimensions = image::load_from_memory(&optimized.bytes)
+            .expect("decode automatic result")
+            .dimensions();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(dimensions, (640, 360));
+        assert!(optimized.bytes.len() < original.len());
+        assert!(matches!(optimized.extension.as_str(), "jpg" | "webp" | "png"));
+    }
+
+    #[test]
+    fn automatic_first_pass_rejects_cosmetic_savings() {
+        assert!(!has_meaningful_savings(10_000, 9_950));
+        assert!(!has_meaningful_savings(100_000, 98_100));
+        assert!(has_meaningful_savings(100_000, 97_900));
+    }
 
     #[test]
     fn webp_quality_controls_lossy_output_size() {
