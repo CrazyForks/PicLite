@@ -198,7 +198,7 @@ if ("__TAURI_INTERNALS__" in window) {
     setAlwaysOnTop: noop,
     hideCurrentWindow: noop,
     quitApplication: noop,
-    checkForUpdates: async () => ({ currentVersion: "0.13.7", latestVersion: "0.13.7", available: false, releaseUrl: "" }),
+    checkForUpdates: async () => ({ currentVersion: "0.13.8", latestVersion: "0.13.8", available: false, releaseUrl: "" }),
     openExternal: noop,
     onFileDrop: () => () => undefined,
     onTrayAction: () => () => undefined,

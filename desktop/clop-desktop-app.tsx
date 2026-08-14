@@ -188,7 +188,7 @@ function FormatBar({ value, update }: { value?: string; update: (format: ImageFo
   </div>;
 }
 
-function ResultCard({ item, api, settings, active, controlsOpen, remove, select, downscale, undo, toggleControls, updateFormat, updateManual }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; controlsOpen: boolean; remove: () => void; select: () => void; downscale: () => void; undo: () => void; toggleControls: () => void; updateFormat: (format: ImageFormat) => void; updateManual: (value: Partial<OptimisationPreset>) => void }) {
+function ResultCard({ item, api, settings, active, remove, select, downscale, undo, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; remove: () => void; select: () => void; downscale: () => void; undo: () => void; updateFormat: (format: ImageFormat) => void }) {
   const saved = percentage(item);
   const format = resultFormat(item);
   const startWindowDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -196,7 +196,7 @@ function ResultCard({ item, api, settings, active, controlsOpen, remove, select,
     event.preventDefault();
     void api.startDragging();
   };
-  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""} ${controlsOpen ? "controls-open" : ""}`} onClick={select}>
+  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select}>
     <div className="result-preview" onPointerDown={startWindowDrag}>
       {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
       <div className="result-overlay">
@@ -210,13 +210,8 @@ function ResultCard({ item, api, settings, active, controlsOpen, remove, select,
       {item.status === "done" && <div className="result-hover-actions" onClick={(event) => event.stopPropagation()}>
         <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onUndo={undo} />
       </div>}
-      {controlsOpen && item.status === "done" && <div className="result-parameters" onClick={(event) => event.stopPropagation()}>
-        <label><span><T language={settings.language} zh="画质" en="Quality" /></span><b>{settings.preset.quality}%</b><input type="range" min="30" max="100" value={settings.preset.quality} onChange={(event) => updateManual({ mode: "manual", quality: Number(event.target.value) })} /></label>
-        <label><span><T language={settings.language} zh="尺寸" en="Scale" /></span><b>{settings.preset.scale}%</b><input type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => updateManual({ mode: "manual", scale: Number(event.target.value) })} /></label>
-      </div>}
     </div>
     <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
-    {item.status === "done" && <button className="result-controls-toggle" title={tr(settings.language, "调整参数", "Adjust parameters")} aria-pressed={controlsOpen} onClick={(event) => { event.stopPropagation(); toggleControls(); }}><Icon name="sliders" /></button>}
   </article>;
 }
 
@@ -225,9 +220,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const { results, setResults, optimise, reoptimise, remove, clear, working } = useOptimiser(api, settings);
   const [dragging, setDragging] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [controlsId, setControlsId] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
-  const parameterTimer = useRef<number | null>(null);
 
   useEffect(() => {
     void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 360 : 380, settings.floatingLayout === "compact" ? 300 : 350);
@@ -288,16 +281,11 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     if (candidate.preview && candidate.preview !== restored.preview) URL.revokeObjectURL(candidate.preview);
     return { ...restored, history: candidate.history.slice(0, -1) };
   }));
-  const updateManual = (item: ResultItem, value: Partial<OptimisationPreset>) => {
-    setSettings((current) => ({ ...current, preset: { ...current.preset, ...value, mode: "manual" } }));
-    if (parameterTimer.current) window.clearTimeout(parameterTimer.current);
-    parameterTimer.current = window.setTimeout(() => void reoptimise(item, { ...value, mode: "manual", preventLarger: false }), 420);
-  };
   return <main className={`floating-results ${settings.floatingLayout}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
     {!results.length ? <button className="floating-empty" onClick={() => void api.showMainWindow()}><DropSurface language={settings.language} active={dragging} /><span><T language={settings.language} zh="点击打开完整工作台" en="Click to open the full workbench" /></span></button> : <>
       <div className="floating-list">{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
-        return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} controlsOpen={controlsId === item.id} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} toggleControls={() => setControlsId((current) => current === item.id ? null : item.id)} updateFormat={(format) => void updateFormat(item, format)} updateManual={(value) => updateManual(item, value)} />;
+        return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} />;
       })}</div>
       <footer className="floating-footer">
         <span className="automatic-badge"><Icon name="spark" /><T language={settings.language} zh="首次自动择优" en="Smart first pass" /></span>
@@ -474,7 +462,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="布局" en="Layout" />}><div className="segmented"><button className={settings.floatingLayout === "compact" ? "active" : ""} onClick={() => patch("floatingLayout", "compact")}>{tr(language, "紧凑", "Compact")}</button><button className={settings.floatingLayout === "full" ? "active" : ""} onClick={() => patch("floatingLayout", "full")}>{tr(language, "完整", "Full")}</button></div></SettingsRow>
         <SettingsRow title={<T language={language} zh="自动隐藏" en="Auto hide" />}><Switch label="hide" checked={settings.autoHideResults} onChange={(value) => patch("autoHideResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="结果保留时间" en="Dismiss result after" />}><span className="number-field"><input type="number" min="1" max="300" value={settings.autoHideSeconds} onChange={(event) => patch("autoHideSeconds", Math.max(1, Number(event.target.value)))} /> {tr(language, "秒", "seconds")}</span></SettingsRow>
-        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active controlsOpen={false} select={() => undefined} remove={() => undefined} downscale={() => undefined} undo={() => undefined} toggleControls={() => undefined} updateFormat={() => undefined} updateManual={() => undefined} /></div>
+        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active select={() => undefined} remove={() => undefined} downscale={() => undefined} undo={() => undefined} updateFormat={() => undefined} /></div>
       </SettingsCard>}
       {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />}><SettingsRow title={<T language={language} zh="优化剪贴板" en="Optimise clipboard" />}><kbd>{api.platform === "darwin" ? "⌥⌘C" : "Ctrl+Alt+C"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="激进优化" en="Optimise aggressively" />}><kbd>{api.platform === "darwin" ? "⌥⌘A" : "Ctrl+Alt+A"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="缩小剪贴板图片" en="Downscale clipboard image" />}><kbd>{api.platform === "darwin" ? "⌥⌘−" : "Ctrl+Alt+-"}</kbd></SettingsRow><SettingsRow title="Quick Look"><kbd>{api.platform === "darwin" ? "⌥⌘Space" : "Ctrl+Alt+Space"}</kbd></SettingsRow></SettingsCard>}
       {section === "updates" && <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>}
