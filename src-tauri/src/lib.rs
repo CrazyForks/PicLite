@@ -2712,7 +2712,7 @@ async fn get_watcher_state(state: State<'_, DesktopState>) -> Result<WatcherStat
 
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let preferences = MenuItem::with_id(app, "preferences", "设置…", true, None::<&str>)?;
-    let batch = MenuItem::with_id(app, "show", "批量优化器", true, None::<&str>)?;
+    let batch = MenuItem::with_id(app, "show", "完整工作台", true, None::<&str>)?;
     let launch = MenuItem::with_id(app, "launch_at_login", "登录时启动", true, None::<&str>)?;
 
     let optimise = MenuItem::with_id(app, "optimise_clipboard", "优化", true, None::<&str>)?;

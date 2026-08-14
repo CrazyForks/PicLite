@@ -307,14 +307,14 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     parameterTimer.current = window.setTimeout(() => void reoptimise(item, { ...value, mode: "manual", preventLarger: false }), 420);
   };
   return <main className={`floating-results ${settings.floatingLayout}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
-    {!results.length ? <button className="floating-empty" onClick={() => void api.showMainWindow()}><DropSurface language={settings.language} active={dragging} /><span><T language={settings.language} zh="点击打开批量优化器" en="Click to open batch optimiser" /></span></button> : <>
+    {!results.length ? <button className="floating-empty" onClick={() => void api.showMainWindow()}><DropSurface language={settings.language} active={dragging} /><span><T language={settings.language} zh="点击打开完整工作台" en="Click to open the full workbench" /></span></button> : <>
       <div className="floating-list">{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
         return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} controlsOpen={controlsId === item.id} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} toggleControls={() => setControlsId((current) => current === item.id ? null : item.id)} updateFormat={(format) => void updateFormat(item, format)} updateManual={(value) => updateManual(item, value)} />;
       })}</div>
       <footer className="floating-footer">
         <span className="automatic-badge"><Icon name="spark" /><T language={settings.language} zh="首次自动择优" en="Smart first pass" /></span>
-        <div><button title={tr(settings.language, "打开批量优化器", "Open batch optimiser")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="close" /></button>}</div>
+        <div><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="close" /></button>}</div>
       </footer>
     </>}
     <button className="floating-resize-handle" aria-label={tr(settings.language, "调整悬浮窗大小", "Resize floating window")} title={tr(settings.language, "拖动调整大小", "Drag to resize")} onPointerDown={(event) => { event.preventDefault(); void api.startResizeDragging("SouthEast"); }} />
