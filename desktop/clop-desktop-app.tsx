@@ -163,18 +163,7 @@ function DropSurface({ language, active, compact = false }: { language: Language
   </div>;
 }
 
-function CornerDropTarget({ api }: { api: PicLiteBridge }) {
-  const [settings] = useDesktopSettings();
-  const [active, setActive] = useState(false);
-  useEffect(() => api.onFileDrop((event) => {
-    setActive(event.type === "over");
-    if (event.type === "drop" && event.paths?.length) void api.submitCornerDrop(event.paths);
-  }), [api]);
-  if (!settings.enableDropZone) return null;
-  return <main className="corner-drop-root"><DropSurface language={settings.language} active={active} compact /></main>;
-}
-
-function ResultActions({ item, api, settings, onDownscale, onUndo, onToggleControls }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onUndo: () => void; onToggleControls: () => void }) {
+function ResultActions({ item, api, settings, onDownscale, onUndo }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onUndo: () => void }) {
   const language = settings.language;
   const copy = async () => {
     if (item.output) await api.copyImagePath(item.output);
@@ -182,7 +171,6 @@ function ResultActions({ item, api, settings, onDownscale, onUndo, onToggleContr
   return <div className="result-actions">
     <button title={tr(language, "再缩小一半", "Downscale by half again")} onClick={onDownscale}><Icon name="minus" /></button>
     <button disabled={!item.history?.length} title={tr(language, "撤销上一次压缩", "Undo last optimisation")} onClick={onUndo}><Icon name="undo" /></button>
-    <button title={tr(language, "调整参数", "Adjust parameters")} onClick={onToggleControls}><Icon name="sliders" /></button>
     <button title={tr(language, "复制优化结果", "Copy optimised result")} onClick={() => void copy()}><Icon name="copy" /></button>
     <button title={tr(language, "预览结果", "Quick Look")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="eye" /></button>
     <button title={tr(language, "在文件夹中显示", "Show in folder")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="folder" /></button>
@@ -203,8 +191,13 @@ function FormatBar({ value, update }: { value?: string; update: (format: ImageFo
 function ResultCard({ item, api, settings, active, controlsOpen, remove, select, downscale, undo, toggleControls, updateFormat, updateManual }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; controlsOpen: boolean; remove: () => void; select: () => void; downscale: () => void; undo: () => void; toggleControls: () => void; updateFormat: (format: ImageFormat) => void; updateManual: (value: Partial<OptimisationPreset>) => void }) {
   const saved = percentage(item);
   const format = resultFormat(item);
-  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select}>
-    <div className="result-preview">
+  const startWindowDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a")) return;
+    event.preventDefault();
+    void api.startDragging();
+  };
+  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""} ${controlsOpen ? "controls-open" : ""}`} onClick={select}>
+    <div className="result-preview" onPointerDown={startWindowDrag}>
       {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
       <div className="result-overlay">
         <strong className="result-name" title={fileName(item.source)}>{fileName(item.source)}</strong>
@@ -214,15 +207,16 @@ function ResultCard({ item, api, settings, active, controlsOpen, remove, select,
           <FormatBar value={settings.preset.mode === "auto" && item.keptOriginal ? "auto" : format} update={updateFormat} />
         </>}
       </div>
-    </div>
-    <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
-    {active && item.status === "done" && <section className="result-control-deck" onClick={(event) => event.stopPropagation()}>
-      <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onUndo={undo} onToggleControls={toggleControls} />
-      {controlsOpen && <div className="result-parameters">
+      {item.status === "done" && <div className="result-hover-actions" onClick={(event) => event.stopPropagation()}>
+        <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onUndo={undo} />
+      </div>}
+      {controlsOpen && item.status === "done" && <div className="result-parameters" onClick={(event) => event.stopPropagation()}>
         <label><span><T language={settings.language} zh="画质" en="Quality" /></span><b>{settings.preset.quality}%</b><input type="range" min="30" max="100" value={settings.preset.quality} onChange={(event) => updateManual({ mode: "manual", quality: Number(event.target.value) })} /></label>
         <label><span><T language={settings.language} zh="尺寸" en="Scale" /></span><b>{settings.preset.scale}%</b><input type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => updateManual({ mode: "manual", scale: Number(event.target.value) })} /></label>
       </div>}
-    </section>}
+    </div>
+    <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
+    {item.status === "done" && <button className="result-controls-toggle" title={tr(settings.language, "调整参数", "Adjust parameters")} aria-pressed={controlsOpen} onClick={(event) => { event.stopPropagation(); toggleControls(); }}><Icon name="sliders" /></button>}
   </article>;
 }
 
@@ -235,16 +229,9 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const timer = useRef<number | null>(null);
   const parameterTimer = useRef<number | null>(null);
 
-  const handlePending = useCallback(async () => {
-    const paths = await api.takePendingCornerDrop();
-    if (paths.length) await optimise(paths);
-  }, [api, optimise]);
-
   useEffect(() => {
-    void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 390 : 370, settings.floatingLayout === "compact" ? 440 : 590);
+    void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 360 : 380, settings.floatingLayout === "compact" ? 300 : 350);
   }, [api, settings.floatingLayout]);
-  useEffect(() => api.onCornerDrop(() => void handlePending()), [api, handlePending]);
-  useEffect(() => { void handlePending(); }, [handlePending]);
   useEffect(() => api.onFileDrop((event) => {
     setDragging(event.type === "over");
     if (event.type === "drop" && event.paths?.length) void optimise(event.paths);
@@ -475,8 +462,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
           <button className="add-path" onClick={async () => { const path = await api.selectFolder("input"); if (path && !settings.watchFolders.includes(path)) patch("watchFolders", [...settings.watchFolders, path]); }}><Icon name="plus" /><T language={language} zh="添加目录" en="Add folder" /></button>
         </SettingsCard>
       </>}
-      {section === "dropzone" && <SettingsCard title={<T language={language} zh="拖放区" en="Drop zone" />} note={<T language={language} zh="把文件拖到全局区域即可优化" en="Drag files onto a global zone to optimise them" />}>
-        <SettingsRow title={<T language={language} zh="启用拖放区" en="Enable drop zone" />}><Switch label="drop" checked={settings.enableDropZone} onChange={(value) => patch("enableDropZone", value)} /></SettingsRow>
+      {section === "dropzone" && <SettingsCard title={<T language={language} zh="拖放区" en="Drop zone" />} note={<T language={language} zh="把图片拖入悬浮结果窗口即可优化" en="Drop images into the floating results window to optimise them" />}>
         <SettingsRow title={<T language={language} zh="自动复制优化结果" en="Auto copy optimised files" />} note={<T language={language} zh="处理完成后可立即粘贴到其他应用" en="Paste results immediately after optimisation" />}><Switch label="copy" checked={settings.autoCopyDropResults} onChange={(value) => patch("autoCopyDropResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="批量模式阈值" en="Batch mode threshold" />} note={<T language={language} zh="超过此数量时改用批量窗口" en="Use the batch window above this file count" />}><span className="number-field"><input type="number" min="2" max="500" value={settings.batchThreshold} onChange={(event) => patch("batchThreshold", Math.max(2, Number(event.target.value)))} /> {tr(language, "个文件", "files")}</span></SettingsRow>
         <div className="dropzone-demo"><DropSurface language={language} active /></div>
@@ -501,6 +487,5 @@ export function PicLiteDesktopApp() {
   if (!bridge) return <div className="fatal">PicLite desktop bridge is unavailable.</div>;
   if (bridge.windowLabel === "preferences") return <Preferences api={bridge} />;
   if (bridge.windowLabel === "dropzone") return <FloatingResults api={bridge} />;
-  if (bridge.windowLabel === "corner-drop-target") return <CornerDropTarget api={bridge} />;
   return <BatchOptimiser api={bridge} />;
 }

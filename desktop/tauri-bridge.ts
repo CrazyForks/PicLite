@@ -22,7 +22,7 @@ function platformName() {
 if ("__TAURI_INTERNALS__" in window) {
   const currentWindow = getCurrentWindow();
   const currentWebview = getCurrentWebview();
-  document.documentElement.classList.add(["dropzone", "corner-drop-target"].includes(currentWindow.label) ? "dropzone-root" : "desktop-root");
+  document.documentElement.classList.add(currentWindow.label === "dropzone" ? "dropzone-root" : "desktop-root");
   window.picLite = {
     platform: platformName(),
     windowLabel: currentWindow.label,
@@ -81,8 +81,6 @@ if ("__TAURI_INTERNALS__" in window) {
     showGalleryWindow: () => invoke("show_gallery_window"),
     showPreferencesWindow: () => invoke("show_preferences_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
-    submitCornerDrop: (paths) => invoke("submit_corner_drop", { paths }),
-    takePendingCornerDrop: () => invoke("take_pending_corner_drop"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
@@ -102,18 +100,6 @@ if ("__TAURI_INTERNALS__" in window) {
         else unlisten = stop;
       }).catch((error) => {
         if (!disposed) callback({ type: "error", error: error instanceof Error ? error.message : String(error) });
-      });
-      return () => {
-        disposed = true;
-        unlisten?.();
-      };
-    },
-    onCornerDrop: (callback) => {
-      let unlisten: (() => void) | undefined;
-      let disposed = false;
-      void listen("dropzone:paths-ready", () => callback()).then((stop) => {
-        if (disposed) stop();
-        else unlisten = stop;
       });
       return () => {
         disposed = true;
@@ -207,8 +193,6 @@ if ("__TAURI_INTERNALS__" in window) {
     showGalleryWindow: noop,
     showPreferencesWindow: noop,
     showDropzoneWindow: noop,
-    submitCornerDrop: noop,
-    takePendingCornerDrop: async () => [],
     configureDropzoneWindow: noop,
     resizeDropzoneWindow: noop,
     setAlwaysOnTop: noop,
@@ -217,7 +201,6 @@ if ("__TAURI_INTERNALS__" in window) {
     checkForUpdates: async () => ({ currentVersion: "0.13.7", latestVersion: "0.13.7", available: false, releaseUrl: "" }),
     openExternal: noop,
     onFileDrop: () => () => undefined,
-    onCornerDrop: () => () => undefined,
     onTrayAction: () => () => undefined,
     onClipboardImage: () => () => undefined,
     onClipboardPaths: () => () => undefined,

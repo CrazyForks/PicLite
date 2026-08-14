@@ -61,10 +61,6 @@ struct DesktopState {
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
     clipboard_monitor_enabled: AtomicBool,
-    /// File drops can arrive before the hidden result webview has attached its
-    /// event listener. Keep one durable hand-off queue so the drop is never
-    /// lost while the floating window is being shown.
-    pending_corner_drop: Mutex<Vec<String>>,
     /// Timestamp until which clipboard content was written by PicLite itself.
     /// The monitor must record it but must not feed the result back through the
     /// compressor, otherwise a copied result would be compressed repeatedly.
@@ -83,7 +79,6 @@ impl Default for DesktopState {
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
-            pending_corner_drop: Mutex::new(Vec::new()),
             clipboard_ignore_until_ms: AtomicU64::new(0),
         }
     }
@@ -781,20 +776,6 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
     }
 }
 
-fn show_corner_drop_target(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.set_size(LogicalSize::new(96.0, 96.0));
-        let _ = window.show();
-        position_dropzone(&window, 96.0, 96.0);
-    }
-}
-
-fn hide_corner_drop_target(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.hide();
-    }
-}
-
 fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
     if let Some(window) = app.get_webview_window("dropzone") {
         let width = width.clamp(190.0, 520.0);
@@ -967,7 +948,6 @@ async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
-    hide_corner_drop_target(&app);
     if let Some(window) = app.get_webview_window("dropzone") {
         if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
             let logical = size.to_logical::<f64>(monitor.scale_factor());
@@ -976,36 +956,6 @@ async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
     }
     show_window(&app, "dropzone");
     Ok(())
-}
-
-#[tauri::command]
-async fn submit_corner_drop(
-    app: AppHandle,
-    paths: Vec<String>,
-    state: State<'_, DesktopState>,
-) -> Result<(), String> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    *state
-        .pending_corner_drop
-        .lock()
-        .map_err(|_| "拖放队列不可用".to_string())? = paths;
-    hide_corner_drop_target(&app);
-    resize_and_position_dropzone(&app, 420.0, 320.0);
-    show_window(&app, "dropzone");
-    app.emit_to("dropzone", "dropzone:paths-ready", ())
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<String>, String> {
-    let mut pending = state
-        .pending_corner_drop
-        .lock()
-        .map_err(|_| "拖放队列不可用".to_string())?;
-    Ok(std::mem::take(&mut *pending))
 }
 
 #[tauri::command]
@@ -1021,11 +971,8 @@ async fn resize_dropzone_window(app: AppHandle, width: f64, height: f64) -> Resu
 }
 
 #[tauri::command]
-async fn hide_current_window(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+async fn hide_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|error| error.to_string())?;
-    if window.label() == "dropzone" {
-        show_corner_drop_target(&app);
-    }
     Ok(())
 }
 
@@ -2786,7 +2733,6 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
                     action,
                     "optimise_clipboard" | "optimise_clipboard_aggressive" | "downscale_clipboard"
                 ) {
-                    hide_corner_drop_target(app);
                     show_window(app, "dropzone");
                 }
                 let _ = app.emit("tray:action", action.to_string());
@@ -3011,8 +2957,6 @@ pub fn run() {
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
 
             start_clipboard_monitor(app.handle().clone());
-            show_corner_drop_target(app.handle());
-
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -3071,8 +3015,6 @@ pub fn run() {
             show_gallery_window,
             show_preferences_window,
             show_dropzone_window,
-            submit_corner_drop,
-            take_pending_corner_drop,
             configure_dropzone_window,
             resize_dropzone_window,
             hide_current_window,
