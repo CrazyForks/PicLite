@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "piclite"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "arboard",
  "base64 0.22.1",

@@ -24,6 +24,7 @@ jobs:
           - name: Windows ARM64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            node_arch: x64
             bundles: nsis,msi
             artifact: PicLite-Windows-arm64
           - name: macOS Apple Silicon
@@ -53,6 +54,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          architecture: ${{ matrix.node_arch || '' }}
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
