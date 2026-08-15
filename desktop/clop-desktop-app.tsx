@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { Icon } from "./clop-icons";
 import { fileName, formatBytes, loadSettings, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
@@ -45,6 +45,30 @@ function percentage(item: QuickCompressResult) {
   return Math.round((1 - item.outputBytes / item.originalBytes) * 100);
 }
 
+function shortcutFromEvent(event: ReactKeyboardEvent<HTMLButtonElement>) {
+  if (event.key === "Escape") return "escape";
+  if (event.key === "Backspace" || event.key === "Delete") return "";
+  if (["Meta", "Control", "Alt", "Shift"].includes(event.key)) return null;
+  const modifiers: string[] = [];
+  if (event.metaKey || event.ctrlKey) modifiers.push("CommandOrControl");
+  if (event.altKey) modifiers.push("Alt");
+  if (event.shiftKey) modifiers.push("Shift");
+  if (!modifiers.length) return null;
+  const aliases: Record<string, string> = { " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
+  const key = aliases[event.key] || (event.key.length === 1 ? event.key.toUpperCase() : event.key);
+  return [...modifiers, key].join("+");
+}
+
+function shortcutLabel(value: string, platform: string) {
+  if (!value) return "—";
+  return value.split("+").map((part) => part === "CommandOrControl" ? platform === "darwin" ? "⌘" : "Ctrl" : part === "Alt" && platform === "darwin" ? "⌥" : part === "Shift" && platform === "darwin" ? "⇧" : part).join(platform === "darwin" ? " " : " + ");
+}
+
+function cleanupSeconds(settings: DesktopSettings) {
+  const unit = settings.autoCleanupUnit === "hours" ? 3_600 : settings.autoCleanupUnit === "days" ? 86_400 : 2_592_000;
+  return Math.max(1, settings.autoCleanupAmount) * unit;
+}
+
 function nativeSettings(settings: DesktopSettings) {
   const automatic = settings.preset.mode === "auto";
   return {
@@ -56,6 +80,7 @@ function nativeSettings(settings: DesktopSettings) {
     preventLarger: settings.preset.preventLarger,
     exportMode: settings.filePlacement,
     exportSuffix: settings.outputSuffix,
+    renameTemplate: settings.renameTemplate,
     fixedFolder: settings.outputFolder || undefined,
   };
 }
@@ -221,10 +246,28 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const [dragging, setDragging] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
+  const cleanupRetentionSeconds = cleanupSeconds(settings);
+
+  const startEmptyWindowDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a")) return;
+    event.preventDefault();
+    void api.startDragging();
+  };
+  const chooseLocalImages = async () => {
+    const images = await api.selectImages();
+    if (images.length) await optimise(images.map((image) => image.path));
+  };
 
   useEffect(() => {
     void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 360 : 380, settings.floatingLayout === "compact" ? 300 : 350);
   }, [api, settings.floatingLayout]);
+  useEffect(() => {
+    if (!settings.autoCleanupEnabled || settings.filePlacement !== "fixed-folder" || !settings.outputFolder) return;
+    const cleanup = () => api.cleanupOptimisedFiles({ folder: settings.outputFolder, suffix: settings.outputSuffix, olderThanSeconds: cleanupRetentionSeconds }).catch(() => undefined);
+    void cleanup();
+    const interval = window.setInterval(() => void cleanup(), Math.min(30 * 60 * 1000, Math.max(5 * 60 * 1000, cleanupRetentionSeconds * 250)));
+    return () => window.clearInterval(interval);
+  }, [api, cleanupRetentionSeconds, settings.autoCleanupEnabled, settings.filePlacement, settings.outputFolder, settings.outputSuffix]);
   useEffect(() => api.onFileDrop((event) => {
     setDragging(event.type === "over");
     if (event.type === "drop" && event.paths?.length) void optimise(event.paths);
@@ -253,15 +296,16 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   useEffect(() => api.onTrayAction((action) => {
     if (action !== "optimise_clipboard" && action !== "optimise_clipboard_aggressive" && action !== "downscale_clipboard") return;
     void api.readClipboardImage().then(async (image) => {
-      if (!image) return;
-      const path = await api.cacheImageData(image.data, `clipboard-${Date.now()}.png`);
+      const clipboardPaths = image ? [] : await api.readClipboardPaths();
+      if (!image && !clipboardPaths.length) return;
+      const paths = image ? [await api.cacheImageData(image.data, `clipboard-${Date.now()}.png`)] : clipboardPaths;
       const overrides: Partial<OptimisationPreset> = action === "optimise_clipboard_aggressive"
         ? { mode: "manual", quality: 45 }
         : action === "downscale_clipboard"
           ? { mode: "manual", scale: Math.max(10, Math.round(settings.preset.scale / 2)) }
           : {};
       if (Object.keys(overrides).length) setSettings((current) => ({ ...current, preset: { ...current.preset, ...overrides } }));
-      await optimise([path], !settings.keepClipboardResults, overrides);
+      await optimise(paths, !settings.keepClipboardResults, overrides);
     });
   }), [api, optimise, setSettings, settings.keepClipboardResults, settings.preset.scale]);
   useEffect(() => {
@@ -282,7 +326,14 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     return { ...restored, history: candidate.history.slice(0, -1) };
   }));
   return <main className={`floating-results ${settings.floatingLayout}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
-    {!results.length ? <button className="floating-empty" onClick={() => void api.showMainWindow()}><DropSurface language={settings.language} active={dragging} /><span><T language={settings.language} zh="点击打开完整工作台" en="Click to open the full workbench" /></span></button> : <>
+    {!results.length ? <section className="floating-empty" onPointerDown={startEmptyWindowDrag}>
+      <DropSurface language={settings.language} active={dragging} />
+      <div className="floating-empty-actions">
+        <button className="primary" onPointerDown={(event) => event.stopPropagation()} onClick={() => void chooseLocalImages()}><Icon name="plus" /><T language={settings.language} zh="选择本地图片" en="Choose local images" /></button>
+        <button onPointerDown={(event) => event.stopPropagation()} onClick={() => void api.showMainWindow()}><T language={settings.language} zh="打开工作台" en="Open workbench" /></button>
+      </div>
+      <span><T language={settings.language} zh="拖动空白区域可移动悬浮窗" en="Drag the empty area to move this window" /></span>
+    </section> : <>
       <div className="floating-list">{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
         return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} />;
@@ -357,6 +408,8 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   const [section, setSection] = useState<SettingsSection>("general");
   const [updateText, setUpdateText] = useState("");
   const [watchStatus, setWatchStatus] = useState("");
+  const [recordingShortcut, setRecordingShortcut] = useState<"shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain" | null>(null);
+  const [cleanupText, setCleanupText] = useState("");
   const language = settings.language;
   const patch = <K extends keyof DesktopSettings>(key: K, value: DesktopSettings[K]) => setSettings((current) => ({ ...current, [key]: value }));
   const patchPreset = (value: Partial<DesktopSettings["preset"]>) => setSettings((current) => ({ ...current, preset: { ...current.preset, ...value } }));
@@ -373,6 +426,8 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         inputFolder: settings.watchFolders[0],
         inputFolders: settings.watchFolders,
         outputFolder: settings.filePlacement === "fixed-folder" ? settings.outputFolder : "@same-folder",
+        outputSuffix: settings.outputSuffix,
+        renameTemplate: settings.renameTemplate,
         mode: settings.preset.mode === "auto" ? "balanced" : settings.preset.quality >= 96 ? "lossless" : settings.preset.quality >= 65 ? "balanced" : "small",
         quality: settings.preset.quality,
         scale: settings.preset.scale,
@@ -385,7 +440,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       }).then((result) => setWatchStatus(result.ok ? tr(language, `正在监测 ${settings.watchFolders.length} 个目录`, `Watching ${settings.watchFolders.length} folder(s)`) : result.error || ""));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [api, language, settings.filePlacement, settings.outputFolder, settings.pauseAutomaticOptimisations, settings.preset, settings.watchFolders]);
+  }, [api, language, settings.filePlacement, settings.outputFolder, settings.outputSuffix, settings.pauseAutomaticOptimisations, settings.preset, settings.renameTemplate, settings.watchFolders]);
 
   const toggleAutostart = async (value: boolean) => {
     if (value) await enableAutostart(); else await disableAutostart();
@@ -394,6 +449,28 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   const chooseOutput = async () => {
     const path = await api.selectFolder("export");
     if (path) patch("outputFolder", path);
+  };
+  const captureShortcut = (event: ReactKeyboardEvent<HTMLButtonElement>, key: "shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain") => {
+    event.preventDefault();
+    event.stopPropagation();
+    const shortcut = shortcutFromEvent(event);
+    if (shortcut === null) return;
+    if (shortcut === "escape") {
+      setRecordingShortcut(null);
+      return;
+    }
+    patch(key, shortcut);
+    setRecordingShortcut(null);
+  };
+  const cleanNow = async () => {
+    if (!settings.outputFolder) return;
+    setCleanupText(tr(language, "正在清理…", "Cleaning…"));
+    try {
+      const result = await api.cleanupOptimisedFiles({ folder: settings.outputFolder, suffix: settings.outputSuffix, olderThanSeconds: cleanupSeconds(settings) });
+      setCleanupText(tr(language, `已删除 ${result.deleted} 张到期结果图`, `Deleted ${result.deleted} expired result(s)`));
+    } catch (error) {
+      setCleanupText(error instanceof Error ? error.message : String(error));
+    }
   };
   const checkUpdates = async () => {
     setUpdateText(tr(language, "正在检查…", "Checking…"));
@@ -435,8 +512,11 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       {section === "files" && <SettingsCard title={<T language={language} zh="图片文件处理" en="Image file handling" />}>
         <SettingsRow title={<T language={language} zh="优化文件位置" en="Optimised file placement" />} note={<T language={language} zh="原图保留不变，优化结果写入所选位置" en="Keep originals and write optimised results to the selected location" />}><Select label="placement" value={settings.filePlacement} onChange={(value) => patch("filePlacement", value)}><option value="same-folder">{tr(language, "原文件夹", "Same folder as original")}</option><option value="fixed-folder">{tr(language, "指定文件夹", "Specific folder")}</option></Select></SettingsRow>
         <SettingsRow title={<T language={language} zh="文件名后缀" en="Filename suffix" />}><input value={settings.outputSuffix} onChange={(event) => patch("outputSuffix", event.target.value)} placeholder="-piclite" /></SettingsRow>
+        <SettingsRow title={<T language={language} zh="重命名模板" en="Rename template" />} note={<T language={language} zh="可用：{name} {suffix} {date} {time} {datetime} {size} {width} {height} {ext}" en="Variables: {name} {suffix} {date} {time} {datetime} {size} {width} {height} {ext}" />}><input value={settings.renameTemplate} onChange={(event) => patch("renameTemplate", event.target.value)} placeholder="{name}{suffix}" /></SettingsRow>
         {settings.filePlacement === "fixed-folder" && <SettingsRow title={<T language={language} zh="输出目录" en="Output folder" />}><button className="path-button" onClick={() => void chooseOutput()}>{settings.outputFolder || tr(language, "选择文件夹…", "Choose folder…")}</button></SettingsRow>}
         <SettingsRow title={<T language={language} zh="保留创建和修改日期" en="Preserve creation and modification dates" />}><Switch label="dates" checked={settings.preserveDates} onChange={(value) => patch("preserveDates", value)} /></SettingsRow>
+        <SettingsRow title={<T language={language} zh="定期清理结果图" en="Clean up results automatically" />} note={settings.filePlacement === "fixed-folder" ? <T language={language} zh="只删除指定输出目录中带当前 PicLite 后缀的到期图片" en="Only expired images with the current PicLite suffix are removed from the output folder" /> : <T language={language} zh="请先选择“指定文件夹”，以免扫描和误删原图目录" en="Choose “Specific folder” first so original folders are never scanned" />}><Switch label="cleanup" checked={settings.autoCleanupEnabled} onChange={(value) => patch("autoCleanupEnabled", value)} /></SettingsRow>
+        {settings.autoCleanupEnabled && <SettingsRow title={<T language={language} zh="保留时长" en="Keep results for" />} note={cleanupText}><span className="number-field"><input type="number" min="1" max="999" value={settings.autoCleanupAmount} onChange={(event) => patch("autoCleanupAmount", Math.max(1, Number(event.target.value)))} /><Select label="cleanup unit" value={settings.autoCleanupUnit} onChange={(value) => patch("autoCleanupUnit", value)}><option value="hours">{tr(language, "小时", "hours")}</option><option value="days">{tr(language, "天", "days")}</option><option value="months">{tr(language, "月", "months")}</option></Select><button className="settings-button" disabled={settings.filePlacement !== "fixed-folder" || !settings.outputFolder} onClick={() => void cleanNow()}>{tr(language, "立即清理", "Clean now")}</button></span></SettingsRow>}
       </SettingsCard>}
       {section === "images" && <>
         <SettingsCard title={<T language={language} zh="图片优化规则" en="Image optimisation rules" />}>
@@ -464,7 +544,14 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="结果保留时间" en="Dismiss result after" />}><span className="number-field"><input type="number" min="1" max="300" value={settings.autoHideSeconds} onChange={(event) => patch("autoHideSeconds", Math.max(1, Number(event.target.value)))} /> {tr(language, "秒", "seconds")}</span></SettingsRow>
         <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active select={() => undefined} remove={() => undefined} downscale={() => undefined} undo={() => undefined} updateFormat={() => undefined} /></div>
       </SettingsCard>}
-      {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />}><SettingsRow title={<T language={language} zh="优化剪贴板" en="Optimise clipboard" />}><kbd>{api.platform === "darwin" ? "⌥⌘C" : "Ctrl+Alt+C"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="激进优化" en="Optimise aggressively" />}><kbd>{api.platform === "darwin" ? "⌥⌘A" : "Ctrl+Alt+A"}</kbd></SettingsRow><SettingsRow title={<T language={language} zh="缩小剪贴板图片" en="Downscale clipboard image" />}><kbd>{api.platform === "darwin" ? "⌥⌘−" : "Ctrl+Alt+-"}</kbd></SettingsRow><SettingsRow title="Quick Look"><kbd>{api.platform === "darwin" ? "⌥⌘Space" : "Ctrl+Alt+Space"}</kbd></SettingsRow></SettingsCard>}
+      {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />} note={<T language={language} zh="点击快捷键后直接按下新组合；Delete 可清除，Esc 可取消。剪贴板快捷压缩不依赖自动监听。" en="Click a shortcut and press a new combination. Delete clears it and Esc cancels. Clipboard optimisation works without clipboard monitoring." />}>
+        <SettingsRow title={<T language={language} zh="启用全局快捷键" en="Enable global shortcuts" />}><Switch label="shortcuts" checked={settings.shortcutsEnabled} onChange={(value) => patch("shortcutsEnabled", value)} /></SettingsRow>
+        {([
+          ["shortcutToggleDropzone", tr(language, "打开 / 关闭悬浮窗", "Toggle floating window")],
+          ["shortcutOptimiseClipboard", tr(language, "压缩当前剪贴板图片", "Optimise current clipboard image")],
+          ["shortcutShowMain", tr(language, "显示主窗口", "Show main window")],
+        ] as const).map(([key, title]) => <SettingsRow key={key} title={title}><button className={`shortcut-recorder ${recordingShortcut === key ? "recording" : ""}`} onClick={() => setRecordingShortcut(key)} onKeyDown={(event) => captureShortcut(event, key)}>{recordingShortcut === key ? tr(language, "请按快捷键…", "Press shortcut…") : shortcutLabel(settings[key], api.platform)}</button></SettingsRow>)}
+      </SettingsCard>}
       {section === "updates" && <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>}
       {section === "about" && <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><Brand /><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>}
     </div>

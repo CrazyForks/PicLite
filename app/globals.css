@@ -656,9 +656,18 @@ html[data-theme="dark"] .preference-badge { border-color: #34443b; color: #c9dbc
 .gallery-summary strong { font-size: 37px; line-height: 1; letter-spacing: -2px; }
 .gallery-summary span { padding-bottom: 4px; color: var(--muted); font-size: 9px; }
 .gallery-summary button { grid-column: 1 / -1; height: 31px; margin-top: 13px; border: 1px solid #d4ded6; border-radius: 8px; background: rgba(255,255,255,.7); color: #476758; font-size: 8px; font-weight: 850; cursor: pointer; }
+.gallery-bulk-toolbar { margin: 0 0 18px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; background: rgba(255,255,255,.64); box-shadow: 0 10px 30px rgba(30,50,42,.05); }
+.gallery-bulk-toolbar button, .gallery-bulk-toolbar select { height: 31px; padding: 0 10px; border: 1px solid #d4ded6; border-radius: 8px; color: #476758; background: rgba(255,255,255,.78); font-size: 8px; font-weight: 800; }
+.gallery-bulk-toolbar button { cursor: pointer; }
+.gallery-bulk-toolbar button.danger { margin-left: auto; color: #a64f4f; border-color: #e3caca; }
+.gallery-bulk-toolbar > span { color: var(--muted); font-size: 8px; font-weight: 800; }
+.gallery-bulk-toolbar > small { flex-basis: 100%; color: var(--muted); font-size: 7px; }
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(265px,1fr)); gap: 18px; }
-.gallery-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.86); box-shadow: 0 16px 42px rgba(30,50,42,.07); outline: 0; transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
+.gallery-card { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.86); box-shadow: 0 16px 42px rgba(30,50,42,.07); outline: 0; transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
 .gallery-card:hover, .gallery-card:focus-visible, .gallery-card.selected { transform: translateY(-3px); border-color: #8daa94; box-shadow: 0 22px 54px rgba(30,50,42,.11); }
+.gallery-card.checked { border-color: #5d8b73; box-shadow: 0 0 0 2px rgba(93,139,115,.16), 0 18px 46px rgba(30,50,42,.09); }
+.gallery-check { position: absolute; z-index: 4; left: 10px; top: 10px; min-height: 27px; padding: 0 8px; border-radius: 999px; display: inline-flex; align-items: center; gap: 5px; color: #f3f8f4; background: rgba(16,33,24,.72); backdrop-filter: blur(10px); font-size: 7px; font-weight: 850; cursor: pointer; }
+.gallery-check input { accent-color: #8dbc78; }
 .gallery-preview { width: 100%; padding: 0; border: 0; position: relative; height: 190px; display: grid; place-items: center; overflow: hidden; background: linear-gradient(135deg,#eef3ee,#e3eae4); cursor: zoom-in; }
 .gallery-preview::before { content: ""; position: absolute; inset: 0; opacity: .34; background-image: linear-gradient(45deg,#cdd7cf 25%,transparent 25%),linear-gradient(-45deg,#cdd7cf 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#cdd7cf 75%),linear-gradient(-45deg,transparent 75%,#cdd7cf 75%); background-size: 16px 16px; background-position: 0 0,0 8px,8px -8px,-8px 0; }
 .gallery-preview img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: contain; }

@@ -30,6 +30,7 @@ if ("__TAURI_INTERNALS__" in window) {
       const result = await invoke<{ data: string } | null>("read_clipboard_image");
       return result ? { data: decodeBase64(result.data) } : null;
     },
+    readClipboardPaths: () => invoke<string[]>("read_clipboard_paths"),
     copyImageData: (data) => invoke("copy_image_data", { data: Array.from(data) }),
     copyCompressedData: (data, fileName) => invoke("copy_compressed_data", { data: Array.from(data), fileName }),
     cacheImageData: (data, fileName) => invoke("cache_image_data", { data: Array.from(data), fileName }),
@@ -54,6 +55,8 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
+    configureGlobalShortcuts: (bindings) => invoke("configure_global_shortcuts", { bindings }),
+    cleanupOptimisedFiles: (payload) => invoke("cleanup_optimised_files", { request: payload }),
     revealPath: (path) => invoke("reveal_path", { path }),
     uploadImage: (payload) => invoke("upload_image", { payload: { ...payload, data: Array.from(payload.data) } }),
     loadUploadProfile: () => invoke("load_upload_profile"),
@@ -162,6 +165,7 @@ if ("__TAURI_INTERNALS__" in window) {
     platform: platformName(),
     windowLabel: label,
     readClipboardImage: async () => null,
+    readClipboardPaths: async () => [],
     copyImageData: noop,
     copyCompressedData: async (_data, fileName) => `/preview/${fileName}`,
     cacheImageData: async (_data, fileName) => `/preview/${fileName}`,
@@ -175,6 +179,8 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: async () => ({ ok: true }),
     getWatcherState: async () => ({ active: false }),
     quickCompressPaths: async () => [],
+    configureGlobalShortcuts: noop,
+    cleanupOptimisedFiles: async () => ({ deleted: 0 }),
     revealPath: noop,
     uploadImage: async () => ({ url: "", remotePath: "" }),
     loadUploadProfile: async () => null,

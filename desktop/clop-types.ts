@@ -3,6 +3,7 @@ export type Appearance = "system" | "light" | "dark";
 export type ResultLayout = "compact" | "full";
 export type FilePlacement = "same-folder" | "fixed-folder";
 export type ImageFormat = "keep" | "jpeg" | "png" | "webp";
+export type CleanupUnit = "hours" | "days" | "months";
 
 export type OptimisationPreset = {
   mode: "auto" | "manual";
@@ -25,7 +26,11 @@ export type DesktopSettings = {
   filePlacement: FilePlacement;
   outputFolder: string;
   outputSuffix: string;
+  renameTemplate: string;
   preserveDates: boolean;
+  autoCleanupEnabled: boolean;
+  autoCleanupAmount: number;
+  autoCleanupUnit: CleanupUnit;
   stripMetadata: boolean;
   preserveColorProfile: boolean;
   enableDropZone: boolean;
@@ -42,6 +47,10 @@ export type DesktopSettings = {
   hideTooltips: boolean;
   watchFolders: string[];
   pauseAutomaticOptimisations: boolean;
+  shortcutsEnabled: boolean;
+  shortcutToggleDropzone: string;
+  shortcutOptimiseClipboard: string;
+  shortcutShowMain: string;
   preset: OptimisationPreset;
 };
 
@@ -54,6 +63,7 @@ export type QuickCompressSettings = {
   preventLarger: boolean;
   exportMode: string;
   exportSuffix: string;
+  renameTemplate?: string;
   fixedFolder?: string;
 };
 
@@ -70,6 +80,8 @@ export type WatcherSettings = {
   inputFolder: string;
   inputFolders: string[];
   outputFolder: string;
+  outputSuffix?: string;
+  renameTemplate?: string;
   mode: string;
   quality: number;
   scale: number;
@@ -87,6 +99,7 @@ export type PicLiteBridge = {
   platform: string;
   windowLabel: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
+  readClipboardPaths: () => Promise<string[]>;
   copyImageData: (data: Uint8Array) => Promise<void>;
   copyCompressedData: (data: Uint8Array, fileName: string) => Promise<string>;
   cacheImageData: (data: Uint8Array, fileName: string) => Promise<string>;
@@ -98,6 +111,8 @@ export type PicLiteBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string }) => Promise<void>;
+  cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
   revealPath: (path: string) => Promise<void>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
   setWindowTheme: (theme: Appearance) => Promise<void>;

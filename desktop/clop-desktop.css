@@ -86,8 +86,13 @@ svg { width: 18px; height: 18px; }
 
 /* Floating results */
 .floating-results { position: relative; container-type: inline-size; height: 100%; overflow: hidden; border: 1px solid rgba(120,130,140,.2); border-radius: 20px; background: color-mix(in srgb, var(--surface) 88%, transparent); background-clip: padding-box; backdrop-filter: blur(38px) saturate(1.7); box-shadow: none; clip-path: inset(0 round 20px); display: grid; grid-template-rows: minmax(0, 1fr) auto; }
-.floating-empty { display: grid; gap: 7px; width: 100%; height: 100%; padding: 12px; border: 0; background: transparent; }
+.floating-empty { display: grid; grid-template-rows: minmax(0,1fr) auto auto; gap: 8px; width: 100%; height: 100%; padding: 12px; border: 0; background: transparent; cursor: grab; }
+.floating-empty:active { cursor: grabbing; }
 .floating-empty > span { color: var(--muted); font-size: 11px; }
+.floating-empty-actions { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.floating-empty-actions button { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--card); font-size: 11px; font-weight: 700; cursor: pointer; }
+.floating-empty-actions button.primary { color: white; border-color: transparent; background: var(--accent); }
+.floating-empty-actions svg { width: 14px; height: 14px; }
 .floating-list { min-height: 0; overflow: auto; padding: 8px; display: grid; align-content: start; gap: 8px; scrollbar-width: thin; }
 .result-card { position: relative; overflow: hidden; border: 1px solid rgba(255,255,255,.22); border-radius: 18px; color: white; background: rgba(20,20,19,.82); box-shadow: 0 12px 28px rgba(0,0,0,.18); transition: transform .18s ease, box-shadow .18s ease; }
 .result-card:hover, .result-card.active { box-shadow: 0 16px 34px rgba(0,0,0,.26); }
@@ -174,6 +179,9 @@ svg { width: 18px; height: 18px; }
 .number-field input { min-width: 70px !important; width: 70px; text-align: right; }
 .path-button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .settings-button, .add-path { min-height: 29px; padding: 0 11px; border: 0; border-radius: 7px; background: rgba(127,127,127,.14); font-size: 11px; }
+.shortcut-recorder { min-width: 190px; min-height: 31px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--card); font-size: 11px; font-weight: 700; }
+.shortcut-recorder.recording { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.number-field select { min-width: 80px; width: auto; }
 .watch-list { padding: 8px; }
 .watch-list > div { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; min-height: 38px; padding: 4px 7px; border-radius: 7px; }
 .watch-list > div:hover { background: rgba(127,127,127,.08); }

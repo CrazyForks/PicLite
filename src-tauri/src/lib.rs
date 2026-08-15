@@ -15,7 +15,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use hmac::{Hmac, Mac};
 use image::{
     codecs::{
@@ -39,6 +39,7 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use url::Url;
 use webp::Encoder as LossyWebPEncoder;
 
@@ -65,6 +66,10 @@ struct DesktopState {
     /// The monitor must record it but must not feed the result back through the
     /// compressor, otherwise a copied result would be compressed repeatedly.
     clipboard_ignore_until_ms: AtomicU64,
+    shortcut_config_lock: Mutex<()>,
+    /// The drop window is placed in its initial corner exactly once. Later
+    /// show/resize calls preserve the position selected by dragging it.
+    dropzone_positioned: AtomicBool,
 }
 
 impl Default for DesktopState {
@@ -80,6 +85,8 @@ impl Default for DesktopState {
             minimize_to_tray: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
             clipboard_ignore_until_ms: AtomicU64::new(0),
+            shortcut_config_lock: Mutex::new(()),
+            dropzone_positioned: AtomicBool::new(false),
         }
     }
 }
@@ -154,7 +161,34 @@ struct QuickCompressSettings {
     prevent_larger: bool,
     export_mode: String,
     export_suffix: String,
+    #[serde(default)]
+    rename_template: String,
     fixed_folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutBindings {
+    enabled: bool,
+    #[serde(default)]
+    toggle_dropzone: String,
+    #[serde(default)]
+    optimise_clipboard: String,
+    #[serde(default)]
+    show_main: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupRequest {
+    folder: String,
+    suffix: String,
+    older_than_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupResult {
+    deleted: u64,
 }
 
 #[derive(Serialize)]
@@ -175,6 +209,10 @@ struct WatcherSettings {
     #[serde(default)]
     input_folders: Vec<String>,
     output_folder: String,
+    #[serde(default)]
+    output_suffix: String,
+    #[serde(default)]
+    rename_template: String,
     mode: String,
     quality: u8,
     scale: f64,
@@ -389,6 +427,43 @@ fn safe_file_name(value: &str) -> String {
             }
         })
         .collect::<String>()
+}
+
+/// Builds output names without teaching the native compressor about UI state.
+/// Templates intentionally stay small and filesystem-safe:
+/// `{name}`, `{suffix}`, `{date}`, `{time}`, `{datetime}`, `{size}`, `{width}`,
+/// `{height}` and `{ext}` are available. The extension is always added when a
+/// template does not include `{ext}` so users cannot accidentally create a
+/// result the OS no longer recognises as an image.
+fn render_output_name(
+    template: &str,
+    base: &str,
+    suffix: &str,
+    extension: &str,
+    bytes: usize,
+    width: u32,
+    height: u32,
+) -> String {
+    let now = Local::now();
+    let template = if template.trim().is_empty() {
+        "{name}{suffix}"
+    } else {
+        template.trim()
+    };
+    let mut value = template
+        .replace("{name}", base)
+        .replace("{suffix}", suffix)
+        .replace("{date}", &now.format("%Y-%m-%d").to_string())
+        .replace("{time}", &now.format("%H-%M-%S").to_string())
+        .replace("{datetime}", &now.format("%Y-%m-%d_%H-%M-%S").to_string())
+        .replace("{size}", &bytes.to_string())
+        .replace("{width}", &width.to_string())
+        .replace("{height}", &height.to_string())
+        .replace("{ext}", extension);
+    if !template.contains("{ext}") {
+        value = format!("{value}.{extension}");
+    }
+    safe_file_name(&value)
 }
 
 fn available_path(directory: &Path, requested_name: &str) -> Result<PathBuf, String> {
@@ -776,6 +851,30 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
     }
 }
 
+fn configure_dropzone_dimensions(app: &AppHandle, state: &DesktopState, width: f64, height: f64) {
+    let width = width.clamp(190.0, 520.0);
+    let height = height.clamp(140.0, 420.0);
+    if !state.dropzone_positioned.swap(true, Ordering::Relaxed) {
+        resize_and_position_dropzone(app, width, height);
+    } else if let Some(window) = app.get_webview_window("dropzone") {
+        // A user-selected position is durable for the current session. Resizing
+        // the window must not snap it back to the lower-right corner.
+        let _ = window.set_size(LogicalSize::new(width, height));
+    }
+}
+
+fn ensure_dropzone_positioned(app: &AppHandle, state: &DesktopState) {
+    if state.dropzone_positioned.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("dropzone") {
+        if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
+            let logical = size.to_logical::<f64>(monitor.scale_factor());
+            position_dropzone(&window, logical.width, logical.height);
+        }
+    }
+}
+
 fn resize_dropzone_around_center(app: &AppHandle, width: f64, height: f64) {
     if let Some(window) = app.get_webview_window("dropzone") {
         let width = width.clamp(190.0, 520.0);
@@ -811,6 +910,8 @@ fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
         input_folder: String::new(),
         input_folders: Vec::new(),
         output_folder: String::new(),
+        output_suffix: value.export_suffix.clone(),
+        rename_template: value.rename_template.clone(),
         mode: match value.mode.as_str() {
             "auto" => "balanced".to_string(),
             "balanced" | "small" | "lossless" => value.mode.clone(),
@@ -877,10 +978,20 @@ async fn quick_compress_paths(
                     .ok_or_else(|| "无法定位源文件夹".to_string())?
             };
             // 悬浮压缩坞始终生成新文件，避免一次拖放意外覆盖源图。
-            let output = available_path(
-                &output_directory,
-                &format!("{base}{suffix}.{output_extension}"),
-            )?;
+            let (width, height) = image::load_from_memory(&optimized.bytes)
+                .map(|image| image.dimensions())
+                .or_else(|_| image::image_dimensions(&source))
+                .unwrap_or((0, 0));
+            let output_name = render_output_name(
+                &settings.rename_template,
+                base,
+                suffix,
+                &output_extension,
+                optimized.bytes.len(),
+                width,
+                height,
+            );
+            let output = available_path(&output_directory, &output_name)?;
             fs::write(&output, &optimized.bytes).map_err(|error| error.to_string())?;
             Ok((
                 output,
@@ -928,6 +1039,122 @@ async fn update_desktop_preferences(
 }
 
 #[tauri::command]
+async fn configure_global_shortcuts(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    bindings: ShortcutBindings,
+) -> Result<(), String> {
+    let _guard = state
+        .shortcut_config_lock
+        .lock()
+        .map_err(|_| "快捷键配置状态不可用".to_string())?;
+    let shortcuts = app.global_shortcut();
+    shortcuts
+        .unregister_all()
+        .map_err(|error| error.to_string())?;
+    if !bindings.enabled {
+        return Ok(());
+    }
+
+    let mut configured = HashSet::new();
+    let entries = [
+        (
+            bindings.toggle_dropzone.trim().to_string(),
+            "toggle_dropzone",
+        ),
+        (
+            bindings.optimise_clipboard.trim().to_string(),
+            "optimise_clipboard",
+        ),
+        (bindings.show_main.trim().to_string(), "show_main"),
+    ];
+    for (shortcut, action) in entries {
+        if shortcut.is_empty() || !configured.insert(shortcut.clone()) {
+            continue;
+        }
+        shortcuts
+            .on_shortcut(shortcut.as_str(), move |app, _, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                match action {
+                    "toggle_dropzone" => {
+                        if let Some(window) = app.get_webview_window("dropzone") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let state = app.state::<DesktopState>();
+                                ensure_dropzone_positioned(app, &state);
+                                show_window(app, "dropzone");
+                            }
+                        }
+                    }
+                    "optimise_clipboard" => {
+                        let state = app.state::<DesktopState>();
+                        ensure_dropzone_positioned(app, &state);
+                        show_window(app, "dropzone");
+                        let _ = app.emit("tray:action", "optimise_clipboard");
+                    }
+                    "show_main" => show_window(app, "main"),
+                    _ => {}
+                }
+            })
+            .map_err(|error| format!("快捷键 {shortcut} 注册失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn cleanup_marked_files(
+    directory: &Path,
+    suffix: &str,
+    cutoff: SystemTime,
+    deleted: &mut u64,
+) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            cleanup_marked_files(&path, suffix, cutoff, deleted)?;
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if !is_image(&path) || !stem.contains(suffix) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::now());
+        if modified <= cutoff && fs::remove_file(&path).is_ok() {
+            *deleted += 1;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn cleanup_optimised_files(request: CleanupRequest) -> Result<CleanupResult, String> {
+    let suffix = request.suffix.trim();
+    if suffix.len() < 3 {
+        return Err("为避免误删，定期清理要求文件名后缀至少包含 3 个字符".to_string());
+    }
+    let directory = fs::canonicalize(PathBuf::from(request.folder.trim()))
+        .map_err(|_| "清理目录不存在或无法访问".to_string())?;
+    if !directory.is_dir() {
+        return Err("清理目标不是文件夹".to_string());
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(request.older_than_seconds.max(60)))
+        .unwrap_or(UNIX_EPOCH);
+    let mut deleted = 0;
+    cleanup_marked_files(&directory, suffix, cutoff, &mut deleted)?;
+    Ok(CleanupResult { deleted })
+}
+
+#[tauri::command]
 async fn show_main_window(app: AppHandle) -> Result<(), String> {
     show_window(&app, "main");
     Ok(())
@@ -935,7 +1162,8 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn show_gallery_window(app: AppHandle) -> Result<(), String> {
-    app.emit("tray:action", "gallery").map_err(|error| error.to_string())?;
+    app.emit("tray:action", "gallery")
+        .map_err(|error| error.to_string())?;
     show_window(&app, "main");
     Ok(())
 }
@@ -947,20 +1175,23 @@ async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("dropzone") {
-        if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
-            let logical = size.to_logical::<f64>(monitor.scale_factor());
-            position_dropzone(&window, logical.width, logical.height);
-        }
-    }
+async fn show_dropzone_window(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
+    ensure_dropzone_positioned(&app, &state);
     show_window(&app, "dropzone");
     Ok(())
 }
 
 #[tauri::command]
-async fn configure_dropzone_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    resize_and_position_dropzone(&app, width, height);
+async fn configure_dropzone_window(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    configure_dropzone_dimensions(&app, &state, width, height);
     Ok(())
 }
 
@@ -1018,8 +1249,25 @@ fn process_watched_file(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("image");
-        let output_path =
-            available_path(&output_directory, &format!("{base}-piclite.{extension}"))?;
+        let suffix = if settings.output_suffix.trim().is_empty() {
+            "-piclite"
+        } else {
+            settings.output_suffix.trim()
+        };
+        let (width, height) = image::load_from_memory(&optimized.bytes)
+            .map(|image| image.dimensions())
+            .or_else(|_| image::image_dimensions(&canonical))
+            .unwrap_or((0, 0));
+        let output_name = render_output_name(
+            &settings.rename_template,
+            base,
+            suffix,
+            &extension,
+            optimized.bytes.len(),
+            width,
+            height,
+        );
+        let output_path = available_path(&output_directory, &output_name)?;
         fs::write(&output_path, &optimized.bytes).map_err(|error| error.to_string())?;
         Ok((output_path, original_bytes, optimized.bytes.len() as u64))
     })();
@@ -1032,7 +1280,8 @@ fn process_watched_file(
             event.original_bytes = Some(original_bytes);
             event.output_bytes = Some(output_bytes);
             emit_event(&app, event);
-            resize_and_position_dropzone(&app, 420.0, 320.0);
+            let state = app.state::<DesktopState>();
+            configure_dropzone_dimensions(&app, &state, 420.0, 320.0);
             if let Some(window) = app.get_webview_window("dropzone") {
                 let _ = window.show();
             }
@@ -1186,6 +1435,13 @@ fn clipboard_image_paths() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     tauri::async_runtime::spawn_blocking(clipboard_image)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_clipboard_paths() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard_image_paths)
         .await
         .map_err(|error| error.to_string())?
 }
@@ -1718,7 +1974,10 @@ async fn load_imported_fonts(app: AppHandle) -> Result<Vec<ImportedFontData>, St
 
 #[tauri::command]
 async fn save_imported_font(app: AppHandle, payload: ImportedFontPayload) -> Result<(), String> {
-    if payload.family.trim().is_empty() || payload.data.is_empty() || payload.data.len() > 64 * 1024 * 1024 {
+    if payload.family.trim().is_empty()
+        || payload.data.is_empty()
+        || payload.data.len() > 64 * 1024 * 1024
+    {
         return Err("字体文件无效或超过 64 MB".to_string());
     }
     let file_name = format!("{:x}.font", Sha256::digest(&payload.data));
@@ -1732,15 +1991,22 @@ async fn save_imported_font(app: AppHandle, payload: ImportedFontPayload) -> Res
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path).map_err(|error| format!("无法缓存字体文件：{error}"))?;
-        file.write_all(&payload.data).map_err(|error| format!("无法保存字体文件：{error}"))?;
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("无法缓存字体文件：{error}"))?;
+        file.write_all(&payload.data)
+            .map_err(|error| format!("无法保存字体文件：{error}"))?;
         file.flush().map_err(|error| error.to_string())?;
     }
     let mut manifest = read_imported_font_manifest(&app)?;
     manifest.retain(|font| font.family != payload.family);
-    manifest.push(StoredImportedFont { family: payload.family, file_name });
+    manifest.push(StoredImportedFont {
+        family: payload.family,
+        file_name,
+    });
     let data = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-    fs::write(imported_fonts_manifest_path(&app)?, data).map_err(|error| format!("无法保存字体记录：{error}"))
+    fs::write(imported_fonts_manifest_path(&app)?, data)
+        .map_err(|error| format!("无法保存字体记录：{error}"))
 }
 
 #[tauri::command]
@@ -2521,10 +2787,7 @@ async fn start_watcher(
         }
         let inputs = requested_inputs
             .iter()
-            .map(|input| {
-                fs::canonicalize(input)
-                    .map_err(|_| format!("监测文件夹不存在：{input}"))
-            })
+            .map(|input| fs::canonicalize(input).map_err(|_| format!("监测文件夹不存在：{input}")))
             .collect::<Result<Vec<_>, _>>()?;
         let fixed_output = (!settings.output_folder.is_empty()
             && settings.output_folder != "@same-folder")
@@ -2552,7 +2815,9 @@ async fn start_watcher(
                             .filter(|input| path.starts_with(input))
                             .max_by_key(|input| input.components().count())
                             .cloned();
-                        let Some(source_root) = source_root else { continue };
+                        let Some(source_root) = source_root else {
+                            continue;
+                        };
                         let default_output = source_root.join("PicLite");
                         let already_optimised = path
                             .file_stem()
@@ -2560,7 +2825,9 @@ async fn start_watcher(
                             .is_some_and(|value| value.contains("-piclite"));
                         if !is_image(&path)
                             || already_optimised
-                            || path.starts_with(output_for_callback.as_ref().unwrap_or(&default_output))
+                            || path.starts_with(
+                                output_for_callback.as_ref().unwrap_or(&default_output),
+                            )
                         {
                             continue;
                         }
@@ -2670,13 +2937,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let downscale = MenuItem::with_id(
-        app,
-        "downscale_clipboard",
-        "缩小尺寸",
-        true,
-        None::<&str>,
-    )?;
+    let downscale = MenuItem::with_id(app, "downscale_clipboard", "缩小尺寸", true, None::<&str>)?;
     let quicklook = MenuItem::with_id(app, "quicklook_clipboard", "快速预览", true, None::<&str>)?;
     let clipboard = Submenu::with_items(
         app,
@@ -2686,7 +2947,13 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
 
     let open_workdir = MenuItem::with_id(app, "open_workdir", "打开工作目录", true, None::<&str>)?;
-    let bring_back = MenuItem::with_id(app, "bring_back_result", "恢复上一个结果", true, None::<&str>)?;
+    let bring_back = MenuItem::with_id(
+        app,
+        "bring_back_result",
+        "恢复上一个结果",
+        true,
+        None::<&str>,
+    )?;
     let backups = Submenu::with_items(app, "备份", true, &[&open_workdir, &bring_back])?;
 
     let pause = MenuItem::with_id(app, "pause_automatic", "暂停自动优化", true, None::<&str>)?;
@@ -2991,6 +3258,7 @@ pub fn run() {
             select_images,
             read_images_from_paths,
             read_clipboard_image,
+            read_clipboard_paths,
             copy_image_data,
             copy_compressed_data,
             cache_image_data,
@@ -3007,6 +3275,8 @@ pub fn run() {
             save_upload_profile,
             export_images,
             quick_compress_paths,
+            configure_global_shortcuts,
+            cleanup_optimised_files,
             update_desktop_preferences,
             set_tray_theme,
             check_for_updates,
@@ -3043,6 +3313,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_template_expands_size_dimensions_and_extension() {
+        let name = render_output_name(
+            "{name}_{width}x{height}_{size}{suffix}.{ext}",
+            "photo",
+            "-piclite",
+            "webp",
+            12_345,
+            1920,
+            1080,
+        );
+        assert_eq!(name, "photo_1920x1080_12345-piclite.webp");
+    }
+
+    #[test]
     fn automatic_first_pass_keeps_dimensions_and_selects_a_smaller_format() {
         let mut pixels = image::RgbImage::new(640, 360);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
@@ -3053,8 +3337,8 @@ mod tests {
                 noise.wrapping_add((y % 71) as u8),
             ]);
         }
-        let original = encode_static(DynamicImage::ImageRgb8(pixels), "png", 100)
-            .expect("encode source png");
+        let original =
+            encode_static(DynamicImage::ImageRgb8(pixels), "png", 100).expect("encode source png");
         let path = std::env::temp_dir().join(format!(
             "piclite-auto-first-pass-{}-{}.png",
             std::process::id(),
@@ -3065,6 +3349,8 @@ mod tests {
             input_folder: String::new(),
             input_folders: Vec::new(),
             output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
             mode: "balanced".to_string(),
             quality: 86,
             scale: 100.0,
@@ -3084,7 +3370,10 @@ mod tests {
 
         assert_eq!(dimensions, (640, 360));
         assert!(optimized.bytes.len() < original.len());
-        assert!(matches!(optimized.extension.as_str(), "jpg" | "webp" | "png"));
+        assert!(matches!(
+            optimized.extension.as_str(),
+            "jpg" | "webp" | "png"
+        ));
     }
 
     #[test]
@@ -3099,7 +3388,12 @@ mod tests {
         let mut pixels = image::RgbaImage::new(320, 180);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             let noise = ((x * 17 + y * 31 + (x * y) % 251) % 256) as u8;
-            *pixel = image::Rgba([noise, noise.wrapping_add((x % 93) as u8), noise.wrapping_add((y % 71) as u8), 255]);
+            *pixel = image::Rgba([
+                noise,
+                noise.wrapping_add((x % 93) as u8),
+                noise.wrapping_add((y % 71) as u8),
+                255,
+            ]);
         }
         let image = DynamicImage::ImageRgba8(pixels);
         let small = encode_static(image.clone(), "webp", 35).expect("encode small webp");
@@ -3107,7 +3401,12 @@ mod tests {
 
         assert_eq!(&small[8..12], b"WEBP");
         assert_eq!(&detailed[8..12], b"WEBP");
-        assert!(small.len() < detailed.len(), "low quality WebP should be smaller: {} vs {}", small.len(), detailed.len());
+        assert!(
+            small.len() < detailed.len(),
+            "low quality WebP should be smaller: {} vs {}",
+            small.len(),
+            detailed.len()
+        );
     }
 
     #[test]
@@ -3128,8 +3427,8 @@ mod tests {
         let expected = decoded_webp.to_rgba8();
 
         for quality in [1, 25, 80, 100] {
-            let png = encode_static(decoded_webp.clone(), "png", quality)
-                .expect("encode png result");
+            let png =
+                encode_static(decoded_webp.clone(), "png", quality).expect("encode png result");
             let actual = image::load_from_memory(&png)
                 .expect("decode png result")
                 .to_rgba8();
@@ -3163,6 +3462,8 @@ mod tests {
             input_folder: String::new(),
             input_folders: Vec::new(),
             output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
             mode: "lossless".to_string(),
             quality: 100,
             scale: 75.0,
