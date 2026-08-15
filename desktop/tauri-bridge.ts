@@ -55,6 +55,10 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
+    compressAnimationData: async (data, fileName, settings) => {
+      const result = await invoke<Omit<import("./clop-types").CompressedAnimationData, "data"> & { data: string }>("compress_animation_data", { data: Array.from(data), fileName, settings });
+      return { ...result, data: decodeBase64(result.data) };
+    },
     configureGlobalShortcuts: (bindings) => invoke("configure_global_shortcuts", { bindings }),
     cleanupOptimisedFiles: (payload) => invoke("cleanup_optimised_files", { request: payload }),
     revealPath: (path) => invoke("reveal_path", { path }),
@@ -84,6 +88,8 @@ if ("__TAURI_INTERNALS__" in window) {
     showGalleryWindow: () => invoke("show_gallery_window"),
     showPreferencesWindow: () => invoke("show_preferences_window"),
     showDropzoneWindow: () => invoke("show_dropzone_window"),
+    submitCornerDrop: (paths) => invoke("submit_corner_drop", { paths }),
+    takePendingCornerDrop: () => invoke<string[]>("take_pending_corner_drop"),
     configureDropzoneWindow: (width, height) => invoke("configure_dropzone_window", { width, height }),
     resizeDropzoneWindow: (width, height) => invoke("resize_dropzone_window", { width, height }),
     setAlwaysOnTop: (enabled) => currentWindow.setAlwaysOnTop(enabled),
@@ -145,6 +151,18 @@ if ("__TAURI_INTERNALS__" in window) {
         unlisten?.();
       };
     },
+    onCornerDrop: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen("corner:drop", callback).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
     onWatcherEvent: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
@@ -179,6 +197,7 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: async () => ({ ok: true }),
     getWatcherState: async () => ({ active: false }),
     quickCompressPaths: async () => [],
+    compressAnimationData: async () => { throw new Error("Animated WebP encoding requires the desktop app"); },
     configureGlobalShortcuts: noop,
     cleanupOptimisedFiles: async () => ({ deleted: 0 }),
     revealPath: noop,
@@ -199,17 +218,20 @@ if ("__TAURI_INTERNALS__" in window) {
     showGalleryWindow: noop,
     showPreferencesWindow: noop,
     showDropzoneWindow: noop,
+    submitCornerDrop: noop,
+    takePendingCornerDrop: async () => [],
     configureDropzoneWindow: noop,
     resizeDropzoneWindow: noop,
     setAlwaysOnTop: noop,
     hideCurrentWindow: noop,
     quitApplication: noop,
-    checkForUpdates: async () => ({ currentVersion: "0.13.8", latestVersion: "0.13.8", available: false, releaseUrl: "" }),
+    checkForUpdates: async () => ({ currentVersion: "0.20.0", latestVersion: "0.20.0", available: false, releaseUrl: "" }),
     openExternal: noop,
     onFileDrop: () => () => undefined,
     onTrayAction: () => () => undefined,
     onClipboardImage: () => () => undefined,
     onClipboardPaths: () => () => undefined,
+    onCornerDrop: () => () => undefined,
     onWatcherEvent: () => () => undefined,
   };
 }

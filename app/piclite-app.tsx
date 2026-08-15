@@ -5,7 +5,6 @@ import {
   ChangeEvent,
   CSSProperties,
   DragEvent,
-  KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
   useCallback,
@@ -31,7 +30,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock";
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "shortcuts" | "about";
 
-const APP_VERSION = "0.13.8";
+const APP_VERSION = "0.20.0";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -136,7 +135,9 @@ type NativeBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  compressAnimationData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<{ data: Uint8Array; mimeType: string; extension: string; width: number; height: number; keptOriginal: boolean }>;
   configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string }) => Promise<void>;
+  cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
   revealPath: (path: string) => Promise<void>;
   uploadImage: (payload: NativeUploadPayload) => Promise<{ url: string; remotePath: string }>;
   loadUploadProfile: () => Promise<StoredUploadProfile | null>;
@@ -275,6 +276,7 @@ type NativeAppProfile = {
 };
 
 type QuickCompressSettings = {
+  mode?: "auto" | "balanced" | "small" | "lossless" | "manual";
   quality: number;
   scale: number;
   format: OutputFormat;
@@ -407,7 +409,9 @@ function resolveTheme(theme: ThemeMode) {
     : theme;
 }
 
-function shortcutFromKeyboardEvent(event: ReactKeyboardEvent<HTMLElement>) {
+type ShortcutKeyEvent = Pick<globalThis.KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">;
+
+function shortcutFromKeyboardEvent(event: ShortcutKeyEvent) {
   const key = event.key;
   if (["Control", "Meta", "Alt", "Shift"].includes(key)) return null;
   if (key === "Escape") return "escape";
@@ -417,7 +421,18 @@ function shortcutFromKeyboardEvent(event: ReactKeyboardEvent<HTMLElement>) {
   if (event.altKey) modifiers.push("Alt");
   if (event.shiftKey) modifiers.push("Shift");
   if (!modifiers.length) return null;
-  const normalizedKey = key.length === 1 ? key.toUpperCase() : key.replace(/^Arrow/, "");
+  const codeAliases: Record<string, string> = {
+    Space: "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    Enter: "Enter", Tab: "Tab", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+  };
+  const normalizedKey = event.code.startsWith("Key")
+    ? event.code.slice(3)
+    : event.code.startsWith("Digit")
+      ? event.code.slice(5)
+      : /^F(?:[1-9]|1\d|2[0-4])$/.test(event.code)
+        ? event.code
+        : codeAliases[event.code] || (key.length === 1 && /[a-z0-9]/i.test(key) ? key.toUpperCase() : "");
+  if (!normalizedKey) return null;
   return [...modifiers, normalizedKey].join("+");
 }
 
@@ -918,7 +933,33 @@ function strategyLabel(settings: CompressionSettings) {
   return `${format} · ${Math.round(settings.quality)}% · ${formatScale(settings.scale)} 尺寸`;
 }
 
-async function compressImage(item: ImageItem, settings: CompressionSettings): Promise<CompressionResult> {
+async function compressImage(item: ImageItem, settings: CompressionSettings, nativeBridge?: NativeBridge): Promise<CompressionResult> {
+  if (item.type === "image/gif" && nativeBridge && (settings.format === "keep" || settings.format === "image/webp")) {
+    const result = await nativeBridge.compressAnimationData(
+      new Uint8Array(await item.file.arrayBuffer()),
+      item.name,
+      {
+        mode: settings.mode,
+        quality: settings.quality,
+        scale: settings.scale,
+        format: settings.format,
+        stripMetadata: settings.stripMetadata,
+        preventLarger: settings.preventLarger,
+        exportMode: "same-folder",
+        exportSuffix: "-piclite",
+      },
+    );
+    return {
+      blob: new Blob([new Uint8Array(result.data)], { type: result.mimeType }),
+      width: result.width,
+      height: result.height,
+      keptOriginal: result.keptOriginal,
+      strategy: result.extension === "webp" ? `动态 WebP · ${Math.round(settings.quality)}%` : `GIF · ${Math.round(settings.quality)}%`,
+    };
+  }
+  if (item.type === "image/gif" && settings.format === "image/webp") {
+    throw new Error("动态 WebP 转换需要 PicLite 桌面客户端；网页端会保留 GIF 动画");
+  }
   const encodeCandidate = (candidateSettings: CompressionSettings) => item.type === "image/gif" && candidateSettings.format === "keep"
     ? animatedGifCompress(item, candidateSettings)
     : canvasCompress(item, candidateSettings);
@@ -1268,7 +1309,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
         scale,
         format,
         preventLarger: preferences.preventLarger,
-      });
+      }, bridge);
       const extension = outputExtension(compression.blob.type || file.type, file.name);
       const fileName = `clipboard${cleanSuffix(preferences.exportSuffix)}.${extension}`;
       const output = await bridge.copyCompressedData(new Uint8Array(await compression.blob.arrayBuffer()), fileName);
@@ -1932,7 +1973,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       if (!item) return;
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
       try {
-        const result = await compressImage(item, settings);
+        const result = await compressImage(item, settings, nativeBridge);
         if (generation !== livePreviewGenerationRef.current) return;
         const outputUrl = URL.createObjectURL(result.blob);
         setItems((current) => current.map((candidate) => {
@@ -1962,7 +2003,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       window.clearTimeout(timer);
       if (livePreviewGenerationRef.current === generation) livePreviewGenerationRef.current += 1;
     };
-  }, [selectedId, settings, t]);
+  }, [nativeBridge, selectedId, settings, t]);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -2014,7 +2055,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     if (!item) return;
     setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "processing", error: undefined } : candidate));
     try {
-      const result = await compressImage(item, settings);
+      const result = await compressImage(item, settings, nativeBridge);
       const outputUrl = URL.createObjectURL(result.blob);
       const completed: ImageItem = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, strategy: result.strategy, status: "done" };
       setItems((current) => current.map((candidate) => {
@@ -2026,7 +2067,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     } catch (error) {
       setItems((current) => current.map((candidate) => candidate.id === id ? { ...candidate, status: "error", error: error instanceof Error ? error.message : t("压缩失败", "Optimisation failed") } : candidate));
     }
-  }, [saveItemToGallery, settings, t]);
+  }, [nativeBridge, saveItemToGallery, settings, t]);
 
   const processAll = useCallback(async () => {
     if (!items.length) return;
@@ -2212,7 +2253,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         continue;
       }
       setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", error: undefined } : candidate));
-      const result = await compressImage(item, settings);
+      const result = await compressImage(item, settings, nativeBridge);
       const outputUrl = URL.createObjectURL(result.blob);
       const completed = { ...item, outputBlob: result.blob, outputUrl, outputBytes: result.blob.size, outputType: result.blob.type || item.type, outputWidth: result.width, outputHeight: result.height, keptOriginal: result.keptOriginal, sizeGuardQuality: result.sizeGuardQuality, strategy: result.strategy, status: "done" as const };
       setItems((current) => current.map((candidate) => {
@@ -2223,7 +2264,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       prepared.push({ item: completed, blob: result.blob });
     }
     return prepared;
-  }, [settings]);
+  }, [nativeBridge, settings]);
 
   const chooseExportFolder = useCallback(async () => {
     try {
@@ -2389,7 +2430,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     }
   }, [desktopPreferences.launchAtStartup, nativeBridge, showToast, t]);
 
-  const captureShortcut = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, preference: ShortcutPreferenceKey) => {
+  const captureShortcut = useCallback((event: ShortcutKeyEvent & { preventDefault: () => void; stopPropagation: () => void }, preference: ShortcutPreferenceKey) => {
     event.preventDefault();
     event.stopPropagation();
     const shortcut = shortcutFromKeyboardEvent(event);
@@ -2404,14 +2445,21 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   }, [showToast, t]);
 
   useEffect(() => {
+    if (!recordingShortcut) return;
+    const capture = (event: globalThis.KeyboardEvent) => captureShortcut(event, recordingShortcut);
+    window.addEventListener("keydown", capture, true);
+    return () => window.removeEventListener("keydown", capture, true);
+  }, [captureShortcut, recordingShortcut]);
+
+  useEffect(() => {
     if (!nativeBridge) return;
     void nativeBridge.configureGlobalShortcuts({
-      enabled: desktopPreferences.shortcutsEnabled,
+      enabled: desktopPreferences.shortcutsEnabled && !recordingShortcut,
       toggleDropzone: desktopPreferences.shortcutDock,
       optimiseClipboard: desktopPreferences.shortcutPaste,
       showMain: desktopPreferences.shortcutShow,
     }).catch(() => showToast(t("部分全局快捷键被其他软件占用，请重新设置", "Some global shortcuts are already used by another app")));
-  }, [desktopPreferences.shortcutDock, desktopPreferences.shortcutPaste, desktopPreferences.shortcutShow, desktopPreferences.shortcutsEnabled, nativeBridge, showToast, t]);
+  }, [desktopPreferences.shortcutDock, desktopPreferences.shortcutPaste, desktopPreferences.shortcutShow, desktopPreferences.shortcutsEnabled, nativeBridge, recordingShortcut, showToast, t]);
 
   const importImages = useCallback(async () => {
     try {
@@ -3231,7 +3279,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 ["shortcutShow", t("显示主窗口", "Show main window"), t("从任何软件快速唤起 PicLite", "Open PicLite from any application")],
                 ["shortcutPaste", t("压缩剪贴板图片", "Optimise clipboard image"), t("不启用剪贴板监听也能立即压缩当前图片，并在悬浮窗显示结果", "Optimise the current image and show the result without enabling clipboard monitoring")],
                 ["shortcutDock", t("打开 / 关闭悬浮窗", "Toggle floating window"), t("用同一快捷键显示或隐藏图片优化悬浮窗", "Use the same shortcut to show or hide the floating optimiser")],
-              ] as const).map(([preference, title, note]) => <div className="preference-row shortcut-row" key={preference}><div><strong>{title}</strong><small>{note}</small></div><button className={`shortcut-recorder ${recordingShortcut === preference ? "recording" : ""}`} type="button" disabled={!desktopPreferences.shortcutsEnabled} onClick={() => setRecordingShortcut(preference)} onBlur={() => setRecordingShortcut((current) => current === preference ? null : current)} onKeyDown={(event) => recordingShortcut === preference && captureShortcut(event, preference)}>{recordingShortcut === preference ? t("请按组合键…", "Press a shortcut…") : shortcutLabel(desktopPreferences[preference], nativeBridge?.platform || "win32")}</button></div>)}
+              ] as const).map(([preference, title, note]) => <div className="preference-row shortcut-row" key={preference}><div><strong>{title}</strong><small>{note}</small></div><button className={`shortcut-recorder ${recordingShortcut === preference ? "recording" : ""}`} type="button" disabled={!desktopPreferences.shortcutsEnabled} aria-pressed={recordingShortcut === preference} onClick={() => setRecordingShortcut((current) => current === preference ? null : preference)}>{recordingShortcut === preference ? t("请按快捷键…", "Press shortcut…") : shortcutLabel(desktopPreferences[preference], nativeBridge?.platform || "win32")}</button></div>)}
               <p className="shortcut-help">{t("点击组合键后直接按新的按键；Delete 清除，Esc 取消。快捷键必须包含 Ctrl/⌘ 或 Alt。", "Click a shortcut and press a new combination. Delete clears it, Esc cancels. Shortcuts must include Ctrl/⌘ or Alt.")}</p>
             </section>}
 

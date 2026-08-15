@@ -76,6 +76,15 @@ export type QuickCompressResult = {
   error?: string;
 };
 
+export type CompressedAnimationData = {
+  data: Uint8Array;
+  mimeType: string;
+  extension: string;
+  width: number;
+  height: number;
+  keptOriginal: boolean;
+};
+
 export type WatcherSettings = {
   inputFolder: string;
   inputFolders: string[];
@@ -111,6 +120,7 @@ export type PicLiteBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  compressAnimationData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<CompressedAnimationData>;
   configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string }) => Promise<void>;
   cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
   revealPath: (path: string) => Promise<void>;

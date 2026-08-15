@@ -1,8 +1,8 @@
-import { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { Icon } from "./clop-icons";
 import { fileName, formatBytes, loadSettings, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
-import type { DesktopSettings, ImageFormat, Language, OptimisationPreset, PicLiteBridge, QuickCompressResult } from "./clop-types";
+import type { DesktopSettings, ImageFormat, Language, OptimisationPreset, PicLiteBridge, QuickCompressResult, QuickCompressSettings } from "./clop-types";
 
 type ResultItem = QuickCompressResult & {
   id: string;
@@ -45,7 +45,9 @@ function percentage(item: QuickCompressResult) {
   return Math.round((1 - item.outputBytes / item.originalBytes) * 100);
 }
 
-function shortcutFromEvent(event: ReactKeyboardEvent<HTMLButtonElement>) {
+type ShortcutKeyEvent = Pick<globalThis.KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">;
+
+function shortcutFromEvent(event: ShortcutKeyEvent) {
   if (event.key === "Escape") return "escape";
   if (event.key === "Backspace" || event.key === "Delete") return "";
   if (["Meta", "Control", "Alt", "Shift"].includes(event.key)) return null;
@@ -54,8 +56,15 @@ function shortcutFromEvent(event: ReactKeyboardEvent<HTMLButtonElement>) {
   if (event.altKey) modifiers.push("Alt");
   if (event.shiftKey) modifiers.push("Shift");
   if (!modifiers.length) return null;
-  const aliases: Record<string, string> = { " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
-  const key = aliases[event.key] || (event.key.length === 1 ? event.key.toUpperCase() : event.key);
+  const aliases: Record<string, string> = { Space: "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Enter: "Enter", Tab: "Tab", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown" };
+  const key = event.code.startsWith("Key")
+    ? event.code.slice(3)
+    : event.code.startsWith("Digit")
+      ? event.code.slice(5)
+      : /^F(?:[1-9]|1\d|2[0-4])$/.test(event.code)
+        ? event.code
+        : aliases[event.code] || (event.key.length === 1 && /[a-z0-9]/i.test(event.key) ? event.key.toUpperCase() : "");
+  if (!key) return null;
   return [...modifiers, key].join("+");
 }
 
@@ -69,7 +78,7 @@ function cleanupSeconds(settings: DesktopSettings) {
   return Math.max(1, settings.autoCleanupAmount) * unit;
 }
 
-function nativeSettings(settings: DesktopSettings) {
+function nativeSettings(settings: DesktopSettings): QuickCompressSettings {
   const automatic = settings.preset.mode === "auto";
   return {
     mode: automatic ? "auto" : "manual",
@@ -450,7 +459,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
     const path = await api.selectFolder("export");
     if (path) patch("outputFolder", path);
   };
-  const captureShortcut = (event: ReactKeyboardEvent<HTMLButtonElement>, key: "shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain") => {
+  const captureShortcut = useCallback((event: ShortcutKeyEvent & { preventDefault: () => void; stopPropagation: () => void }, key: "shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain") => {
     event.preventDefault();
     event.stopPropagation();
     const shortcut = shortcutFromEvent(event);
@@ -459,9 +468,23 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       setRecordingShortcut(null);
       return;
     }
-    patch(key, shortcut);
+    setSettings((current) => ({ ...current, [key]: shortcut }));
     setRecordingShortcut(null);
-  };
+  }, [setSettings]);
+  useEffect(() => {
+    if (!recordingShortcut) return;
+    const capture = (event: globalThis.KeyboardEvent) => captureShortcut(event, recordingShortcut);
+    window.addEventListener("keydown", capture, true);
+    return () => window.removeEventListener("keydown", capture, true);
+  }, [captureShortcut, recordingShortcut]);
+  useEffect(() => {
+    void api.configureGlobalShortcuts({
+      enabled: settings.shortcutsEnabled && !recordingShortcut,
+      toggleDropzone: settings.shortcutToggleDropzone,
+      optimiseClipboard: settings.shortcutOptimiseClipboard,
+      showMain: settings.shortcutShowMain,
+    }).catch((error) => setWatchStatus(error instanceof Error ? error.message : String(error)));
+  }, [api, recordingShortcut, settings.shortcutOptimiseClipboard, settings.shortcutShowMain, settings.shortcutToggleDropzone, settings.shortcutsEnabled]);
   const cleanNow = async () => {
     if (!settings.outputFolder) return;
     setCleanupText(tr(language, "正在清理…", "Cleaning…"));
@@ -550,7 +573,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
           ["shortcutToggleDropzone", tr(language, "打开 / 关闭悬浮窗", "Toggle floating window")],
           ["shortcutOptimiseClipboard", tr(language, "压缩当前剪贴板图片", "Optimise current clipboard image")],
           ["shortcutShowMain", tr(language, "显示主窗口", "Show main window")],
-        ] as const).map(([key, title]) => <SettingsRow key={key} title={title}><button className={`shortcut-recorder ${recordingShortcut === key ? "recording" : ""}`} onClick={() => setRecordingShortcut(key)} onKeyDown={(event) => captureShortcut(event, key)}>{recordingShortcut === key ? tr(language, "请按快捷键…", "Press shortcut…") : shortcutLabel(settings[key], api.platform)}</button></SettingsRow>)}
+        ] as const).map(([key, title]) => <SettingsRow key={key} title={title}><button className={`shortcut-recorder ${recordingShortcut === key ? "recording" : ""}`} aria-pressed={recordingShortcut === key} onClick={() => setRecordingShortcut((current) => current === key ? null : key)}>{recordingShortcut === key ? tr(language, "请按快捷键…", "Press shortcut…") : shortcutLabel(settings[key], api.platform)}</button></SettingsRow>)}
       </SettingsCard>}
       {section === "updates" && <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>}
       {section === "about" && <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><Brand /><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>}

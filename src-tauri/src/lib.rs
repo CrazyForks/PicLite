@@ -41,7 +41,8 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use url::Url;
-use webp::Encoder as LossyWebPEncoder;
+use webp::{AnimEncoder as AnimatedWebPEncoder, AnimFrame as AnimatedWebPFrame};
+use webp::{Encoder as LossyWebPEncoder, WebPConfig};
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"];
 
@@ -57,6 +58,7 @@ struct DesktopState {
     watcher_settings: Mutex<Option<WatcherSettings>>,
     folders: Mutex<SelectedFolders>,
     source_files: Mutex<HashSet<PathBuf>>,
+    pending_corner_drop: Mutex<Vec<String>>,
     processing: Arc<Mutex<HashSet<PathBuf>>>,
     quitting: AtomicBool,
     tray_available: AtomicBool,
@@ -79,6 +81,7 @@ impl Default for DesktopState {
             watcher_settings: Mutex::new(None),
             folders: Mutex::new(SelectedFolders::default()),
             source_files: Mutex::new(HashSet::new()),
+            pending_corner_drop: Mutex::new(Vec::new()),
             processing: Arc::new(Mutex::new(HashSet::new())),
             quitting: AtomicBool::new(false),
             tray_available: AtomicBool::new(false),
@@ -200,6 +203,17 @@ struct QuickCompressResult {
     output_bytes: Option<u64>,
     kept_original: bool,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressedAnimationData {
+    data: String,
+    mime_type: String,
+    extension: String,
+    width: u32,
+    height: u32,
+    kept_original: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -575,6 +589,139 @@ fn encode_gif(original: &[u8], width: u32, height: u32, quality: u8) -> Result<V
     Ok(encoded)
 }
 
+fn gif_delay_ms(delay: image::Delay) -> i32 {
+    let (numerator, denominator) = delay.numer_denom_ms();
+    let denominator = denominator.max(1) as u64;
+    let rounded = (numerator as u64 + denominator / 2) / denominator;
+    rounded.clamp(10, i32::MAX as u64) as i32
+}
+
+fn encode_animated_webp(
+    original: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    let decoder = GifDecoder::new(BufReader::new(Cursor::new(original)))
+        .map_err(|error| error.to_string())?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|error| error.to_string())?;
+    if frames.is_empty() {
+        return Err("GIF 不包含可编码的动画帧".to_string());
+    }
+
+    let mut timestamp = 0_i32;
+    let mut encoded_frames = Vec::with_capacity(frames.len() + 1);
+    for frame in frames {
+        let delay = gif_delay_ms(frame.delay());
+        let mut buffer = frame.into_buffer();
+        if buffer.width() != width || buffer.height() != height {
+            buffer = image::imageops::resize(&buffer, width, height, FilterType::Lanczos3);
+        }
+        encoded_frames.push((buffer.into_raw(), timestamp));
+        timestamp = timestamp.saturating_add(delay);
+    }
+    // libwebp derives the final frame duration from the following timestamp.
+    // Repeating the last pixels at the animation end preserves the GIF delay
+    // without adding a visually distinct frame.
+    if let Some((last, _)) = encoded_frames.last() {
+        encoded_frames.push((last.clone(), timestamp.max(10)));
+    }
+
+    let mut config = WebPConfig::new().map_err(|_| "无法初始化动态 WebP 编码器".to_string())?;
+    config.lossless = 0;
+    config.quality = quality.clamp(1, 100) as f32;
+    config.alpha_quality = quality.clamp(35, 100) as i32;
+    config.method = 6;
+    config.thread_level = 1;
+    let mut encoder = AnimatedWebPEncoder::new(width, height, &config);
+    encoder.set_bgcolor([0, 0, 0, 0]);
+    encoder.set_loop_count(0);
+    for (pixels, frame_timestamp) in &encoded_frames {
+        encoder.add_frame(AnimatedWebPFrame::from_rgba(
+            pixels,
+            width,
+            height,
+            *frame_timestamp,
+        ));
+    }
+    let encoded = encoder
+        .try_encode()
+        .map_err(|error| format!("动态 WebP 编码失败：{error:?}"))?;
+    Ok(encoded.to_vec())
+}
+
+fn optimize_gif_animation(
+    original: &[u8],
+    settings: &WatcherSettings,
+) -> Result<OptimizedImage, String> {
+    let decoder = GifDecoder::new(BufReader::new(Cursor::new(original)))
+        .map_err(|error| error.to_string())?;
+    let (width, height) = decoder.dimensions();
+    let (target_width, target_height) = target_dimensions(width, height, settings);
+
+    if settings.format == "image/webp" {
+        return Ok(OptimizedImage {
+            bytes: encode_animated_webp(original, target_width, target_height, settings.quality)?,
+            extension: "webp".to_string(),
+        });
+    }
+
+    if settings.format == "keep" && matches!(settings.mode.as_str(), "balanced" | "small") {
+        let quality = if settings.mode == "balanced" {
+            settings.quality.clamp(78, 88)
+        } else {
+            settings.quality.min(58).max(1)
+        };
+        let gif = encode_gif(original, target_width, target_height, quality)?;
+        let webp = encode_animated_webp(original, target_width, target_height, quality)?;
+        let mut best = if webp.len() < gif.len() {
+            OptimizedImage {
+                bytes: webp,
+                extension: "webp".to_string(),
+            }
+        } else {
+            OptimizedImage {
+                bytes: gif,
+                extension: "gif".to_string(),
+            }
+        };
+        if settings.prevent_larger && !has_meaningful_savings(original.len(), best.bytes.len()) {
+            best = OptimizedImage {
+                bytes: original.to_vec(),
+                extension: "gif".to_string(),
+            };
+        }
+        return Ok(best);
+    }
+
+    let candidate = encode_gif(original, target_width, target_height, settings.quality)?;
+    let visual_transform = target_width != width || target_height != height;
+    if settings.prevent_larger && candidate.len() >= original.len() {
+        if visual_transform {
+            for quality in guarded_quality_steps(settings.quality) {
+                let guarded = encode_gif(original, target_width, target_height, quality)?;
+                if guarded.len() < original.len() {
+                    return Ok(OptimizedImage {
+                        bytes: guarded,
+                        extension: "gif".to_string(),
+                    });
+                }
+            }
+        }
+        return Ok(OptimizedImage {
+            bytes: original.to_vec(),
+            extension: "gif".to_string(),
+        });
+    }
+    Ok(OptimizedImage {
+        bytes: candidate,
+        extension: "gif".to_string(),
+    })
+}
+
 fn encode_static(
     image: DynamicImage,
     output_extension: &str,
@@ -632,34 +779,8 @@ struct OptimizedImage {
 fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedImage, String> {
     let original = fs::read(path).map_err(|error| error.to_string())?;
     let source_extension = extension_for(path, "keep");
-    if source_extension == "gif" && settings.format == "keep" {
-        let decoder = GifDecoder::new(BufReader::new(Cursor::new(&original)))
-            .map_err(|error| error.to_string())?;
-        let (width, height) = decoder.dimensions();
-        let (target_width, target_height) = target_dimensions(width, height, settings);
-        let candidate = encode_gif(&original, target_width, target_height, settings.quality)?;
-        let visual_transform = target_width != width || target_height != height;
-        if settings.prevent_larger && candidate.len() >= original.len() {
-            if visual_transform {
-                for quality in guarded_quality_steps(settings.quality) {
-                    let guarded = encode_gif(&original, target_width, target_height, quality)?;
-                    if guarded.len() < original.len() {
-                        return Ok(OptimizedImage {
-                            bytes: guarded,
-                            extension: source_extension,
-                        });
-                    }
-                }
-            }
-            return Ok(OptimizedImage {
-                bytes: original,
-                extension: source_extension,
-            });
-        }
-        return Ok(OptimizedImage {
-            bytes: candidate,
-            extension: source_extension,
-        });
+    if source_extension == "gif" && matches!(settings.format.as_str(), "keep" | "image/webp") {
+        return optimize_gif_animation(&original, settings);
     }
 
     let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
@@ -1025,6 +1146,44 @@ async fn quick_compress_paths(
 }
 
 #[tauri::command]
+async fn compress_animation_data(
+    data: Vec<u8>,
+    file_name: String,
+    settings: QuickCompressSettings,
+) -> Result<CompressedAnimationData, String> {
+    if data.is_empty() || data.len() > 256 * 1024 * 1024 {
+        return Err("动画图片为空或超过 256 MB".to_string());
+    }
+    let extension = Path::new(&file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension != "gif" {
+        return Err("当前原生动画编码仅接受 GIF".to_string());
+    }
+    let compression = quick_settings(&settings);
+    let decoder =
+        GifDecoder::new(BufReader::new(Cursor::new(&data))).map_err(|error| error.to_string())?;
+    let (source_width, source_height) = decoder.dimensions();
+    let (width, height) = target_dimensions(source_width, source_height, &compression);
+    let optimized = optimize_gif_animation(&data, &compression)?;
+    let mime_type = if optimized.extension == "webp" {
+        "image/webp"
+    } else {
+        "image/gif"
+    };
+    Ok(CompressedAnimationData {
+        kept_original: optimized.extension == "gif" && optimized.bytes == data,
+        data: BASE64.encode(optimized.bytes),
+        mime_type: mime_type.to_string(),
+        extension: optimized.extension,
+        width,
+        height,
+    })
+}
+
+#[tauri::command]
 async fn update_desktop_preferences(
     preferences: NativeDesktopPreferences,
     state: State<'_, DesktopState>,
@@ -1166,6 +1325,41 @@ async fn show_gallery_window(app: AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     show_window(&app, "main");
     Ok(())
+}
+
+#[tauri::command]
+async fn submit_corner_drop(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let valid = paths
+        .into_iter()
+        .filter(|path| {
+            let path = Path::new(path);
+            path.is_file() && is_image(path)
+        })
+        .collect::<Vec<_>>();
+    if valid.is_empty() {
+        return Err("拖放内容中没有支持的图片".to_string());
+    }
+    *state
+        .pending_corner_drop
+        .lock()
+        .map_err(|_| "拖放队列不可用".to_string())? = valid;
+    ensure_dropzone_positioned(&app, &state);
+    show_window(&app, "dropzone");
+    app.emit("corner:drop", ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<String>, String> {
+    let mut pending = state
+        .pending_corner_drop
+        .lock()
+        .map_err(|_| "拖放队列不可用".to_string())?;
+    Ok(std::mem::take(&mut *pending))
 }
 
 #[tauri::command]
@@ -3275,6 +3469,7 @@ pub fn run() {
             save_upload_profile,
             export_images,
             quick_compress_paths,
+            compress_animation_data,
             configure_global_shortcuts,
             cleanup_optimised_files,
             update_desktop_preferences,
@@ -3283,6 +3478,8 @@ pub fn run() {
             open_external_url,
             show_main_window,
             show_gallery_window,
+            submit_corner_drop,
+            take_pending_corner_drop,
             show_preferences_window,
             show_dropzone_window,
             configure_dropzone_window,
@@ -3407,6 +3604,45 @@ mod tests {
             small.len(),
             detailed.len()
         );
+    }
+
+    #[test]
+    fn animated_gif_converts_to_animated_webp_with_timing() {
+        let width = 48;
+        let height = 32;
+        let mut gif = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut gif);
+            encoder.set_repeat(Repeat::Infinite).expect("set GIF loop");
+            for (index, color) in [[255, 32, 32, 255], [32, 255, 32, 180], [32, 32, 255, 255]]
+                .into_iter()
+                .enumerate()
+            {
+                let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        buffer,
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80 + index as u32 * 40, 1),
+                    ))
+                    .expect("encode GIF frame");
+            }
+        }
+
+        let webp = encode_animated_webp(&gif, width, height, 72).expect("encode animated WebP");
+        let decoded = webp::AnimDecoder::new(&webp)
+            .decode()
+            .expect("decode animated WebP");
+
+        assert_eq!(&webp[8..12], b"WEBP");
+        assert!(decoded.has_animation());
+        assert!(decoded.len() >= 3);
+        let timestamps = decoded
+            .into_iter()
+            .map(|frame| frame.get_time_ms())
+            .collect::<Vec<_>>();
+        assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
