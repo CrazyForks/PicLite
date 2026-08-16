@@ -20,6 +20,8 @@ PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，�
 
 英文说明、下载表格和英文部署教程请见独立页面：[README.en-US.md](README.en-US.md)。
 
+<img width="1702" height="982" alt="image" src="https://github.com/user-attachments/assets/299fa2e2-5512-4a5c-9581-0e146e95089a" />
+
 ![PicLite 压缩、水印与导出界面](docs/images/piclite-workspace.png)
 
 ## 下个版本优化
