@@ -1,6 +1,5 @@
 # PicLite 图轻
 
-> 许可证：GPL-3.0-or-later。桌面自动化能力的部分设计及标注为改编的实现源自 [FuzzyIdeas/Clop](https://github.com/FuzzyIdeas/Clop)，详细署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ![PicLite 图轻](public/og.png)
 
@@ -11,7 +10,10 @@
 
 PicLite 是一款本地优先、可自托管的图片与 GIF 压缩工作台，支持 Web、Windows、macOS 和 Linux。它可以在执行前实时预估输出体积，并用连续的画质和尺寸控制把文件压到你需要的大小。
 
-[在线体验](https://piclite-image.zwistidjaa331.chatgpt.site) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [报告问题](https://github.com/amiaoapp/PicLite/issues) · [English README](README.en-US.md)
+ [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [报告问题](https://github.com/amiaoapp/PicLite/issues) · [English README](README.en-US.md)
+
+> 许可证：GPL-3.0-or-later。桌面自动化能力的部分设计及标注为改编的实现源自 [FuzzyIdeas/Clop](https://github.com/FuzzyIdeas/Clop)，详细署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 
 ## 适用人群
 
