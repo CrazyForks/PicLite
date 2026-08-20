@@ -19,6 +19,11 @@
 - 可加载本地 HTML/JavaScript 或 URL 工作台插件；图库与文件夹监测也可独立启停
 - Tauri 2 + Rust 桌面端；图片默认只在本机处理
 
+## 截图
+
+<img width="2924" height="1602" alt="image" src="https://github.com/user-attachments/assets/2379e6d7-e1ef-444d-890f-e2ea7942abe9" />
+
+
 ## 下载
 
 在 [Releases](https://github.com/amiaoapp/PicLite/releases) 下载：
