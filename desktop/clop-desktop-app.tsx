@@ -550,7 +550,7 @@ function BatchOptimiser({ api }: { api: PicLiteBridge }) {
   </main>;
 }
 
-type SettingsSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "zones" | "floating" | "hosting" | "plugins" | "shortcuts" | "updates" | "about";
+type SettingsSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "zones" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
 const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: string; group?: string }> = [
   { id: "general", icon: "gear", zh: "通用", en: "General" },
@@ -558,14 +558,32 @@ const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: st
   { id: "files", icon: "folder", zh: "文件处理", en: "File handling" },
   { id: "images", icon: "image", zh: "图片", en: "Images", group: "types" },
   { id: "dropzone", icon: "drop", zh: "拖放区", en: "Drop Zone", group: "results" },
-  { id: "zones", icon: "zones", zh: "预设区域", en: "Preset Zones" },
+  { id: "zones", icon: "zones", zh: "悬浮按钮", en: "Action Buttons" },
   { id: "floating", icon: "results", zh: "悬浮结果", en: "Floating Results" },
   { id: "hosting", icon: "upload", zh: "图床上传", en: "Image Hosting" },
   { id: "plugins", icon: "zones", zh: "插件", en: "Plugins" },
   { id: "shortcuts", icon: "shortcut", zh: "键盘快捷键", en: "Keyboard Shortcuts", group: "automation" },
-  { id: "updates", icon: "spark", zh: "更新", en: "Updates", group: "support" },
-  { id: "about", icon: "info", zh: "关于", en: "About" },
+  { id: "about", icon: "info", zh: "更新与关于", en: "Updates & About", group: "support" },
 ];
+
+const FLOATING_ACTION_OPTIONS: FloatingAction[] = ["downscale", "watermark", "undo", "copy", "preview", "reveal", "gallery", "upload"];
+
+function floatingActionLabel(language: Language, action: FloatingAction) {
+  return ({
+    downscale: tr(language, "减半", "Half"),
+    watermark: tr(language, "水印", "Watermark"),
+    undo: tr(language, "撤销", "Undo"),
+    copy: tr(language, "复制", "Copy"),
+    preview: tr(language, "预览", "Preview"),
+    reveal: tr(language, "定位", "Reveal"),
+    gallery: tr(language, "图库", "Library"),
+    upload: tr(language, "图床", "Upload"),
+  } as Record<FloatingAction, string>)[action];
+}
+
+function floatingActionIcon(action: FloatingAction) {
+  return ({ downscale: "minus", watermark: "watermark", undo: "undo", copy: "copy", preview: "eye", reveal: "folder", gallery: "gallery", upload: "upload" } as Record<FloatingAction, string>)[action];
+}
 
 function SettingsRow({ title, note, children }: { title: React.ReactNode; note?: React.ReactNode; children: React.ReactNode }) {
   return <div className="settings-row"><div><strong>{title}</strong>{note && <small>{note}</small>}</div><div className="settings-control">{children}</div></div>;
@@ -807,14 +825,40 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="批量模式阈值" en="Batch mode threshold" />} note={<T language={language} zh="超过此数量时改用批量窗口" en="Use the batch window above this file count" />}><span className="number-field"><input type="number" min="2" max="500" value={settings.batchThreshold} onChange={(event) => patch("batchThreshold", Math.max(2, Number(event.target.value)))} /> {tr(language, "个文件", "files")}</span></SettingsRow>
         <div className="dropzone-demo"><DropSurface language={language} active /></div>
       </SettingsCard>}
-      {section === "zones" && <SettingsCard title={<T language={language} zh="预设区域" en="Preset zones" />} note={<T language={language} zh="将不同参数固定成四个快速拖放目标" en="Assign four quick drop targets to different presets" />}><div className="preset-zone-grid">{[0, 1, 2, 3].map((value) => <button key={value}><Icon name={value === 0 ? "plus" : "zones"} /><span>{value === 0 ? tr(language, "添加预设", "Add preset") : tr(language, "暂无预设", "No preset")}</span></button>)}</div></SettingsCard>}
+      {section === "zones" && <SettingsCard title={<T language={language} zh="悬浮按钮" en="Floating action buttons" />} note={<T language={language} zh="按顺序配置悬浮结果中显示的功能，最多 6 个。点击下方功能即可添加。" en="Choose and order up to six actions shown over floating results. Select an action below to add it." />}>
+        <div className="floating-action-configurator">
+          <div className="floating-action-slots">
+            {Array.from({ length: 6 }, (_, index) => {
+              const action = settings.floatingActions[index];
+              if (!action) return <div className="floating-action-slot empty" key={`empty-${index}`}><Icon name="plus" /><span>{tr(language, "添加功能", "Add action")}</span><small>{index + 1}</small></div>;
+              return <div className="floating-action-slot" key={action}>
+                <span className="action-slot-icon"><Icon name={floatingActionIcon(action)} /></span>
+                <strong>{floatingActionLabel(language, action)}</strong>
+                <small>{index + 1}</small>
+                <span className="action-slot-controls">
+                  <button disabled={index === 0} title={tr(language, "向前移动", "Move earlier")} onClick={() => setSettings((current) => { const next = [...current.floatingActions]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return { ...current, floatingActions: next }; })}>←</button>
+                  <button disabled={index === settings.floatingActions.length - 1} title={tr(language, "向后移动", "Move later")} onClick={() => setSettings((current) => { const next = [...current.floatingActions]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return { ...current, floatingActions: next }; })}>→</button>
+                  <button title={tr(language, "移除", "Remove")} onClick={() => setSettings((current) => ({ ...current, floatingActions: current.floatingActions.filter((value) => value !== action) }))}>×</button>
+                </span>
+              </div>;
+            })}
+          </div>
+          <div className="floating-action-library">
+            <span>{tr(language, "可添加功能", "Available actions")}</span>
+            <div>{FLOATING_ACTION_OPTIONS.map((action) => {
+              const selected = settings.floatingActions.includes(action);
+              return <button key={action} disabled={selected || settings.floatingActions.length >= 6} onClick={() => setSettings((current) => ({ ...current, floatingActions: [...current.floatingActions, action].slice(0, 6) }))}><Icon name={floatingActionIcon(action)} /><span>{floatingActionLabel(language, action)}</span>{selected && <small>{tr(language, "已添加", "Added")}</small>}</button>;
+            })}</div>
+          </div>
+        </div>
+      </SettingsCard>}
       {section === "floating" && <SettingsCard title={<T language={language} zh="悬浮结果" en="Floating results" />} note={<T language={language} zh="优化结束后在桌面边缘显示结果卡片" en="Show result cards at the edge of the desktop" />}>
         <SettingsRow title={<T language={language} zh="显示悬浮结果" en="Show floating results" />}><Switch label="floating" checked={settings.enableFloatingResults} onChange={(value) => patch("enableFloatingResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="屏幕位置" en="Position on screen" />}><Select label="corner" value={settings.floatingCorner} onChange={(value) => patch("floatingCorner", value)}><option value="bottom-right">{tr(language, "右下角", "Bottom right")}</option><option value="bottom-left">{tr(language, "左下角", "Bottom left")}</option><option value="top-right">{tr(language, "右上角", "Top right")}</option><option value="top-left">{tr(language, "左上角", "Top left")}</option></Select></SettingsRow>
         <SettingsRow title={<T language={language} zh="布局" en="Layout" />}><div className="segmented"><button className={settings.floatingLayout === "compact" ? "active" : ""} onClick={() => patch("floatingLayout", "compact")}>{tr(language, "紧凑", "Compact")}</button><button className={settings.floatingLayout === "full" ? "active" : ""} onClick={() => patch("floatingLayout", "full")}>{tr(language, "完整", "Full")}</button></div></SettingsRow>
         <SettingsRow title={<T language={language} zh="结果展示方式" en="Result presentation" />} note={<T language={language} zh="堆叠占用更少空间，展开可连续浏览" en="Stacked uses less space; list shows every result" />}><div className="segmented"><button className={settings.floatingDisplayMode === "stack" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "stack")}>{tr(language, "堆叠", "Stacked")}</button><button className={settings.floatingDisplayMode === "list" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "list")}>{tr(language, "展开", "List")}</button></div></SettingsRow>
         <SettingsRow title={<T language={language} zh="最多保留结果" en="Maximum results" />} note={<T language={language} zh="超过数量时自动移除最早的结果" en="The oldest result is dismissed when the limit is reached" />}><span className="number-field"><input type="number" min="1" max="20" value={settings.floatingMaxResults} onChange={(event) => patch("floatingMaxResults", Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /> {tr(language, "张", "images")}</span></SettingsRow>
-        <SettingsRow title={<T language={language} zh="悬浮按钮（最多 6 个）" en="Floating actions (up to 6)" />} note={<T language={language} zh="拖动缩放、图床、图库等功能可以自由组合" en="Choose the six actions that match your workflow" />}><div className="floating-action-picker">{(["downscale", "watermark", "undo", "copy", "preview", "reveal", "gallery", "upload"] as FloatingAction[]).map((action) => <label key={action}><input type="checkbox" checked={settings.floatingActions.includes(action)} onChange={(event) => setSettings((current) => ({ ...current, floatingActions: event.target.checked ? [...current.floatingActions, action].slice(0, 6) : current.floatingActions.filter((value) => value !== action) }))} />{({ downscale: tr(language, "减半", "Half"), watermark: tr(language, "水印", "Watermark"), undo: tr(language, "撤销", "Undo"), copy: tr(language, "复制", "Copy"), preview: tr(language, "预览", "Preview"), reveal: tr(language, "定位", "Reveal"), gallery: tr(language, "图库", "Library"), upload: tr(language, "图床", "Upload") } as Record<FloatingAction, string>)[action]}</label>)}</div></SettingsRow>
+        <SettingsRow title={<T language={language} zh="悬浮按钮" en="Floating actions" />} note={<T language={language} zh="已移到“悬浮按钮”页面，可配置顺序和最多 6 个功能。" en="Configure the order and up to six actions on the Action Buttons page." />}><button className="settings-button" onClick={() => setSection("zones")}><T language={language} zh="配置按钮" en="Configure actions" /></button></SettingsRow>
         <SettingsRow title={<T language={language} zh="水印文字与字体" en="Watermark text and font" />} note={fontStatus}><span className="inline-fields"><input value={settings.floatingWatermark.text} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, text: event.target.value })} /><select value={settings.floatingWatermark.fontFamily} onChange={(event) => void selectWatermarkFont(event.target.value)}><option value={settings.floatingWatermark.fontFamily}>{settings.floatingWatermark.fontFamily}</option>{[...new Set(systemFonts.map((font) => font.family))].filter((font) => font !== settings.floatingWatermark.fontFamily).sort().map((font) => <option key={font} value={font}>{font}</option>)}</select><button className="settings-button" onClick={() => void refreshFonts()}>{tr(language, "读取系统字体", "Scan fonts")}</button><button className="settings-button" onClick={() => fontInputRef.current?.click()}>{tr(language, "导入字体", "Import font")}</button></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="字号 / 密度 / 方向" en="Size / density / angle" />}><span className="inline-fields compact"><input title="size" type="number" min="0.5" max="30" step="0.5" value={settings.floatingWatermark.fontScale} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, fontScale: Number(event.target.value) })} /><input title="density" type="number" min="1" max="100" value={settings.floatingWatermark.density} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, density: Number(event.target.value) })} /><input title="rotation" type="number" min="-180" max="180" value={settings.floatingWatermark.rotation} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, rotation: Number(event.target.value) })} /></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="颜色 / 透明度" en="Colour / opacity" />}><span className="inline-fields compact"><input type="color" value={settings.floatingWatermark.color} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, color: event.target.value })} /><input type="number" min="1" max="100" value={settings.floatingWatermark.opacity} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, opacity: Number(event.target.value) })} /></span></SettingsRow>
@@ -836,7 +880,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="公开访问地址" en="Public base URL" />} note={uploadSaved}><span className="inline-fields"><input value={uploadProfile.publicBaseUrl} onChange={(event) => setUploadProfile((current) => ({ ...current, publicBaseUrl: event.target.value }))} /><button className="settings-button" onClick={() => void api.saveUploadProfile(uploadProfile).then(() => setUploadSaved(tr(language, "已保存到本机", "Saved locally")))}><T language={language} zh="保存" en="Save" /></button></span></SettingsRow>
       </SettingsCard>}
       {section === "plugins" && <SettingsCard title={<T language={language} zh="工作台插件" en="Workbench plugins" />} note={pluginStatus || <T language={language} zh="启用内置功能，或载入本地 HTML / JavaScript 和网页工具。插件在隔离工作台中运行。" en="Enable built-ins or load local HTML/JavaScript and web tools. Plugins run in an isolated workbench." />}>
-        {workspacePlugins.map((plugin) => <SettingsRow key={plugin.id} title={language === "zh" ? plugin.nameZh : plugin.nameEn} note={plugin.kind === "builtin" ? tr(language, "内置插件", "Built-in plugin") : plugin.kind === "url" ? plugin.url : tr(language, "本地沙箱插件", "Local sandboxed plugin")}><span className="inline-fields"><Switch label={plugin.nameEn} checked={plugin.enabled} onChange={(enabled) => setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, enabled } : item))} />{plugin.kind !== "builtin" && <button className="settings-button danger" onClick={() => setWorkspacePlugins((current) => current.filter((item) => item.id !== plugin.id))}>{tr(language, "移除", "Remove")}</button>}</span></SettingsRow>)}
+        {workspacePlugins.map((plugin) => <SettingsRow key={plugin.id} title={plugin.kind === "builtin" ? (language === "zh" ? plugin.nameZh : plugin.nameEn) : <input className="plugin-title-input" aria-label={tr(language, "插件显示名称", "Plugin display title")} value={language === "zh" ? plugin.nameZh : plugin.nameEn} onChange={(event) => { const name = event.target.value; setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, nameZh: name, nameEn: name } : item)); }} />} note={plugin.kind === "builtin" ? tr(language, "内置插件", "Built-in plugin") : plugin.kind === "url" ? plugin.url : tr(language, "本地沙箱插件", "Local sandboxed plugin")}><span className="inline-fields"><Switch label={plugin.nameEn} checked={plugin.enabled} onChange={(enabled) => setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, enabled } : item))} />{plugin.kind !== "builtin" && <button className="settings-button danger" onClick={() => setWorkspacePlugins((current) => current.filter((item) => item.id !== plugin.id))}>{tr(language, "移除", "Remove")}</button>}</span></SettingsRow>)}
         <SettingsRow title={<T language={language} zh="本地插件" en="Local plugin" />} note={<T language={language} zh="支持 .html、.js 和 manifest.json" en="Supports .html, .js and manifest.json" />}><button className="settings-button" onClick={() => pluginInputRef.current?.click()}>{tr(language, "导入插件", "Import plugin")}</button></SettingsRow>
         <SettingsRow title={<T language={language} zh="网页工具" en="Web tool" />} note={<T language={language} zh="例如 https://banner.xmit.dev/" en="For example https://banner.xmit.dev/" />}><span className="inline-fields"><input value={pluginUrl} onChange={(event) => setPluginUrl(event.target.value)} /><button className="settings-button" onClick={addUrlPlugin}>{tr(language, "添加", "Add")}</button></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="打开工作台" en="Open workbench" />} note={<T language={language} zh="启用的插件会显示在主窗口顶部导航中" en="Enabled plugins appear in the main window navigation" />}><button className="settings-button" onClick={() => void api.showMainWindow()}>{tr(language, "查看插件", "View plugins")}</button></SettingsRow>
@@ -851,8 +895,10 @@ function Preferences({ api }: { api: PicLiteBridge }) {
           ["shortcutUploadCurrent", tr(language, "上传当前悬浮结果", "Upload current floating result")],
         ] as const).map(([key, title]) => <SettingsRow key={key} title={title}><button className={`shortcut-recorder ${recordingShortcut === key ? "recording" : ""}`} aria-pressed={recordingShortcut === key} onClick={() => setRecordingShortcut((current) => current === key ? null : key)}>{recordingShortcut === key ? tr(language, "请按快捷键…", "Press shortcut…") : shortcutLabel(settings[key], api.platform)}</button></SettingsRow>)}
       </SettingsCard>}
-      {section === "updates" && <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>}
-      {section === "about" && <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><Brand /><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>}
+      {section === "about" && <>
+        <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>
+        <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><Brand /><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>
+      </>}
     </div>
   </main>;
 }

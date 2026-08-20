@@ -35,6 +35,7 @@ html.dropzone-root, html.dropzone-root body, html.dropzone-root #root { border-r
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 svg { width: 18px; height: 18px; }
+.visually-hidden { position: fixed !important; width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; border: 0 !important; opacity: 0 !important; pointer-events: none !important; }
 
 .piclite-brand { display: flex; align-items: center; gap: 10px; min-width: 140px; }
 .piclite-brand strong { font-size: 18px; letter-spacing: -.35px; }
@@ -98,9 +99,9 @@ svg { width: 18px; height: 18px; }
 .floating-empty-footer button { width: 29px; height: 29px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--card); }
 .floating-empty-footer button:hover { background: var(--surface); }
 .floating-empty-footer svg { width: 14px; height: 14px; }
-.floating-list { min-height: 0; overflow: auto; padding: 8px; display: grid; align-content: start; gap: 8px; scrollbar-width: thin; }
+.floating-list { min-height: 0; overflow: auto; padding: 4px; display: grid; align-content: start; gap: 5px; scrollbar-width: thin; }
 .floating-result-slot { min-width: 0; }
-.floating-list.stack { position: relative; display: grid; overflow: hidden; align-content: stretch; padding: 8px 10px 10px; }
+.floating-list.stack { position: relative; display: grid; overflow: hidden; align-content: stretch; padding: 3px 4px 8px; }
 .floating-list.stack .floating-result-slot { grid-area: 1 / 1; min-height: 0; transform: translateY(calc(var(--stack-index) * 9px)); transform-origin: top center; z-index: calc(20 - var(--stack-index)); pointer-events: none; transition: transform .24s cubic-bezier(.2,.75,.25,1), opacity .2s ease; }
 .floating-list.stack .floating-result-slot:nth-child(2) { transform: translateY(9px) scale(.982); }
 .floating-list.stack .floating-result-slot:nth-child(3) { transform: translateY(18px) scale(.964); }
@@ -210,19 +211,30 @@ svg { width: 18px; height: 18px; }
 .add-path { display: flex; align-items: center; gap: 6px; margin: 0 12px 12px; }
 .add-path svg { width: 14px; }
 .dropzone-demo { padding: 20px; }
-.preset-zone-grid { display: grid; grid-template-columns: repeat(2, 150px); justify-content: center; gap: 16px; padding: 34px; }
-.preset-zone-grid button { height: 120px; display: grid; place-items: center; align-content: center; gap: 9px; border: 1px dashed rgba(127,127,127,.42); border-radius: 18px; background: var(--surface); box-shadow: 0 10px 28px rgba(0,0,0,.07); }
-.preset-zone-grid button svg { width: 25px; height: 25px; }
-.preset-zone-grid button span { color: var(--muted); font-size: 12px; }
+.floating-action-configurator { padding: 22px; }
+.floating-action-slots { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)); gap: 10px; }
+.floating-action-slot { position: relative; min-height: 112px; display: grid; grid-template-columns: auto 1fr; grid-template-rows: 1fr auto; align-items: center; gap: 7px 10px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 8px 22px rgba(0,0,0,.05); }
+.floating-action-slot > small { position: absolute; top: 8px; right: 10px; color: var(--muted); font-size: 9px; }
+.floating-action-slot.empty { grid-template-columns: 1fr; place-items: center; align-content: center; gap: 6px; border-style: dashed; color: var(--muted); box-shadow: none; }
+.floating-action-slot.empty > svg { width: 22px; height: 22px; }
+.action-slot-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 9px; color: white; background: var(--accent); }
+.action-slot-icon svg { width: 17px; height: 17px; }
+.action-slot-controls { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.action-slot-controls button { height: 24px; border: 0; border-radius: 6px; background: rgba(127,127,127,.12); }
+.floating-action-library { margin-top: 18px; padding-top: 17px; border-top: 1px solid var(--line); }
+.floating-action-library > span { color: var(--muted); font-size: 10px; font-weight: 650; }
+.floating-action-library > div { display: grid; grid-template-columns: repeat(4, minmax(100px, 1fr)); gap: 7px; margin-top: 9px; }
+.floating-action-library button { position: relative; min-height: 42px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 10px; }
+.floating-action-library button svg { width: 15px; height: 15px; }
+.floating-action-library button small { margin-left: auto; color: var(--muted); font-size: 8px; }
 .floating-preview { width: 360px; margin: 28px auto; padding: 12px; border-radius: 18px; background: rgba(127,127,127,.08); }
 .settings-row kbd { padding: 5px 8px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: var(--surface); font-size: 12px; }
-.floating-action-picker { display: grid; grid-template-columns: repeat(4, auto); gap: 7px 10px; justify-content: end; }
-.floating-action-picker label { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; white-space: nowrap; }
-.floating-action-picker input { min-width: 0 !important; width: 14px; height: 14px; }
 .inline-fields { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .settings-control .inline-fields input { min-width: 0; width: 150px; }
 .settings-control .inline-fields.compact input { width: 82px; }
 .settings-control .inline-fields input[type="color"] { width: 42px; padding: 3px; }
+.settings-row .plugin-title-input { min-width: 180px; max-width: 300px; height: 29px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; outline: none; background: rgba(255,255,255,.48); font-size: 11px; font-weight: 600; }
+.settings-row .plugin-title-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
 .about-pane { padding: 32px; text-align: center; }
 .about-pane .piclite-brand { justify-content: center; margin: 0 auto 18px; }
 .about-pane p { max-width: 600px; margin: 14px auto; color: var(--muted); font-size: 13px; line-height: 1.6; }
@@ -234,6 +246,8 @@ svg { width: 18px; height: 18px; }
   .settings-content { padding: 28px 18px 60px; }
   .settings-row { grid-template-columns: 1fr; gap: 8px; }
   .settings-control { justify-content: flex-start; }
+  .floating-action-slots { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .floating-action-library > div { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
 }
 
 @container (max-width: 340px) {
