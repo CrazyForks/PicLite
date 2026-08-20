@@ -1641,6 +1641,13 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const importedFontsHydratedRef = useRef(false);
   useEffect(() => { window.localStorage.setItem("piclite.workspacePlugins.v1", JSON.stringify(workspacePlugins)); }, [workspacePlugins]);
   useEffect(() => {
+    const syncPlugins = (event: StorageEvent) => {
+      if (event.key === "piclite.workspacePlugins.v1") setWorkspacePlugins(loadWorkspacePlugins());
+    };
+    window.addEventListener("storage", syncPlugins);
+    return () => window.removeEventListener("storage", syncPlugins);
+  }, []);
+  useEffect(() => {
     const builtin = workspacePlugins.find((plugin) => plugin.id === view);
     if (builtin && !builtin.enabled) setView("workspace");
     if (view.startsWith("plugin:") && !workspacePlugins.some((plugin) => `plugin:${plugin.id}` === view && plugin.enabled)) setView("workspace");

@@ -4,7 +4,7 @@
   <g filter="url(#shadow)">
     <rect x="80" y="154" width="252" height="246" rx="50" fill="#98c8b1" stroke="#69a98e" stroke-width="4" transform="rotate(-13 206 277)"/>
     <rect x="206" y="112" width="226" height="250" rx="48" fill="#c8ff5c" stroke="#9ed23e" stroke-width="4" transform="rotate(10 319 237)"/>
-    <rect x="112" y="72" width="286" height="294" rx="58" fill="#153f33"/>
+    <rect x="112" y="72" width="286" height="286" rx="58" fill="#153f33"/>
     <circle cx="323" cy="151" r="22" fill="#d3ff67"/>
     <path d="M173 300l57-66 32 31 49-62 63 97c8 13 1 25-16 25H190c-18 0-26-12-17-25z" fill="#5c907d"/>
     <circle cx="382" cy="382" r="65" fill="#fff" stroke="#dce7df" stroke-width="5"/>

@@ -3278,9 +3278,11 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
 
-    TrayIconBuilder::with_id("piclite-tray")
+    let initial_tray_icon = TauriImage::from_bytes(include_bytes!("../icons/tray-light.png"))
+        .unwrap_or_else(|_| app.default_window_icon().expect("missing app icon").clone());
+    let tray = TrayIconBuilder::with_id("piclite-tray")
         .tooltip("PicLite · Drop to optimise")
-        .icon(app.default_window_icon().expect("missing app icon").clone())
+        .icon(initial_tray_icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -3325,6 +3327,8 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    #[cfg(target_os = "macos")]
+    let _ = tray.set_icon_as_template(false);
     Ok(())
 }
 
@@ -3337,7 +3341,7 @@ fn apply_tray_icon_theme(app: &AppHandle, dark: bool) {
     if let (Some(tray), Ok(icon)) = (app.tray_by_id("piclite-tray"), TauriImage::from_bytes(bytes)) {
         let _ = tray.set_icon(Some(icon));
         #[cfg(target_os = "macos")]
-        let _ = tray.set_icon_as_template(true);
+        let _ = tray.set_icon_as_template(false);
     }
 }
 

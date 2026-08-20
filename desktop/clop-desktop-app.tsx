@@ -15,6 +15,49 @@ type ResultItem = QuickCompressResult & {
 
 const bridge = window.picLite as unknown as PicLiteBridge | undefined;
 
+type SystemFontInfo = { family: string; path: string; faceIndex: number };
+type WorkspacePlugin = { id: string; nameZh: string; nameEn: string; kind: "builtin" | "html" | "url"; enabled: boolean; source?: string; url?: string };
+const WORKSPACE_PLUGINS_KEY = "piclite.workspacePlugins.v1";
+const loadedFontFaces = new Set<string>();
+const BUILTIN_WORKSPACE_PLUGINS: WorkspacePlugin[] = [
+  { id: "watcher", nameZh: "文件夹监测", nameEn: "Folder watch", kind: "builtin", enabled: true },
+  { id: "gallery", nameZh: "图库", nameEn: "Library", kind: "builtin", enabled: true },
+];
+
+function loadWorkspacePlugins() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(WORKSPACE_PLUGINS_KEY) || "[]") as WorkspacePlugin[];
+    return [...BUILTIN_WORKSPACE_PLUGINS.map((plugin) => ({ ...plugin, enabled: saved.find((item) => item.id === plugin.id)?.enabled ?? true })), ...saved.filter((plugin) => plugin.kind !== "builtin")];
+  } catch {
+    return BUILTIN_WORKSPACE_PLUGINS;
+  }
+}
+
+function jsPluginDocument(script: string) {
+  const safeScript = script.replace(/<[/]script/gi, "<" + "\\/" + "script");
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>html,body,#piclite-plugin-root{height:100%;margin:0;font-family:system-ui;color:#172033;background:#f7f9fc}</style></head><body><main id="piclite-plugin-root"></main><script>window.PicLitePlugin={version:'1.0.0',root:document.getElementById('piclite-plugin-root'),post:function(type,payload){parent.postMessage({source:'piclite-plugin',type:type,payload:payload},'*')}};</script><script>${safeScript}</script></body></html>`;
+}
+
+async function installFontFace(family: string, data: Uint8Array) {
+  if (loadedFontFaces.has(family)) return;
+  const font = new FontFace(family, data.slice().buffer as ArrayBuffer);
+  await font.load();
+  document.fonts.add(font);
+  loadedFontFaces.add(family);
+}
+
+async function ensureFontLoaded(api: PicLiteBridge, family: string, systemFonts?: SystemFontInfo[]) {
+  if (!family || loadedFontFaces.has(family)) return;
+  const imported = await api.loadImportedFonts();
+  const importedFont = imported.find((font) => font.family === family);
+  if (importedFont) return installFontFace(family, importedFont.data);
+  const fonts = systemFonts || await api.listSystemFonts();
+  const systemFont = fonts.find((font) => font.family === family);
+  if (!systemFont) return;
+  const { data } = await api.readSystemFont(systemFont.path, systemFont.faceIndex);
+  await installFontFace(family, data);
+}
+
 function useDesktopSettings() {
   const [settings, setSettingsState] = useState(loadSettings);
   useEffect(() => subscribeSettings(setSettingsState), []);
@@ -267,7 +310,7 @@ function FormatBar({ value, update }: { value?: string; update: (format: ImageFo
   </div>;
 }
 
-function ResultCard({ item, api, settings, active, remove, select, downscale, watermark, undo, upload, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; remove: () => void; select: () => void; downscale: () => void; watermark: () => void; undo: () => void; upload: () => void; updateFormat: (format: ImageFormat) => void }) {
+function ResultCard({ item, api, settings, active, allowWindowDrag = true, remove, select, downscale, watermark, undo, upload, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; allowWindowDrag?: boolean; remove: () => void; select: () => void; downscale: () => void; watermark: () => void; undo: () => void; upload: () => void; updateFormat: (format: ImageFormat) => void }) {
   const saved = percentage(item);
   const format = resultFormat(item);
   const startWindowDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -276,7 +319,7 @@ function ResultCard({ item, api, settings, active, remove, select, downscale, wa
     void api.startDragging();
   };
   return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select} onContextMenu={(event) => { if (!item.output) return; event.preventDefault(); void api.openImage(item.output); }}>
-    <div className="result-preview" onPointerDown={startWindowDrag}>
+    <div className="result-preview" onPointerDown={allowWindowDrag ? startWindowDrag : undefined}>
       {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
       <div className="result-overlay">
         <strong className="result-name" title={fileName(item.source)}>{fileName(item.source)}</strong>
@@ -303,6 +346,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const timer = useRef<number | null>(null);
   const resizeTimer = useRef<number | null>(null);
   const swipeStartY = useRef<number | null>(null);
+  const wheelLocked = useRef(false);
   const cleanupRetentionSeconds = cleanupSeconds(settings);
 
   const startEmptyWindowDrag = (event: ReactPointerEvent<HTMLElement>) => {
@@ -316,6 +360,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   };
 
   useEffect(() => { void api.configureDropzoneWindow(settings.floatingWidth, settings.floatingHeight); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void ensureFontLoaded(api, settings.floatingWatermark.fontFamily).catch(() => undefined); }, [api, settings.floatingWatermark.fontFamily]);
   useEffect(() => api.onWindowResized((size) => {
     if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
     resizeTimer.current = window.setTimeout(() => setSettings((current) => {
@@ -459,11 +504,11 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
         </div>
       </div>
     </section> : <>
-      <div className={`floating-list ${settings.floatingDisplayMode}`} onWheel={(event) => { if (settings.floatingDisplayMode === "stack" && Math.abs(event.deltaY) > 8) rotateResults(event.deltaY > 0 ? 1 : -1); }} onPointerDown={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button")) swipeStartY.current = event.clientY; }} onPointerUp={(event) => { if (swipeStartY.current == null) return; const delta = event.clientY - swipeStartY.current; swipeStartY.current = null; if (Math.abs(delta) > 28) rotateResults(delta < 0 ? 1 : -1); }}>{results.map((item, index) => {
+      <div className={`floating-list ${settings.floatingDisplayMode}`} onClick={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) rotateResults(1); }} onWheel={(event) => { if (settings.floatingDisplayMode !== "stack" || Math.abs(event.deltaY) < 4 || wheelLocked.current) return; event.preventDefault(); wheelLocked.current = true; rotateResults(event.deltaY > 0 ? 1 : -1); window.setTimeout(() => { wheelLocked.current = false; }, 180); }} onPointerDown={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) swipeStartY.current = event.clientY; }} onPointerUp={(event) => { if (swipeStartY.current == null) return; const delta = event.clientY - swipeStartY.current; swipeStartY.current = null; if (Math.abs(delta) > 28) rotateResults(delta < 0 ? 1 : -1); }}>{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
-        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} /></div>;
+        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} allowWindowDrag={settings.floatingDisplayMode !== "stack"} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} /></div>;
       })}</div>
-      <footer className="floating-footer">
+      <footer className="floating-footer" onPointerDown={startEmptyWindowDrag}>
         <button className={`automatic-badge ${updateNotice?.url ? "has-update" : ""}`} title={updateNotice?.text} onClick={() => updateNotice?.url && void api.openExternal(updateNotice.url)}><Icon name="spark" /><span>{updateNotice?.text || <T language={settings.language} zh="首次自动择优" en="Smart first pass" />}</span></button>
         <div><button title={tr(settings.language, settings.floatingDisplayMode === "stack" ? "展开结果" : "堆叠结果", settings.floatingDisplayMode === "stack" ? "Expand results" : "Stack results")} onClick={() => setSettings((current) => ({ ...current, floatingDisplayMode: current.floatingDisplayMode === "stack" ? "list" : "stack" }))}><Icon name="results" /></button><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="clear" /></button>}<button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button></div>
       </footer>
@@ -505,7 +550,7 @@ function BatchOptimiser({ api }: { api: PicLiteBridge }) {
   </main>;
 }
 
-type SettingsSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "zones" | "floating" | "hosting" | "shortcuts" | "updates" | "about";
+type SettingsSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "zones" | "floating" | "hosting" | "plugins" | "shortcuts" | "updates" | "about";
 
 const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: string; group?: string }> = [
   { id: "general", icon: "gear", zh: "通用", en: "General" },
@@ -516,6 +561,7 @@ const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: st
   { id: "zones", icon: "zones", zh: "预设区域", en: "Preset Zones" },
   { id: "floating", icon: "results", zh: "悬浮结果", en: "Floating Results" },
   { id: "hosting", icon: "upload", zh: "图床上传", en: "Image Hosting" },
+  { id: "plugins", icon: "zones", zh: "插件", en: "Plugins" },
   { id: "shortcuts", icon: "shortcut", zh: "键盘快捷键", en: "Keyboard Shortcuts", group: "automation" },
   { id: "updates", icon: "spark", zh: "更新", en: "Updates", group: "support" },
   { id: "about", icon: "info", zh: "关于", en: "About" },
@@ -536,7 +582,13 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   const [watchStatus, setWatchStatus] = useState("");
   const [recordingShortcut, setRecordingShortcut] = useState<"shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain" | "shortcutShowGallery" | "shortcutUploadCurrent" | null>(null);
   const [cleanupText, setCleanupText] = useState("");
-  const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  const [systemFonts, setSystemFonts] = useState<SystemFontInfo[]>([]);
+  const [fontStatus, setFontStatus] = useState("");
+  const fontInputRef = useRef<HTMLInputElement>(null);
+  const pluginInputRef = useRef<HTMLInputElement>(null);
+  const [workspacePlugins, setWorkspacePlugins] = useState<WorkspacePlugin[]>(loadWorkspacePlugins);
+  const [pluginUrl, setPluginUrl] = useState("https://banner.xmit.dev/");
+  const [pluginStatus, setPluginStatus] = useState("");
   const [uploadProfile, setUploadProfile] = useState<StoredUploadProfile>({ provider: "webdav", endpoint: "", bucket: "", region: "auto", accessKey: "", username: "", port: 22, remotePath: "piclite", publicBaseUrl: "", keyPath: "", pathStyle: true, secret: "" });
   const [uploadSaved, setUploadSaved] = useState("");
   const language = settings.language;
@@ -545,7 +597,22 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   useEffect(() => { void isAutostartEnabled().then((value) => patch("launchAtLogin", value)).catch(() => undefined); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { void api.setWindowTheme(settings.appearance); void api.updateDesktopPreferences({ minimizeToTray: true, clipboardWatcherEnabled: settings.clipboardOptimiser }); }, [api, settings.appearance, settings.clipboardOptimiser]);
   useEffect(() => api.onWatcherEvent((event) => setWatchStatus(event.message || event.type)), [api]);
-  useEffect(() => { void Promise.all([api.listSystemFonts(), api.loadImportedFonts(), api.loadUploadProfile()]).then(([fonts, imported, profile]) => { setSystemFonts([...new Set([...fonts.map((font) => font.family), ...imported.map((font) => font.family)])].sort()); if (profile) setUploadProfile(profile); }); }, [api]);
+  const refreshFonts = useCallback(async () => {
+    setFontStatus(tr(language, "正在读取本地字体…", "Reading local fonts…"));
+    try {
+      const [fonts, imported] = await Promise.all([api.listSystemFonts(), api.loadImportedFonts()]);
+      setSystemFonts([...fonts, ...imported.map((font) => ({ family: font.family, path: "", faceIndex: 0 }))]);
+      await Promise.all(imported.map((font) => installFontFace(font.family, font.data).catch(() => undefined)));
+      setFontStatus(tr(language, `已读取 ${new Set([...fonts.map((font) => font.family), ...imported.map((font) => font.family)]).size} 个字体`, `${new Set([...fonts.map((font) => font.family), ...imported.map((font) => font.family)]).size} fonts available`));
+    } catch (error) {
+      setFontStatus(error instanceof Error ? error.message : String(error));
+    }
+  }, [api, language]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void Promise.all([refreshFonts(), api.loadUploadProfile()]).then(([, profile]) => { if (profile) setUploadProfile(profile); }), 0);
+    return () => window.clearTimeout(timer);
+  }, [api, refreshFonts]);
+  useEffect(() => { localStorage.setItem(WORKSPACE_PLUGINS_KEY, JSON.stringify(workspacePlugins)); }, [workspacePlugins]);
   useEffect(() => api.onTrayAction((action) => { if (action === "image_host_settings") setSection("hosting"); }), [api]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -628,8 +695,66 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       setUpdateText(String(error));
     }
   };
+  const selectWatermarkFont = async (family: string) => {
+    patch("floatingWatermark", { ...settings.floatingWatermark, fontFamily: family });
+    setFontStatus(tr(language, `正在载入 ${family}…`, `Loading ${family}…`));
+    try {
+      await ensureFontLoaded(api, family, systemFonts);
+      setFontStatus(tr(language, `已应用 ${family}`, `${family} applied`));
+    } catch (error) {
+      setFontStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const importFont = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const family = file.name.replace(/\.(ttf|otf|ttc|woff2?)$/i, "");
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      await api.saveImportedFont(family, data);
+      await installFontFace(family, data);
+      await selectWatermarkFont(family);
+      await refreshFonts();
+    } catch (error) {
+      setFontStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const importPlugin = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      let name = file.name.replace(/\.(html?|js|json)$/i, "");
+      let source = file.name.toLowerCase().endsWith(".js") ? jsPluginDocument(raw) : raw;
+      if (file.name.toLowerCase().endsWith(".json")) {
+        const manifest = JSON.parse(raw) as { name?: string; nameZh?: string; nameEn?: string; html?: string; script?: string; url?: string };
+        name = manifest.name || manifest.nameZh || name;
+        source = manifest.html || (manifest.script ? jsPluginDocument(manifest.script) : "");
+        setWorkspacePlugins((current) => [...current, { id: `custom-${Date.now()}`, nameZh: manifest.nameZh || name, nameEn: manifest.nameEn || manifest.name || name, kind: manifest.url ? "url" : "html", enabled: true, source, url: manifest.url }]);
+      } else {
+        setWorkspacePlugins((current) => [...current, { id: `custom-${Date.now()}`, nameZh: name, nameEn: name, kind: "html", enabled: true, source }]);
+      }
+      setPluginStatus(tr(language, "插件已添加到工作台", "Plugin added to the workbench"));
+    } catch (error) {
+      setPluginStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const addUrlPlugin = () => {
+    try {
+      const url = new URL(pluginUrl);
+      if (!/^https?:$/.test(url.protocol)) throw new Error(tr(language, "只支持 HTTP(S) 地址", "Only HTTP(S) URLs are supported"));
+      setWorkspacePlugins((current) => [...current, { id: `url-${Date.now()}`, nameZh: url.hostname, nameEn: url.hostname, kind: "url", enabled: true, url: url.toString() }]);
+      setPluginStatus(tr(language, "网页插件已添加到工作台", "Web plugin added to the workbench"));
+    } catch (error) {
+      setPluginStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return <main className="preferences-window">
+    <input ref={fontInputRef} className="visually-hidden" type="file" accept=".ttf,.otf,.ttc,.woff,.woff2,font/ttf,font/otf" onChange={(event) => void importFont(event)} />
+    <input ref={pluginInputRef} className="visually-hidden" type="file" accept=".html,.htm,.js,.json,text/html,text/javascript,application/json" onChange={(event) => void importPlugin(event)} />
     <aside className="settings-sidebar"><Brand />
       <nav>{settingsNav.map((item) => {
         const marker = item.group ? <span className="nav-group" key={`${item.group}-label`}>{item.group === "types" ? tr(language, "文件类型", "File types") : item.group === "results" ? tr(language, "拖放与结果", "Drops & Results") : item.group === "automation" ? tr(language, "快捷键与自动化", "Shortcuts & Automation") : tr(language, "支持", "Support")}</span> : null;
@@ -690,7 +815,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="结果展示方式" en="Result presentation" />} note={<T language={language} zh="堆叠占用更少空间，展开可连续浏览" en="Stacked uses less space; list shows every result" />}><div className="segmented"><button className={settings.floatingDisplayMode === "stack" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "stack")}>{tr(language, "堆叠", "Stacked")}</button><button className={settings.floatingDisplayMode === "list" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "list")}>{tr(language, "展开", "List")}</button></div></SettingsRow>
         <SettingsRow title={<T language={language} zh="最多保留结果" en="Maximum results" />} note={<T language={language} zh="超过数量时自动移除最早的结果" en="The oldest result is dismissed when the limit is reached" />}><span className="number-field"><input type="number" min="1" max="20" value={settings.floatingMaxResults} onChange={(event) => patch("floatingMaxResults", Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /> {tr(language, "张", "images")}</span></SettingsRow>
         <SettingsRow title={<T language={language} zh="悬浮按钮（最多 6 个）" en="Floating actions (up to 6)" />} note={<T language={language} zh="拖动缩放、图床、图库等功能可以自由组合" en="Choose the six actions that match your workflow" />}><div className="floating-action-picker">{(["downscale", "watermark", "undo", "copy", "preview", "reveal", "gallery", "upload"] as FloatingAction[]).map((action) => <label key={action}><input type="checkbox" checked={settings.floatingActions.includes(action)} onChange={(event) => setSettings((current) => ({ ...current, floatingActions: event.target.checked ? [...current.floatingActions, action].slice(0, 6) : current.floatingActions.filter((value) => value !== action) }))} />{({ downscale: tr(language, "减半", "Half"), watermark: tr(language, "水印", "Watermark"), undo: tr(language, "撤销", "Undo"), copy: tr(language, "复制", "Copy"), preview: tr(language, "预览", "Preview"), reveal: tr(language, "定位", "Reveal"), gallery: tr(language, "图库", "Library"), upload: tr(language, "图床", "Upload") } as Record<FloatingAction, string>)[action]}</label>)}</div></SettingsRow>
-        <SettingsRow title={<T language={language} zh="水印文字与字体" en="Watermark text and font" />}><span className="inline-fields"><input value={settings.floatingWatermark.text} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, text: event.target.value })} /><input list="piclite-system-fonts" value={settings.floatingWatermark.fontFamily} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, fontFamily: event.target.value })} /><datalist id="piclite-system-fonts">{systemFonts.map((font) => <option key={font} value={font} />)}</datalist></span></SettingsRow>
+        <SettingsRow title={<T language={language} zh="水印文字与字体" en="Watermark text and font" />} note={fontStatus}><span className="inline-fields"><input value={settings.floatingWatermark.text} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, text: event.target.value })} /><select value={settings.floatingWatermark.fontFamily} onChange={(event) => void selectWatermarkFont(event.target.value)}><option value={settings.floatingWatermark.fontFamily}>{settings.floatingWatermark.fontFamily}</option>{[...new Set(systemFonts.map((font) => font.family))].filter((font) => font !== settings.floatingWatermark.fontFamily).sort().map((font) => <option key={font} value={font}>{font}</option>)}</select><button className="settings-button" onClick={() => void refreshFonts()}>{tr(language, "读取系统字体", "Scan fonts")}</button><button className="settings-button" onClick={() => fontInputRef.current?.click()}>{tr(language, "导入字体", "Import font")}</button></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="字号 / 密度 / 方向" en="Size / density / angle" />}><span className="inline-fields compact"><input title="size" type="number" min="0.5" max="30" step="0.5" value={settings.floatingWatermark.fontScale} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, fontScale: Number(event.target.value) })} /><input title="density" type="number" min="1" max="100" value={settings.floatingWatermark.density} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, density: Number(event.target.value) })} /><input title="rotation" type="number" min="-180" max="180" value={settings.floatingWatermark.rotation} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, rotation: Number(event.target.value) })} /></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="颜色 / 透明度" en="Colour / opacity" />}><span className="inline-fields compact"><input type="color" value={settings.floatingWatermark.color} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, color: event.target.value })} /><input type="number" min="1" max="100" value={settings.floatingWatermark.opacity} onChange={(event) => patch("floatingWatermark", { ...settings.floatingWatermark, opacity: Number(event.target.value) })} /></span></SettingsRow>
         <SettingsRow title={<T language={language} zh="自动隐藏" en="Auto hide" />}><Switch label="hide" checked={settings.autoHideResults} onChange={(value) => patch("autoHideResults", value)} /></SettingsRow>
@@ -709,6 +834,12 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         {uploadProfile.provider === "s3" && <SettingsRow title={<T language={language} zh="Path-style 地址" en="Path-style URLs" />} note={<T language={language} zh="MinIO 与部分自建 S3 通常需要开启" en="Usually required by MinIO and some self-hosted S3 services" />}><Switch label="path style" checked={uploadProfile.pathStyle} onChange={(pathStyle) => setUploadProfile((current) => ({ ...current, pathStyle }))} /></SettingsRow>}
         <SettingsRow title={<T language={language} zh="远端目录" en="Remote folder" />}><input value={uploadProfile.remotePath} onChange={(event) => setUploadProfile((current) => ({ ...current, remotePath: event.target.value }))} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="公开访问地址" en="Public base URL" />} note={uploadSaved}><span className="inline-fields"><input value={uploadProfile.publicBaseUrl} onChange={(event) => setUploadProfile((current) => ({ ...current, publicBaseUrl: event.target.value }))} /><button className="settings-button" onClick={() => void api.saveUploadProfile(uploadProfile).then(() => setUploadSaved(tr(language, "已保存到本机", "Saved locally")))}><T language={language} zh="保存" en="Save" /></button></span></SettingsRow>
+      </SettingsCard>}
+      {section === "plugins" && <SettingsCard title={<T language={language} zh="工作台插件" en="Workbench plugins" />} note={pluginStatus || <T language={language} zh="启用内置功能，或载入本地 HTML / JavaScript 和网页工具。插件在隔离工作台中运行。" en="Enable built-ins or load local HTML/JavaScript and web tools. Plugins run in an isolated workbench." />}>
+        {workspacePlugins.map((plugin) => <SettingsRow key={plugin.id} title={language === "zh" ? plugin.nameZh : plugin.nameEn} note={plugin.kind === "builtin" ? tr(language, "内置插件", "Built-in plugin") : plugin.kind === "url" ? plugin.url : tr(language, "本地沙箱插件", "Local sandboxed plugin")}><span className="inline-fields"><Switch label={plugin.nameEn} checked={plugin.enabled} onChange={(enabled) => setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, enabled } : item))} />{plugin.kind !== "builtin" && <button className="settings-button danger" onClick={() => setWorkspacePlugins((current) => current.filter((item) => item.id !== plugin.id))}>{tr(language, "移除", "Remove")}</button>}</span></SettingsRow>)}
+        <SettingsRow title={<T language={language} zh="本地插件" en="Local plugin" />} note={<T language={language} zh="支持 .html、.js 和 manifest.json" en="Supports .html, .js and manifest.json" />}><button className="settings-button" onClick={() => pluginInputRef.current?.click()}>{tr(language, "导入插件", "Import plugin")}</button></SettingsRow>
+        <SettingsRow title={<T language={language} zh="网页工具" en="Web tool" />} note={<T language={language} zh="例如 https://banner.xmit.dev/" en="For example https://banner.xmit.dev/" />}><span className="inline-fields"><input value={pluginUrl} onChange={(event) => setPluginUrl(event.target.value)} /><button className="settings-button" onClick={addUrlPlugin}>{tr(language, "添加", "Add")}</button></span></SettingsRow>
+        <SettingsRow title={<T language={language} zh="打开工作台" en="Open workbench" />} note={<T language={language} zh="启用的插件会显示在主窗口顶部导航中" en="Enabled plugins appear in the main window navigation" />}><button className="settings-button" onClick={() => void api.showMainWindow()}>{tr(language, "查看插件", "View plugins")}</button></SettingsRow>
       </SettingsCard>}
       {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />} note={<T language={language} zh="点击快捷键后直接按下新组合；Delete 可清除，Esc 可取消。剪贴板快捷压缩不依赖自动监听。" en="Click a shortcut and press a new combination. Delete clears it and Esc cancels. Clipboard optimisation works without clipboard monitoring." />}>
         <SettingsRow title={<T language={language} zh="启用全局快捷键" en="Enable global shortcuts" />}><Switch label="shortcuts" checked={settings.shortcutsEnabled} onChange={(value) => patch("shortcutsEnabled", value)} /></SettingsRow>

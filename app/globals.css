@@ -93,7 +93,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .brand-mark i { position: absolute; display: block; box-sizing: border-box; }
 .brand-mark i:nth-child(1) { inset: 23% 19% 5% 3%; border-radius: 24%; background: #98c8b1; border: 1px solid #6fa991; transform: rotate(-12deg); }
 .brand-mark i:nth-child(2) { inset: 17% 0 12% 29%; border-radius: 24%; background: #c8ff5c; border: 1px solid #a7d94b; transform: rotate(9deg); }
-.brand-mark i:nth-child(3) { inset: 1% 16% 16% 10%; border-radius: 25%; background: #153f33; box-shadow: 0 3px 7px rgba(20,63,50,.16); }
+.brand-mark i:nth-child(3) { width: 74%; aspect-ratio: 1; left: 10%; top: 1%; border-radius: 25%; background: #153f33; box-shadow: 0 3px 7px rgba(20,63,50,.16); }
 .brand-mark i:nth-child(3)::before { content: ""; position: absolute; left: 21%; right: 14%; bottom: 17%; height: 42%; background: #5c907d; clip-path: polygon(0 100%, 33% 37%, 51% 61%, 76% 0, 100% 100%); }
 .brand-mark i:nth-child(3)::after { content: ""; position: absolute; width: 14%; aspect-ratio: 1; right: 14%; top: 13%; border-radius: 50%; background: #d3ff67; }
 .brand-mark i:nth-child(4) { width: 39%; aspect-ratio: 1; right: -5%; bottom: -5%; border-radius: 50%; background: #c8ff5c; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(20,63,50,.18); }
