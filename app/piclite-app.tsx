@@ -15,7 +15,7 @@ import {
 } from "react";
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
-import { isSmartCompressionWorthwhile, minimumSmartSavingsBytes } from "./compression-policy";
+import { isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
 
 type CompressionMode = "lossless" | "balanced" | "small";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
@@ -30,7 +30,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" |
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.4";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -1068,7 +1068,10 @@ function smartCandidates(item: ImageItem, settings: CompressionSettings) {
   // These are quality guard rails, not just named presets. We try a small set
   // of real encodes and retain the smallest result within the mode's visual
   // budget. PNG is not blindly converted to JPEG because it may be transparent.
-  const formats: OutputFormat[] = ["keep", "image/webp"];
+  // "Keep original" is a hard output constraint. Previous builds also tested
+  // WebP here, so Windows batches could preview a WebP candidate and later
+  // export every mixed PNG/JPG input with a .webp extension.
+  const formats: OutputFormat[] = smartCandidateOutputFormats(settings.format);
   const qualityStops = settings.mode === "balanced"
     ? [Math.min(settings.quality, 86), Math.min(settings.quality, 81), Math.min(settings.quality, 77)]
     : [Math.min(settings.quality, 68), Math.min(settings.quality, 58), Math.min(settings.quality, 46)];
@@ -2424,7 +2427,12 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const prepareItemsForExport = useCallback(async (sourceItems: ImageItem[]) => {
     const prepared: Array<{ item: ImageItem; blob: Blob }> = [];
     for (const item of sourceItems) {
-      if (item.outputBlob) {
+      // Re-encode stale results produced by older builds when the explicit
+      // "Keep original" choice was ignored by Smart Balance. This export-time
+      // guard also makes batch behaviour deterministic across Windows/macOS.
+      const cachedFormatMatches = settings.format !== "keep"
+        || outputExtension(item.outputBlob?.type || item.outputType || item.type, item.name) === outputExtension(item.type, item.name);
+      if (item.outputBlob && cachedFormatMatches) {
         prepared.push({ item, blob: item.outputBlob });
         continue;
       }

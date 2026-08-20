@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 import {
   isSmartCompressionWorthwhile,
   minimumSmartSavingsBytes,
+  smartCandidateOutputFormats,
 } from "../app/compression-policy.ts";
+
+test("smart balance treats keep-original as a hard format constraint", () => {
+  assert.deepEqual(smartCandidateOutputFormats("keep"), ["keep"]);
+  assert.deepEqual(smartCandidateOutputFormats("image/png"), ["image/png"]);
+});
 
 test("smart balance keeps tiny images when savings do not justify quality loss", () => {
   const original = 4_710;

@@ -1,6 +1,16 @@
 export type SmartCompressionMode = "balanced" | "small";
 
 /**
+ * The output-format selector is an explicit constraint. Smart optimisation may
+ * explore quality and scale, but it must not silently turn "keep" into WebP.
+ * Keeping this rule in a small pure helper also prevents platform-specific
+ * encoders from drifting into different batch-export behaviour.
+ */
+export function smartCandidateOutputFormats<T extends string>(requestedFormat: T): T[] {
+  return [requestedFormat];
+}
+
+/**
  * Lossy smart compression should save enough bytes to justify changing the
  * decoded image. Tiny, already-optimised assets otherwise lose visible detail
  * for only a few bytes of container overhead.
