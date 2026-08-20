@@ -58,6 +58,38 @@ npm test
 npm run desktop:build
 ```
 
+## Create a workbench plugin
+
+PicLite plugins are no longer embedded with an `iframe`. The desktop app fetches HTML/CSS/JavaScript and mounts it in a trusted workbench runtime, avoiding `X-Frame-Options` failures and allowing a custom tab name. Install only code you trust.
+
+A minimal plugin is a single HTML file:
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<main id="tool">
+  <h1>My image tool</h1>
+  <button id="ready">Done</button>
+</main>
+<script>
+  document.querySelector("#ready").onclick = () => {
+    window.PicLitePlugin.post("ready", { ok: true });
+  };
+</script>
+```
+
+Open Settings → Plugins to import `.html`, `.js`, or `manifest.json`, or enter a custom name and HTTPS URL for the desktop app to fetch. Manifest example:
+
+```json
+{
+  "nameZh": "封面设计大师",
+  "nameEn": "Banner Maker",
+  "url": "https://example.com/plugin/"
+}
+```
+
+See the full [plugin development guide](docs/PLUGIN_DEVELOPMENT.en-US.md) for the runtime API, asset URL rules, and publishing notes.
+
 ## Privacy and licence
 
 Optimisation runs locally in the browser or desktop app. Files leave your device only when you explicitly upload them to a storage provider you configured.

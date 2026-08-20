@@ -1545,26 +1545,26 @@ html[data-theme="light"] .corner-drop-target span { background: #6e9e52; color: 
 .clop-dock {
   --dock-surface: rgba(24, 23, 22, .88);
   --dock-card: rgba(15, 15, 14, .82);
-  grid-template-rows: 36px minmax(0, 1fr) 34px;
+  grid-template-rows: 32px minmax(0, 1fr) 30px;
   padding: 0;
   border: 1px solid rgba(255,255,255,.16);
-  border-radius: 22px;
+  border-radius: 18px;
   background: var(--dock-surface);
-  box-shadow: 0 24px 70px rgba(0,0,0,.32), inset 0 1px rgba(255,255,255,.16);
+  box-shadow: 0 16px 46px rgba(0,0,0,.25), inset 0 1px rgba(255,255,255,.14);
   backdrop-filter: blur(30px) saturate(1.28);
   -webkit-backdrop-filter: blur(30px) saturate(1.28);
 }
-.clop-dock > header { padding: 0 7px 0 12px; background: rgba(255,255,255,.035); }
-.clop-dock .dock-body { min-height: 0; padding: 8px !important; overflow: auto; }
-.clop-dock .dock-result-stack { display: flex; flex-direction: column; gap: 7px; }
-.clop-dock .dock-result-card { position: relative; min-height: 218px; overflow: hidden; border: 1px solid rgba(255,255,255,.10); border-radius: 17px; background: var(--dock-card); box-shadow: inset 0 1px rgba(255,255,255,.08); }
-.clop-dock.layout-full .dock-result-card { min-height: 270px; }
+.clop-dock > header { padding: 0 6px 0 10px; background: rgba(255,255,255,.03); }
+.clop-dock .dock-body { min-height: 0; padding: 4px !important; overflow: auto; }
+.clop-dock .dock-result-stack { display: flex; flex-direction: column; gap: 5px; }
+.clop-dock .dock-result-card { position: relative; min-height: 192px; overflow: hidden; border: 1px solid rgba(255,255,255,.09); border-radius: 14px; background: var(--dock-card); box-shadow: inset 0 1px rgba(255,255,255,.07); }
+.clop-dock.layout-full .dock-result-card { min-height: 238px; }
 .clop-dock .dock-result-card > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: rgba(0,0,0,.2); }
 .clop-dock .dock-result-card::after { content: ""; position: absolute; inset: 44% 0 0; pointer-events: none; background: linear-gradient(transparent, rgba(7,7,7,.50) 32%, rgba(7,7,7,.92)); }
 .clop-dock .dock-result-placeholder { position: absolute; inset: 0; display: grid; place-items: center; font-size: 24px; color: rgba(255,255,255,.55); }
-.clop-dock .dock-result-top-actions { position: absolute; z-index: 3; top: 9px; left: 9px; right: 9px; display: flex; justify-content: space-between; }
+.clop-dock .dock-result-top-actions { position: absolute; z-index: 3; top: 7px; left: 7px; right: 7px; display: flex; justify-content: space-between; }
 .clop-dock .dock-result-top-actions button,
-.clop-dock .dock-action-panel button { width: 34px; height: 34px; padding: 0; border: 1px solid rgba(255,255,255,.18); border-radius: 999px; color: #181817; background: rgba(252,250,246,.92); box-shadow: 0 5px 15px rgba(0,0,0,.18); font-weight: 800; cursor: pointer; }
+.clop-dock .dock-action-panel button { width: 30px; height: 30px; padding: 0; border: 1px solid rgba(255,255,255,.16); border-radius: 999px; color: #181817; background: rgba(252,250,246,.92); box-shadow: 0 4px 12px rgba(0,0,0,.16); font-weight: 800; cursor: pointer; }
 .clop-dock .dock-result-top-actions button:last-child { font-size: 10px; letter-spacing: 1px; }
 .clop-dock .dock-progress { position: absolute; z-index: 3; inset: auto 16px 60px; display: grid; gap: 5px; color: #fff; font-size: 11px; font-weight: 750; }
 .clop-dock .dock-progress i { display: block; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.22); }
@@ -1581,8 +1581,8 @@ html[data-theme="light"] .corner-drop-target span { background: #6e9e52; color: 
 .clop-dock .dock-format-tabs button { min-width: 0; padding: 2px 7px; border: 0; border-radius: 7px; color: rgba(255,255,255,.68); background: transparent; font-size: 8px; font-weight: 900; cursor: pointer; }
 .clop-dock .dock-format-tabs button.active { color: #232321; background: rgba(248,247,242,.9); }
 .clop-dock .dock-result-count { padding: 4px 8px; color: var(--dock-muted); font-size: 9px; text-align: center; }
-.clop-dock .dock-action-panel { padding: 7px 12px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid rgba(255,255,255,.09); border-radius: 16px; background: rgba(16,16,15,.55); }
-.clop-dock .dock-action-panel button { width: 36px; height: 36px; font-size: 15px; }
+.clop-dock .dock-action-panel { padding: 5px 9px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(255,255,255,.08); border-radius: 13px; background: rgba(16,16,15,.52); }
+.clop-dock .dock-action-panel button { width: 31px; height: 31px; font-size: 13px; }
 .clop-dock .dock-action-panel button.active { outline: 2px solid #cfff74; }
 .clop-dock .dock-action-panel button:disabled { opacity: .35; cursor: default; }
 .clop-dock .dock-parameter-panel { padding: 9px 10px; display: grid; gap: 7px; border: 1px solid rgba(255,255,255,.09); border-radius: 14px; background: rgba(14,14,13,.60); }
@@ -1590,10 +1590,10 @@ html[data-theme="light"] .corner-drop-target span { background: #6e9e52; color: 
 .clop-dock .dock-parameter-panel label b { text-align: right; }
 .clop-dock .dock-parameter-panel input { width: 100%; accent-color: #cfff74; }
 .clop-dock .dock-parameter-panel > button { height: 29px; border: 0; border-radius: 9px; background: #d1ff74; color: #142119; font-size: 9px; font-weight: 850; }
-.clop-dock > footer { min-height: 34px; padding: 0 9px 0 12px; }
+.clop-dock > footer { min-height: 30px; padding: 0 7px 0 9px; }
 .clop-dock > footer .dock-status { min-width: 0; overflow: hidden; color: var(--dock-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .clop-dock .dock-add-more { width: 24px; min-width: 24px; height: 24px; padding: 0; border-radius: 8px; }
-.clop-dock .clop-drop-zone { min-height: 174px; display: grid; place-items: center; align-content: center; gap: 9px; border: 1px dashed rgba(255,255,255,.20); border-radius: 18px; background: rgba(255,255,255,.035); }
+.clop-dock .clop-drop-zone { min-height: 132px; display: grid; place-items: center; align-content: center; gap: 7px; border: 1px dashed rgba(255,255,255,.18); border-radius: 14px; background: rgba(255,255,255,.03); }
 .clop-dock .clop-drop-zone > strong { color: #f4f5f3; font-size: 16px; }
 .clop-dock .clop-drop-zone > small { color: var(--dock-muted); font-size: 9px; }
 .clop-dock .drop-target-glyph { position: relative; width: 48px; height: 48px; display: grid; place-items: center; }
@@ -1642,10 +1642,14 @@ html[data-theme="light"] .clop-dock .clop-drop-zone > strong { color: #213328; }
 .plugin-workspace > header { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px; }
 .plugin-workspace h1 { margin: 3px 0 0; font-size: 22px; }
 .plugin-workspace > header button, .plugin-import-panel button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.plugin-workspace iframe { width: 100%; height: 100%; min-height: 480px; border: 1px solid var(--line); border-radius: 20px; background: white; box-shadow: var(--shadow-soft); }
+.plugin-runtime-shell { position: relative; width: 100%; height: 100%; min-height: 480px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: white; box-shadow: var(--shadow-soft); }
+.plugin-runtime { width: 100%; height: 100%; min-height: 480px; background: white; }
+.plugin-runtime-error { position: absolute; z-index: 3; inset: 22px; height: max-content; padding: 18px; border: 1px solid rgba(191,65,65,.22); border-radius: 14px; color: #7a2424; background: #fff2f2; box-shadow: 0 10px 28px rgba(100,30,30,.08); }
+.plugin-runtime-error p { margin: 6px 0 0; font-size: 12px; line-height: 1.55; }
 .plugin-row-actions { display: flex; align-items: center; gap: 8px; }
-.plugin-import-panel { display: grid; grid-template-columns: auto auto minmax(200px,1fr) auto; align-items: center; gap: 10px; padding: 16px; }
-.plugin-import-panel input { height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.plugin-name-input { width: min(300px, 42vw); height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: inherit; font: inherit; font-weight: 750; }
+.plugin-import-panel { display: grid; grid-template-columns: auto auto minmax(140px,.55fr) minmax(220px,1fr) auto; align-items: center; gap: 10px; padding: 16px; }
+.plugin-import-panel input { min-width: 0; height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .plugin-security-note { margin: 0; padding: 0 16px 18px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .preferences-sidebar-title > strong { font-size: 16px; }
 .preferences-sidebar nav { margin-top: 14px; display: grid; gap: 3px; }

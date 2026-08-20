@@ -3421,6 +3421,36 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn fetch_plugin_source(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        const MAX_PLUGIN_BYTES: usize = 8 * 1024 * 1024;
+        let parsed = Url::parse(&url).map_err(|_| "插件地址格式无效".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("只支持 HTTP(S) 插件地址".to_string());
+        }
+        let response = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent(format!("PicLite/{}/PluginRuntime", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|error| format!("无法创建插件请求：{error}"))?
+            .get(parsed)
+            .send()
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("读取插件失败：{error}"))?;
+        if response.content_length().is_some_and(|length| length > MAX_PLUGIN_BYTES as u64) {
+            return Err("插件页面超过 8 MB，已停止载入".to_string());
+        }
+        let bytes = response.bytes().map_err(|error| format!("读取插件内容失败：{error}"))?;
+        if bytes.len() > MAX_PLUGIN_BYTES {
+            return Err("插件页面超过 8 MB，已停止载入".to_string());
+        }
+        String::from_utf8(bytes.to_vec()).map_err(|_| "插件页面不是有效的 UTF-8 文本".to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = Command::new("open").arg(url).status();
@@ -3535,10 +3565,17 @@ pub fn run() {
         .manage(DesktopState::default())
         .setup(|app| {
             match create_tray(app) {
-                Ok(()) => app
-                    .state::<DesktopState>()
-                    .tray_available
-                    .store(true, Ordering::Relaxed),
+                Ok(()) => {
+                    app.state::<DesktopState>()
+                        .tray_available
+                        .store(true, Ordering::Relaxed);
+                    let dark = app
+                        .get_webview_window("main")
+                        .and_then(|window| window.theme().ok())
+                        .map(|theme| theme == Theme::Dark)
+                        .unwrap_or(false);
+                    apply_tray_icon_theme(app.handle(), dark);
+                }
                 Err(error) => eprintln!("PicLite system tray unavailable: {error}"),
             }
             #[cfg(target_os = "macos")]
@@ -3605,6 +3642,7 @@ pub fn run() {
             update_desktop_preferences,
             set_tray_theme,
             check_for_updates,
+            fetch_plugin_source,
             open_external_url,
             show_main_window,
             show_gallery_window,

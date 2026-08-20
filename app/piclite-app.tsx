@@ -173,6 +173,7 @@ type NativeBridge = {
   onClipboardPaths: (callback: (paths: string[]) => void) => () => void;
   onWindowResized: (callback: (size: { width: number; height: number }) => void) => () => void;
   checkForUpdates: () => Promise<UpdateInfo>;
+  fetchPluginSource: (url: string) => Promise<string>;
   openExternal: (url: string) => Promise<void>;
 };
 
@@ -345,7 +346,126 @@ function loadWorkspacePlugins(): WorkspacePlugin[] {
 
 function jsPluginDocument(script: string) {
   const safeScript = script.replace(/<[/]script/gi, "<" + "\\/" + "script");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>html,body,#piclite-plugin-root{height:100%;margin:0;font-family:system-ui;color:#172033;background:#f7f9fc}</style></head><body><main id="piclite-plugin-root"></main><script>window.PicLitePlugin={version:'1.0.0',root:document.getElementById('piclite-plugin-root'),post:function(type,payload){parent.postMessage({source:'piclite-plugin',type:type,payload:payload},'*')}};</script><script>${safeScript}</script></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>html,body,#piclite-plugin-root{height:100%;margin:0;font-family:system-ui;color:#172033;background:#f7f9fc}</style></head><body><main id="piclite-plugin-root"></main><script>${safeScript}</script></body></html>`;
+}
+
+function absolutisePluginUrl(value: string, baseUrl?: string) {
+  if (!baseUrl || !value || value.startsWith("#") || value.startsWith("data:") || value.startsWith("blob:") || value.startsWith("javascript:")) return value;
+  try { return new URL(value, baseUrl).toString(); } catch { return value; }
+}
+
+function rewritePluginCss(css: string, baseUrl?: string) {
+  if (!baseUrl) return css;
+  return css.replace(/url\((['"]?)([^)'"\s]+)\1\)/g, (_match, quote: string, value: string) => `url(${quote}${absolutisePluginUrl(value, baseUrl)}${quote})`);
+}
+
+async function loadPluginText(url: string, bridge?: NativeBridge) {
+  if (bridge) return bridge.fetchPluginSource(url);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.text();
+}
+
+function PluginRuntime({ plugin, bridge, language }: { plugin: WorkspacePlugin; bridge?: NativeBridge; language: "zh" | "en" }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let disposed = false;
+    let activeApi: unknown;
+    let activeHost: HTMLDivElement | null = null;
+    const boot = async () => {
+      try {
+        setError("");
+        const source = plugin.source || (plugin.url ? await loadPluginText(plugin.url, bridge) : "");
+        if (!source) throw new Error(language === "en" ? "The plugin has no page source." : "插件没有可运行的页面内容。");
+        if (disposed || !hostRef.current) return;
+
+        const parsed = new DOMParser().parseFromString(source, "text/html");
+        activeHost = hostRef.current;
+        const shadow = activeHost.shadowRoot || activeHost.attachShadow({ mode: "open" });
+        shadow.replaceChildren();
+        const runtimeStyle = document.createElement("style");
+        runtimeStyle.textContent = ":host{display:block;width:100%;height:100%;min-height:480px;background:#fff;color:#172033}.piclite-plugin-page{width:100%;height:100%;min-height:480px;overflow:auto;box-sizing:border-box}";
+        shadow.append(runtimeStyle);
+
+        for (const style of Array.from(parsed.querySelectorAll("style"))) {
+          const element = document.createElement("style");
+          element.textContent = rewritePluginCss(style.textContent || "", plugin.url);
+          shadow.append(element);
+        }
+        for (const link of Array.from(parsed.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]'))) {
+          const href = absolutisePluginUrl(link.getAttribute("href") || "", plugin.url);
+          if (!href) continue;
+          const element = document.createElement("style");
+          element.textContent = rewritePluginCss(await loadPluginText(href, bridge), href);
+          shadow.append(element);
+        }
+
+        const page = document.createElement("div");
+        page.className = "piclite-plugin-page";
+        const body = parsed.body.cloneNode(true) as HTMLBodyElement;
+        body.querySelectorAll("script").forEach((script) => script.remove());
+        page.innerHTML = body.innerHTML;
+        for (const element of Array.from(page.querySelectorAll<HTMLElement>("[src],[href],[action],[poster]"))) {
+          for (const attribute of ["src", "href", "action", "poster"]) {
+            const value = element.getAttribute(attribute);
+            if (value) element.setAttribute(attribute, absolutisePluginUrl(value, plugin.url));
+          }
+        }
+        page.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
+          anchor.target = "_blank";
+          anchor.rel = "noreferrer noopener";
+        });
+        shadow.append(page);
+
+        const api = {
+          version: "1.0.0",
+          root: page.querySelector<HTMLElement>("#piclite-plugin-root") || page,
+          post(type: string, payload?: unknown) {
+            window.dispatchEvent(new CustomEvent("piclite:plugin-message", { detail: { pluginId: plugin.id, type, payload } }));
+          },
+        };
+        activeApi = api;
+        (window as unknown as { PicLitePlugin?: unknown }).PicLitePlugin = api;
+        const scopedDocument = new Proxy(document, {
+          get(target, key) {
+            if (key === "querySelector") return shadow.querySelector.bind(shadow);
+            if (key === "querySelectorAll") return shadow.querySelectorAll.bind(shadow);
+            if (key === "getElementById") return (id: string) => shadow.querySelector(`#${CSS.escape(id)}`);
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        const scopedWindow = new Proxy(window, {
+          get(target, key) {
+            if (key === "document") return scopedDocument;
+            if (key === "PicLitePlugin") return api;
+            const value = Reflect.get(target, key);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        for (const [index, script] of Array.from(parsed.querySelectorAll("script")).entries()) {
+          if ((script.type || "").toLowerCase() === "module") throw new Error(language === "en" ? "Module scripts are not supported by the trusted plugin runtime. Bundle the plugin into one classic JavaScript file." : "可信插件运行容器暂不支持 module 脚本，请把插件打包为单个普通 JavaScript 文件。");
+          const src = script.getAttribute("src");
+          const code = src ? await loadPluginText(absolutisePluginUrl(src, plugin.url), bridge) : script.textContent || "";
+          if (disposed) return;
+          new Function("window", "document", "PicLitePlugin", `${code}\n//# sourceURL=piclite-plugin-${plugin.id}-${index}.js`)(scopedWindow, scopedDocument, api);
+        }
+      } catch (reason) {
+        if (!disposed) setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    };
+    void boot();
+    return () => {
+      disposed = true;
+      const target = window as unknown as { PicLitePlugin?: unknown };
+      if (target.PicLitePlugin === activeApi) delete target.PicLitePlugin;
+      activeHost?.shadowRoot?.replaceChildren();
+    };
+  }, [bridge, language, plugin]);
+
+  return <div className="plugin-runtime-shell">{error && <div className="plugin-runtime-error"><strong>{language === "en" ? "Plugin could not be loaded" : "插件载入失败"}</strong><p>{error}</p></div>}<div className="plugin-runtime" ref={hostRef} /></div>;
 }
 
 const DEFAULT_SETTINGS: CompressionSettings = {
@@ -1257,10 +1377,10 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   useEffect(() => {
     // Keep the result card sized to its real content.  A tall window made the
     // controls appear detached from the result, especially at 125–150% DPI.
-    const width = results.length ? (dockLayout === "full" ? 430 : 350) : 330;
+    const width = results.length ? (dockLayout === "full" ? 378 : 308) : 290;
     const height = results.length
-      ? (dockLayout === "full" ? 370 : 310) + (dockToolsOpen ? 56 : 0) + (dockParametersOpen ? 108 : 0)
-      : 230;
+      ? (dockLayout === "full" ? 326 : 273) + (dockToolsOpen ? 48 : 0) + (dockParametersOpen ? 95 : 0)
+      : 202;
     void bridge.configureDropzoneWindow(width, height);
   }, [bridge, dockLayout, dockParametersOpen, dockToolsOpen, results.length]);
 
@@ -1591,6 +1711,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const [recordingShortcut, setRecordingShortcut] = useState<ShortcutPreferenceKey | null>(null);
   const [preferenceSection, setPreferenceSection] = useState<PreferenceSection>("general");
   const [workspacePlugins, setWorkspacePlugins] = useState<WorkspacePlugin[]>(loadWorkspacePlugins);
+  const [pluginName, setPluginName] = useState("");
   const [pluginUrl, setPluginUrl] = useState("https://banner.xmit.dev/");
   const [exportMode, setExportMode] = useState<ExportMode>(() => typeof window !== "undefined" && window.picLite ? loadStoredDesktopPreferences().exportMode : "download");
   const [exportSuffix, setExportSuffix] = useState(() => loadStoredDesktopPreferences().exportSuffix);
@@ -1639,7 +1760,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const systemFontFilesRef = useRef<Map<string, SystemFontInfo>>(new Map());
   const hydratedWatermarkFontRef = useRef<string | null>(null);
   const importedFontsHydratedRef = useRef(false);
-  useEffect(() => { window.localStorage.setItem("piclite.workspacePlugins.v1", JSON.stringify(workspacePlugins)); }, [workspacePlugins]);
+  useEffect(() => {
+    try { window.localStorage.setItem("piclite.workspacePlugins.v1", JSON.stringify(workspacePlugins)); }
+    catch (error) { console.warn("Could not persist PicLite plugins", error); }
+  }, [workspacePlugins]);
   useEffect(() => {
     const syncPlugins = (event: StorageEvent) => {
       if (event.key === "piclite.workspacePlugins.v1") setWorkspacePlugins(loadWorkspacePlugins());
@@ -2805,15 +2929,19 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     } catch (error) { showToast(error instanceof Error ? error.message : String(error)); }
   }, [showToast]);
 
-  const addUrlPlugin = useCallback(() => {
+  const addUrlPlugin = useCallback(async () => {
     try {
       const url = new URL(pluginUrl);
       if (!/^https?:$/.test(url.protocol)) throw new Error(t("只支持 HTTP(S) 插件地址", "Only HTTP(S) plugin URLs are supported"));
+      const source = await loadPluginText(url.toString(), nativeBridge);
+      const documentTitle = new DOMParser().parseFromString(source, "text/html").title.trim();
+      const name = pluginName.trim() || documentTitle || url.hostname;
       const id = `url-${Date.now()}`;
-      const plugin: WorkspacePlugin = { id, nameZh: url.hostname, nameEn: url.hostname, kind: "url", enabled: true, url: url.toString() };
+      const plugin: WorkspacePlugin = { id, nameZh: name, nameEn: name, kind: "url", enabled: true, source, url: url.toString() };
       setWorkspacePlugins((current) => [...current, plugin]); setView(`plugin:${id}`);
+      setPluginName("");
     } catch (error) { showToast(error instanceof Error ? error.message : String(error)); }
-  }, [pluginUrl, showToast, t]);
+  }, [nativeBridge, pluginName, pluginUrl, showToast, t]);
 
   const addDemo = useCallback(async () => addFiles([await createDemoFile()]), [addFiles]);
 
@@ -3233,7 +3361,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         </section>
       ) : view.startsWith("plugin:") ? (
         <section className="plugin-workspace" aria-label={t("插件工作台", "Plugin workbench")}>
-          {(() => { const plugin = workspacePlugins.find((item) => `plugin:${item.id}` === view); if (!plugin) return null; return <><header><div><span className="section-index">PLUGIN / SANDBOX</span><h1>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</h1></div><button type="button" onClick={() => { setPreferenceSection("plugins"); setView("preferences"); }}>{t("管理插件", "Manage plugins")}</button></header><iframe title={plugin.nameEn} sandbox="allow-scripts allow-forms allow-modals allow-downloads" src={plugin.kind === "url" ? plugin.url : undefined} srcDoc={plugin.kind === "html" ? plugin.source : undefined} /></>; })()}
+          {(() => { const plugin = workspacePlugins.find((item) => `plugin:${item.id}` === view); if (!plugin) return null; return <><header><div><span className="section-index">PLUGIN / TRUSTED RUNTIME</span><h1>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</h1></div><button type="button" onClick={() => { setPreferenceSection("plugins"); setView("preferences"); }}>{t("管理插件", "Manage plugins")}</button></header><PluginRuntime plugin={plugin} bridge={nativeBridge} language={desktopPreferences.language} /></>; })()}
         </section>
       ) : (
         <section className="preferences-page clop-preferences" aria-label={t("PicLite 应用设置", "PicLite preferences")}>
@@ -3364,10 +3492,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
             </section>}
 
             {preferenceSection === "plugins" && <section className="preference-card plugin-preference-card">
-              <div className="preference-card-heading"><span>{t("工作台插件", "Workbench plugins")}</span><small>{t("本地 HTML / JavaScript 在隔离沙箱中运行", "Local HTML / JavaScript runs in an isolated sandbox")}</small></div>
-              {workspacePlugins.map((plugin) => <div className="preference-row plugin-row" key={plugin.id}><div><strong>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</strong><small>{plugin.kind === "builtin" ? t("内置插件", "Built-in plugin") : plugin.kind === "url" ? plugin.url : t("本地沙箱插件", "Local sandboxed plugin")}</small></div><div className="plugin-row-actions"><button className={`switch ${plugin.enabled ? "on" : ""}`} type="button" role="switch" aria-checked={plugin.enabled} onClick={() => setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, enabled: !item.enabled } : item))}><i /></button>{plugin.kind !== "builtin" && <button className="preference-action danger" type="button" onClick={() => setWorkspacePlugins((current) => current.filter((item) => item.id !== plugin.id))}>{t("移除", "Remove")}</button>}</div></div>)}
-              <div className="plugin-import-panel"><button className="preference-action" type="button" onClick={() => pluginInputRef.current?.click()}>{t("导入 HTML / JS / manifest.json", "Import HTML / JS / manifest.json")}</button><span>{t("或添加网页地址", "or add a web URL")}</span><input value={pluginUrl} onChange={(event) => setPluginUrl(event.target.value)} placeholder="https://banner.xmit.dev/" /><button className="preference-action" type="button" onClick={addUrlPlugin}>{t("添加", "Add")}</button></div>
-              <p className="plugin-security-note">{t("插件不能直接访问本机文件、图床凭证或 PicLite 内部数据；需要能力时通过 window.PicLitePlugin.post() 请求宿主。", "Plugins cannot directly access local files, image-host credentials or PicLite internals. Request host capabilities with window.PicLitePlugin.post().")}</p>
+              <div className="preference-card-heading"><span>{t("工作台插件", "Workbench plugins")}</span><small>{t("HTML / JavaScript 直接在可信插件容器中运行，不再使用 iframe", "HTML / JavaScript runs directly in a trusted plugin container, without iframes")}</small></div>
+              {workspacePlugins.map((plugin) => <div className="preference-row plugin-row" key={plugin.id}><div>{plugin.kind === "builtin" ? <strong>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</strong> : <input className="plugin-name-input" aria-label={t("插件名称", "Plugin name")} value={desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn} onChange={(event) => { const name = event.target.value; setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, nameZh: name, nameEn: name } : item)); }} />}<small>{plugin.kind === "builtin" ? t("内置插件", "Built-in plugin") : plugin.kind === "url" ? plugin.url : t("本地可信插件", "Local trusted plugin")}</small></div><div className="plugin-row-actions"><button className={`switch ${plugin.enabled ? "on" : ""}`} type="button" role="switch" aria-checked={plugin.enabled} onClick={() => setWorkspacePlugins((current) => current.map((item) => item.id === plugin.id ? { ...item, enabled: !item.enabled } : item))}><i /></button>{plugin.kind !== "builtin" && <button className="preference-action danger" type="button" onClick={() => setWorkspacePlugins((current) => current.filter((item) => item.id !== plugin.id))}>{t("移除", "Remove")}</button>}</div></div>)}
+              <div className="plugin-import-panel"><button className="preference-action" type="button" onClick={() => pluginInputRef.current?.click()}>{t("导入 HTML / JS / manifest.json", "Import HTML / JS / manifest.json")}</button><span>{t("或添加网页插件", "or add a web plugin")}</span><input value={pluginName} onChange={(event) => setPluginName(event.target.value)} placeholder={t("自定义插件名称", "Custom plugin name")} /><input value={pluginUrl} onChange={(event) => setPluginUrl(event.target.value)} placeholder="https://banner.xmit.dev/" /><button className="preference-action" type="button" onClick={() => void addUrlPlugin()}>{t("读取并添加", "Fetch and add")}</button></div>
+              <p className="plugin-security-note">{t("非 iframe 插件拥有页面脚本执行能力，只安装你信任的 HTML / JavaScript。插件需要宿主能力时可调用 window.PicLitePlugin.post()。", "Non-iframe plugins can execute page scripts. Install only HTML / JavaScript you trust. Plugins can request host capabilities with window.PicLitePlugin.post().")}</p>
             </section>}
 
             {preferenceSection === "shortcuts" && <section className="preference-card">

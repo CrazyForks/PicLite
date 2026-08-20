@@ -82,7 +82,8 @@ if ("__TAURI_INTERNALS__" in window) {
     updateDesktopPreferences: (preferences) => invoke("update_desktop_preferences", { preferences }),
     setWindowTheme: async (theme) => {
       await currentWindow.setTheme(theme === "system" ? null : theme);
-      await invoke("set_tray_theme", { theme });
+      const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      await invoke("set_tray_theme", { theme: systemTheme });
     },
     startDragging: () => currentWindow.startDragging(),
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
@@ -98,6 +99,7 @@ if ("__TAURI_INTERNALS__" in window) {
     hideCurrentWindow: () => invoke("hide_current_window"),
     quitApplication: () => invoke("quit_application"),
     checkForUpdates: () => invoke("check_for_updates"),
+    fetchPluginSource: (url) => invoke("fetch_plugin_source", { url }),
     openExternal: (url) => invoke("open_external_url", { url }),
     onFileDrop: (callback) => {
       let unlisten: (() => void) | undefined;
@@ -243,6 +245,11 @@ if ("__TAURI_INTERNALS__" in window) {
     hideCurrentWindow: noop,
     quitApplication: noop,
     checkForUpdates: async () => ({ currentVersion: "1.0.0", latestVersion: "1.0.0", available: false, releaseUrl: "" }),
+    fetchPluginSource: async (url) => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
     openExternal: noop,
     onFileDrop: () => () => undefined,
     onTrayAction: () => () => undefined,

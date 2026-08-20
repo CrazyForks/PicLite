@@ -1,41 +1,46 @@
 # PicLite plugin development
 
-PicLite 1.0 can load a local HTML file, a JavaScript file, or an HTTPS page as a workbench tab. Plugins run inside an isolated `iframe`, which suits client-side tools such as banner makers, annotators, and colour utilities.
+Workbench plugins suit cover generators, annotators, colour tools, and other client-side image workflows. PicLite no longer uses an `iframe`: the desktop app fetches page source, resolves relative assets, and runs it in a trusted workbench runtime.
 
-## Installation formats
+## Installation methods
 
 Open Settings → Plugins and choose one of these options:
 
-- Import `.html` to run a complete page.
-- Import `.js`; PicLite creates the page and exposes `window.PicLitePlugin`.
-- Add an HTTPS URL, for example `https://banner.xmit.dev/`.
+- Import `.html`: recommended; a single file containing page, styles, and scripts is the most reliable package.
+- Import `.js`: PicLite creates a `#piclite-plugin-root` container automatically.
+- Import `manifest.json`: declare English/Chinese names and inline HTML, script, or URL.
+- Add a web plugin: enter a custom name and HTTP(S) URL. The desktop app fetches and mounts it without relying on `X-Frame-Options`.
 
-A JSON manifest is also supported:
+Keep URL pages and their assets lightweight. The trusted runtime currently supports classic scripts; sites using `type="module"` should be bundled into one classic JavaScript file first.
 
-```json
-{
-  "name": "Banner Maker",
-  "nameZh": "封面生成器",
-  "nameEn": "Banner Maker",
-  "url": "https://banner.example.com/"
-}
+## Minimal HTML plugin
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 24px; font: 16px system-ui; }
+  button { padding: 10px 16px; }
+</style>
+<main>
+  <h1>My image tool</h1>
+  <button id="ready">Ready</button>
+</main>
+<script>
+  document.querySelector("#ready").addEventListener("click", () => {
+    window.PicLitePlugin.post("ready", { version: 1 });
+  });
+</script>
 ```
 
 ## JavaScript plugin
 
+An imported `.js` file can use the runtime root directly:
+
 ```js
 const root = window.PicLitePlugin.root;
-root.innerHTML = `
-  <style>.card { padding: 24px; font: 16px system-ui; }</style>
-  <section class="card">
-    <h1>My image tool</h1>
-    <button id="ready">Ready</button>
-  </section>
-`;
-
-document.querySelector("#ready").addEventListener("click", () => {
-  window.PicLitePlugin.post("ready", { version: 1 });
-});
+root.innerHTML = `<section style="padding:24px"><h1>Image tool</h1></section>`;
+window.PicLitePlugin.post("mounted", { ok: true });
 ```
 
 Runtime object:
@@ -48,15 +53,27 @@ window.PicLitePlugin = {
 }
 ```
 
-`post` is the event channel from the plugin to the host. Version 1.0 guarantees isolation and metadata delivery only; plugins should not depend on unpublished file or optimisation APIs.
+## Manifest format
 
-## Security model
+```json
+{
+  "name": "Banner Maker",
+  "nameZh": "封面设计大师",
+  "nameEn": "Banner Maker",
+  "url": "https://example.com/plugin/"
+}
+```
 
-- Local plugins run without `allow-same-origin`, so they cannot read PicLite storage, image-host credentials, or system files.
-- URL plugins may be blocked by the target site's `Content-Security-Policy` or `X-Frame-Options`.
-- Do not embed secrets in a plugin. Use PicLite's image-host configuration for uploads.
-- PicLite remembers installed plugins and their enabled state, but it does not auto-update third-party plugins.
+`url` may be replaced by an `html` or `script` field. A plugin can still be renamed after installation; the saved name becomes its workbench tab label.
 
-## Publishing checklist
+## Asset URLs
 
-Host the plugin as a static HTTPS site and document its data handling, browser compatibility, and licence. Test light and dark themes plus narrow windows before publishing.
+- Relative `src`, `href`, `action`, `poster`, and CSS `url(...)` references in a URL plugin are resolved against the plugin URL.
+- Host dependencies and assets on the same HTTPS origin to minimise compatibility issues.
+- For local HTML, prefer data URLs or inline assets; do not rely on absolute paths on the user's computer.
+
+## Security and publishing
+
+A non-iframe plugin can execute page scripts, so it is trusted code rather than a security sandbox. Do not install untrusted code or embed secrets. PicLite image-host credentials are not exposed through the public runtime API.
+
+Before publishing, test light and dark themes, narrow windows, offline messaging, and error states. Document the plugin's licence, network access, and data handling in its repository.

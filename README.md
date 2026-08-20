@@ -58,6 +58,38 @@ npm test
 npm run desktop:build
 ```
 
+## 创建工作台插件
+
+PicLite 插件不再用 `iframe` 嵌入。桌面端会读取 HTML/CSS/JavaScript，并挂载到工作台的可信插件容器；因此不会被站点的 `X-Frame-Options` 阻止，也支持自定义标签名称。请只安装你信任的代码。
+
+最小插件只需一个 HTML 文件：
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<main id="tool">
+  <h1>我的图片工具</h1>
+  <button id="ready">完成</button>
+</main>
+<script>
+  document.querySelector("#ready").onclick = () => {
+    window.PicLitePlugin.post("ready", { ok: true });
+  };
+</script>
+```
+
+打开“设置 → 插件”，可直接导入 `.html`、`.js` 或 `manifest.json`；也可填写自定义名称和 HTTPS 地址，由桌面端读取后运行。清单示例：
+
+```json
+{
+  "nameZh": "封面设计大师",
+  "nameEn": "Banner Maker",
+  "url": "https://example.com/plugin/"
+}
+```
+
+完整的运行时 API、资源路径规则和发布注意事项见[插件开发教程](docs/PLUGIN_DEVELOPMENT.md)。
+
 ## 隐私与许可证
 
 图片压缩默认在浏览器或桌面客户端本地完成；只有主动使用图床上传时，文件才会发送到你配置的服务。

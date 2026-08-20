@@ -22,17 +22,16 @@
         "resizable": true,
         "fullscreen": false,
         "skipTaskbar": true,
-        "theme": "Light",
         "backgroundColor": "#e9eeea"
       },
       {
         "label": "dropzone",
         "title": "PicLite Results",
         "url": "index.html?window=dropzone",
-        "width": 320,
-        "height": 230,
-        "minWidth": 280,
-        "minHeight": 220,
+        "width": 282,
+        "height": 202,
+        "minWidth": 246,
+        "minHeight": 188,
         "visible": false,
         "resizable": true,
         "decorations": false,
@@ -54,7 +53,6 @@
         "visible": false,
         "resizable": true,
         "skipTaskbar": true,
-        "theme": "Light",
         "backgroundColor": "#e9eeea"
       }
     ],
