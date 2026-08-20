@@ -1,6 +1,7 @@
 # PicLite 图轻
 
-面向自媒体工作人员和开发人员的本地优先图片压缩工具，支持 Windows、macOS、Linux 与可自托管 Web 端。
+【开源自荐】PicLite 图轻：开源跨平台本地图片动图压缩工具，智能择优压缩，本地文件夹监控，强大自定义悬浮窗。自动图片格式转换，批量压缩，添加水印，上传图床。支持 Windows、macOS、Linux 与可自托管 Web 端。
+帮助自媒体工作人员和开发人员提升工作效率
 
 [English](README.en-US.md) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [Web 演示](https://piclite-image-optimiser.ritchiecessac4273.chatgpt.site) · [插件开发](docs/PLUGIN_DEVELOPMENT.md) · [问题反馈](https://github.com/amiaoapp/PicLite/issues)
 
