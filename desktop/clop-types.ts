@@ -1,6 +1,7 @@
 export type Language = "zh" | "en";
 export type Appearance = "system" | "light" | "dark";
 export type ResultLayout = "compact" | "full";
+export type ResultDisplayMode = "stack" | "list";
 export type FilePlacement = "same-folder" | "fixed-folder";
 export type ImageFormat = "keep" | "jpeg" | "png" | "webp";
 export type CleanupUnit = "hours" | "days" | "months";
@@ -39,6 +40,8 @@ export type DesktopSettings = {
   batchThreshold: number;
   enableFloatingResults: boolean;
   floatingLayout: ResultLayout;
+  floatingDisplayMode: ResultDisplayMode;
+  floatingMaxResults: number;
   floatingCorner: "top-left" | "top-right" | "bottom-left" | "bottom-right";
   autoHideResults: boolean;
   autoHideSeconds: number;
@@ -124,6 +127,7 @@ export type PicLiteBridge = {
   configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string }) => Promise<void>;
   cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
   revealPath: (path: string) => Promise<void>;
+  openImage: (path: string) => Promise<void>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
   setWindowTheme: (theme: Appearance) => Promise<void>;
   startDragging: () => Promise<void>;

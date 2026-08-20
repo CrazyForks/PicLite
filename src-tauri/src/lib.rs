@@ -1114,6 +1114,7 @@ async fn quick_compress_paths(
             );
             let output = available_path(&output_directory, &output_name)?;
             fs::write(&output, &optimized.bytes).map_err(|error| error.to_string())?;
+            record_optimised_output(&output_directory, &output)?;
             Ok((
                 output,
                 original_bytes,
@@ -1269,6 +1270,16 @@ fn cleanup_marked_files(
     cutoff: SystemTime,
     deleted: &mut u64,
 ) -> Result<(), String> {
+    let manifest = directory.join(".piclite-generated.txt");
+    let mut registered = if manifest.is_file() {
+        fs::read_to_string(&manifest)
+            .unwrap_or_default()
+            .lines()
+            .map(PathBuf::from)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path();
@@ -1280,7 +1291,8 @@ fn cleanup_marked_files(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("");
-        if !is_image(&path) || !stem.contains(suffix) {
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !is_image(&path) || (!stem.contains(suffix) && !registered.contains(&canonical)) {
             continue;
         }
         let modified = entry
@@ -1289,9 +1301,37 @@ fn cleanup_marked_files(
             .unwrap_or(SystemTime::now());
         if modified <= cutoff && fs::remove_file(&path).is_ok() {
             *deleted += 1;
+            registered.remove(&canonical);
         }
     }
+    registered.retain(|path| path.is_file());
+    if manifest.is_file() || !registered.is_empty() {
+        let contents = registered
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&manifest, if contents.is_empty() { contents } else { format!("{contents}\n") })
+            .map_err(|error| format!("无法更新 PicLite 清理记录：{error}"))?;
+    }
     Ok(())
+}
+
+fn record_optimised_output(directory: &Path, output: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let canonical = fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+    let manifest = directory.join(".piclite-generated.txt");
+    let existing = fs::read_to_string(&manifest).unwrap_or_default();
+    if existing.lines().any(|line| Path::new(line) == canonical) {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest)
+        .map_err(|error| format!("无法记录 PicLite 输出文件：{error}"))?;
+    writeln!(file, "{}", canonical.to_string_lossy())
+        .map_err(|error| format!("无法记录 PicLite 输出文件：{error}"))
 }
 
 #[tauri::command]
@@ -1463,6 +1503,7 @@ fn process_watched_file(
         );
         let output_path = available_path(&output_directory, &output_name)?;
         fs::write(&output_path, &optimized.bytes).map_err(|error| error.to_string())?;
+        record_optimised_output(&output_directory, &output_path)?;
         Ok((output_path, original_bytes, optimized.bytes.len() as u64))
     })();
 
@@ -2266,6 +2307,43 @@ async fn reveal_path(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("无法打开文件位置：{error}"))
+}
+
+#[tauri::command]
+async fn open_image(path: String) -> Result<(), String> {
+    let target = fs::canonicalize(PathBuf::from(path))
+        .map_err(|_| "图片已经不存在".to_string())?;
+    if !target.is_file() || !is_image(&target) {
+        return Err("目标不是支持的图片文件".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&target);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new("rundll32.exe");
+        let file_url = Url::from_file_path(&target)
+            .map_err(|_| "无法生成图片文件链接".to_string())?;
+        command
+            .args(["url.dll,FileProtocolHandler", file_url.as_str()])
+            .creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&target);
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法用系统看图程序打开图片：{error}"))
 }
 
 const URL_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -3183,6 +3261,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
             "preferences" => show_window(app, "preferences"),
+            "about" => {
+                let _ = open_url("https://github.com/amiaoapp/PicLite");
+            }
             "quit" => {
                 app.state::<DesktopState>()
                     .quitting
@@ -3464,6 +3545,7 @@ pub fn run() {
             load_imported_fonts,
             save_imported_font,
             reveal_path,
+            open_image,
             upload_image,
             load_upload_profile,
             save_upload_profile,

@@ -18,6 +18,8 @@ const paths: Record<string, React.ReactNode> = {
   save: <><path d="M5 3h12l2 2v16H5z"/><path d="M8 3v6h8V3M8 17h8"/></>,
   close: <path d="m6 6 12 12M18 6 6 18"/>,
   minus: <path d="M5 12h14"/>,
+  down15: <><path d="M12 4v12m0 0-4-4m4 4 4-4"/><path d="M5 20h14"/></>,
+  external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v7H4V6h7"/></>,
   sliders: <><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></>,
   play: <path d="m8 5 11 7-11 7z"/>,
   stop: <rect x="6" y="6" width="12" height="12" rx="1"/>,
@@ -30,4 +32,3 @@ const paths: Record<string, React.ReactNode> = {
 export function Icon({ name, ...props }: IconProps) {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name] || paths.info}</svg>;
 }
-

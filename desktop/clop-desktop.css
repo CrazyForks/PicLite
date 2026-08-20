@@ -86,14 +86,25 @@ svg { width: 18px; height: 18px; }
 
 /* Floating results */
 .floating-results { position: relative; container-type: inline-size; height: 100%; overflow: hidden; border: 1px solid rgba(120,130,140,.2); border-radius: 20px; background: color-mix(in srgb, var(--surface) 88%, transparent); background-clip: padding-box; backdrop-filter: blur(38px) saturate(1.7); box-shadow: none; clip-path: inset(0 round 20px); display: grid; grid-template-rows: minmax(0, 1fr) auto; }
-.floating-empty { display: grid; grid-template-rows: minmax(0,1fr) auto auto; gap: 8px; width: 100%; height: 100%; padding: 12px; border: 0; background: transparent; cursor: grab; }
+.floating-empty { display: grid; grid-template-rows: minmax(0,1fr) auto; gap: 8px; width: 100%; height: 100%; padding: 12px; border: 0; background: transparent; cursor: grab; }
 .floating-empty:active { cursor: grabbing; }
-.floating-empty > span { color: var(--muted); font-size: 11px; }
-.floating-empty-actions { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.floating-empty-actions button { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--card); font-size: 11px; font-weight: 700; cursor: pointer; }
-.floating-empty-actions button.primary { color: white; border-color: transparent; background: var(--accent); }
-.floating-empty-actions svg { width: 14px; height: 14px; }
+.floating-empty-footer { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+.floating-empty-footer > div { display: flex; align-items: center; gap: 3px; }
+.floating-empty-footer button { width: 29px; height: 29px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--card); }
+.floating-empty-footer button:hover { background: var(--surface); }
+.floating-empty-footer svg { width: 14px; height: 14px; }
 .floating-list { min-height: 0; overflow: auto; padding: 8px; display: grid; align-content: start; gap: 8px; scrollbar-width: thin; }
+.floating-result-slot { min-width: 0; }
+.floating-list.stack { position: relative; display: grid; overflow: hidden; align-content: stretch; padding: 8px 10px 10px; }
+.floating-list.stack .floating-result-slot { grid-area: 1 / 1; min-height: 0; transform: translateY(calc(var(--stack-index) * 9px)); transform-origin: top center; z-index: calc(20 - var(--stack-index)); pointer-events: none; }
+.floating-list.stack .floating-result-slot:nth-child(2) { transform: translateY(9px) scale(.982); }
+.floating-list.stack .floating-result-slot:nth-child(3) { transform: translateY(18px) scale(.964); }
+.floating-list.stack .floating-result-slot:nth-child(n+4) { transform: translateY(27px) scale(.946); }
+.floating-list.stack .floating-result-slot:first-child { pointer-events: auto; }
+.floating-list.stack .result-card { height: 100%; }
+.floating-list.stack .result-preview { height: 100%; min-height: 0; }
+.floating-list.list .floating-result-slot { display: block; }
+.floating-list.list .result-preview { height: 250px; }
 .result-card { position: relative; overflow: hidden; border: 1px solid rgba(255,255,255,.22); border-radius: 18px; color: white; background: rgba(20,20,19,.82); box-shadow: 0 12px 28px rgba(0,0,0,.18); transition: transform .18s ease, box-shadow .18s ease; }
 .result-card:hover, .result-card.active { box-shadow: 0 16px 34px rgba(0,0,0,.26); }
 .result-card.active { transform: translateY(-1px); }
@@ -135,7 +146,9 @@ svg { width: 18px; height: 18px; }
 .floating-footer button { width: 27px; height: 27px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; }
 .floating-footer button:hover { background: var(--card); }
 .floating-footer svg { width: 14px; height: 14px; }
-.automatic-badge { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; font-weight: 700; }
+.floating-footer .automatic-badge { width: auto; max-width: calc(100% - 112px); display: flex; grid-template-columns: none; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 4px; color: var(--muted); font-size: 9px; font-weight: 700; }
+.automatic-badge span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automatic-badge.has-update { color: var(--accent); }
 .automatic-badge svg { width: 12px; height: 12px; color: #6ca947; }
 .floating-resize-handle { position: absolute; z-index: 12; right: 2px; bottom: 2px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 0 0 13px 0; background: transparent; cursor: nwse-resize; }
 .floating-resize-handle::before, .floating-resize-handle::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); opacity: .7; }

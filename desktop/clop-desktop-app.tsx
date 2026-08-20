@@ -126,6 +126,15 @@ async function attachPreviews(items: ResultItem[], api: PicLiteBridge) {
 function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings) {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [working, setWorking] = useState(false);
+  const resultLimit = Math.max(1, Math.min(20, settings.floatingMaxResults || 5));
+
+  useEffect(() => {
+    setResults((current) => {
+      if (current.length <= resultLimit) return current;
+      current.slice(resultLimit).forEach((item) => item.preview && URL.revokeObjectURL(item.preview));
+      return current.slice(0, resultLimit);
+    });
+  }, [resultLimit]);
 
   const optimise = useCallback(async (paths: string[], replace = false, overrides: Partial<OptimisationPreset> = {}) => {
     if (!api || !paths.length) return [] as ResultItem[];
@@ -133,7 +142,11 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     const unique = [...new Set(paths)];
     setWorking(true);
     const placeholders: ResultItem[] = unique.map((source) => ({ id: `${source}-${Date.now()}-${Math.random()}`, source, keptOriginal: false, status: "working" }));
-    setResults((current) => replace ? placeholders : [...placeholders, ...current]);
+    setResults((current) => {
+      const next = (replace ? placeholders : [...placeholders, ...current]).slice(0, resultLimit);
+      if (!replace) current.filter((item) => !next.some((candidate) => candidate.id === item.id)).forEach((item) => item.preview && URL.revokeObjectURL(item.preview));
+      return next;
+    });
     try {
       const output = await api.quickCompressPaths(unique, nativeSettings(effectiveSettings));
       const finished = await attachPreviews(output.map((item, index) => ({ ...item, id: placeholders[index].id, status: item.error ? "error" : "done" })), api);
@@ -146,7 +159,7 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     } finally {
       setWorking(false);
     }
-  }, [api, settings]);
+  }, [api, resultLimit, settings]);
 
   const reoptimise = useCallback(async (item: ResultItem, overrides: Partial<OptimisationPreset> = {}) => {
     if (!api || item.status === "working") return;
@@ -197,16 +210,17 @@ function DropSurface({ language, active, compact = false }: { language: Language
   </div>;
 }
 
-function ResultActions({ item, api, settings, onDownscale, onUndo }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onUndo: () => void }) {
+function ResultActions({ item, api, settings, onDownscale, onDownscale15, onUndo }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onDownscale15: () => void; onUndo: () => void }) {
   const language = settings.language;
   const copy = async () => {
     if (item.output) await api.copyImagePath(item.output);
   };
   return <div className="result-actions">
     <button title={tr(language, "再缩小一半", "Downscale by half again")} onClick={onDownscale}><Icon name="minus" /></button>
+    <button title={tr(language, "再缩小 15%", "Downscale by another 15%")} onClick={onDownscale15}><Icon name="down15" /></button>
     <button disabled={!item.history?.length} title={tr(language, "撤销上一次压缩", "Undo last optimisation")} onClick={onUndo}><Icon name="undo" /></button>
     <button title={tr(language, "复制优化结果", "Copy optimised result")} onClick={() => void copy()}><Icon name="copy" /></button>
-    <button title={tr(language, "预览结果", "Quick Look")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="eye" /></button>
+    <button title={tr(language, "在新窗口预览", "Open image in a new window")} onClick={() => item.output && api.openImage(item.output)}><Icon name="eye" /></button>
     <button title={tr(language, "在文件夹中显示", "Show in folder")} onClick={() => item.output && api.revealPath(item.output)}><Icon name="folder" /></button>
   </div>;
 }
@@ -222,7 +236,7 @@ function FormatBar({ value, update }: { value?: string; update: (format: ImageFo
   </div>;
 }
 
-function ResultCard({ item, api, settings, active, remove, select, downscale, undo, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; remove: () => void; select: () => void; downscale: () => void; undo: () => void; updateFormat: (format: ImageFormat) => void }) {
+function ResultCard({ item, api, settings, active, remove, select, downscale, downscale15, undo, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; remove: () => void; select: () => void; downscale: () => void; downscale15: () => void; undo: () => void; updateFormat: (format: ImageFormat) => void }) {
   const saved = percentage(item);
   const format = resultFormat(item);
   const startWindowDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -230,7 +244,7 @@ function ResultCard({ item, api, settings, active, remove, select, downscale, un
     event.preventDefault();
     void api.startDragging();
   };
-  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select}>
+  return <article className={`result-card ${settings.floatingLayout} ${item.status} ${active ? "active" : ""}`} onClick={select} onContextMenu={(event) => { if (!item.output) return; event.preventDefault(); void api.openImage(item.output); }}>
     <div className="result-preview" onPointerDown={startWindowDrag}>
       {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
       <div className="result-overlay">
@@ -242,7 +256,7 @@ function ResultCard({ item, api, settings, active, remove, select, downscale, un
         </>}
       </div>
       {item.status === "done" && <div className="result-hover-actions" onClick={(event) => event.stopPropagation()}>
-        <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onUndo={undo} />
+        <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onDownscale15={downscale15} onUndo={undo} />
       </div>}
     </div>
     <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
@@ -254,6 +268,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const { results, setResults, optimise, reoptimise, remove, clear, working } = useOptimiser(api, settings);
   const [dragging, setDragging] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [updateNotice, setUpdateNotice] = useState<{ text: string; url?: string } | null>(null);
   const timer = useRef<number | null>(null);
   const cleanupRetentionSeconds = cleanupSeconds(settings);
 
@@ -268,8 +283,11 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   };
 
   useEffect(() => {
-    void api.configureDropzoneWindow(settings.floatingLayout === "compact" ? 360 : 380, settings.floatingLayout === "compact" ? 300 : 350);
-  }, [api, settings.floatingLayout]);
+    const hasResults = results.length > 0;
+    const width = settings.floatingDisplayMode === "list" ? 360 : 320;
+    const height = !hasResults ? 230 : settings.floatingDisplayMode === "list" ? 420 : 270;
+    void api.configureDropzoneWindow(width, height);
+  }, [api, results.length, settings.floatingDisplayMode]);
   useEffect(() => {
     if (!settings.autoCleanupEnabled || settings.filePlacement !== "fixed-folder" || !settings.outputFolder) return;
     const cleanup = () => api.cleanupOptimisedFiles({ folder: settings.outputFolder, suffix: settings.outputSuffix, olderThanSeconds: cleanupRetentionSeconds }).catch(() => undefined);
@@ -283,12 +301,12 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   }), [api, optimise]);
   useEffect(() => api.onClipboardPaths((paths) => {
     if (!settings.clipboardOptimiser || !settings.clipboardImageFiles || settings.pauseAutomaticOptimisations) return;
-    void api.showDropzoneWindow().then(() => optimise(paths, !settings.keepClipboardResults));
-  }), [api, optimise, settings.clipboardImageFiles, settings.clipboardOptimiser, settings.keepClipboardResults, settings.pauseAutomaticOptimisations]);
+    void api.showDropzoneWindow().then(() => optimise(paths));
+  }), [api, optimise, settings.clipboardImageFiles, settings.clipboardOptimiser, settings.pauseAutomaticOptimisations]);
   useEffect(() => api.onClipboardImage((data) => {
     if (!settings.clipboardOptimiser || !settings.clipboardImageData || settings.pauseAutomaticOptimisations) return;
-    void api.cacheImageData(data, `clipboard-${Date.now()}.png`).then((path) => api.showDropzoneWindow().then(() => optimise([path], !settings.keepClipboardResults)));
-  }), [api, optimise, settings.clipboardImageData, settings.clipboardOptimiser, settings.keepClipboardResults, settings.pauseAutomaticOptimisations]);
+    void api.cacheImageData(data, `clipboard-${Date.now()}.png`).then((path) => api.showDropzoneWindow().then(() => optimise([path])));
+  }), [api, optimise, settings.clipboardImageData, settings.clipboardOptimiser, settings.pauseAutomaticOptimisations]);
   useEffect(() => api.onWatcherEvent((event) => {
     if (event.type !== "success" || !event.file || !event.output) return;
     const item: ResultItem = {
@@ -302,7 +320,30 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     };
     void attachPreviews([item], api).then((items) => setResults((current) => [...items, ...current]));
   }), [api, setResults]);
+  const checkUpdates = useCallback(async (showResult: boolean) => {
+    try {
+      const info = await api.checkForUpdates();
+      setUpdateNotice(info.available
+        ? { text: tr(settings.language, `发现 PicLite ${info.latestVersion}`, `PicLite ${info.latestVersion} available`), url: info.releaseUrl }
+        : showResult ? { text: tr(settings.language, `PicLite ${info.currentVersion} 已是最新版`, `PicLite ${info.currentVersion} is up to date`) } : null);
+      if (showResult) await api.showDropzoneWindow();
+    } catch {
+      if (showResult) {
+        setUpdateNotice({ text: tr(settings.language, "检查更新失败，请稍后重试", "Update check failed. Try again later.") });
+        await api.showDropzoneWindow();
+      }
+    }
+  }, [api, settings.language]);
+  useEffect(() => { void checkUpdates(false); }, [checkUpdates]);
   useEffect(() => api.onTrayAction((action) => {
+    if (action === "about") {
+      void api.openExternal("https://github.com/amiaoapp/PicLite");
+      return;
+    }
+    if (action === "check_updates") {
+      void checkUpdates(true);
+      return;
+    }
     if (action !== "optimise_clipboard" && action !== "optimise_clipboard_aggressive" && action !== "downscale_clipboard") return;
     void api.readClipboardImage().then(async (image) => {
       const clipboardPaths = image ? [] : await api.readClipboardPaths();
@@ -314,9 +355,9 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
           ? { mode: "manual", scale: Math.max(10, Math.round(settings.preset.scale / 2)) }
           : {};
       if (Object.keys(overrides).length) setSettings((current) => ({ ...current, preset: { ...current.preset, ...overrides } }));
-      await optimise(paths, !settings.keepClipboardResults, overrides);
+      await optimise(paths, false, overrides);
     });
-  }), [api, optimise, setSettings, settings.keepClipboardResults, settings.preset.scale]);
+  }), [api, checkUpdates, optimise, setSettings, settings.preset.scale]);
   useEffect(() => {
     if (!settings.autoHideResults || !results.length || working) return;
     if (timer.current) window.clearTimeout(timer.current);
@@ -334,22 +375,25 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     if (candidate.preview && candidate.preview !== restored.preview) URL.revokeObjectURL(candidate.preview);
     return { ...restored, history: candidate.history.slice(0, -1) };
   }));
-  return <main className={`floating-results ${settings.floatingLayout}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
+  return <main className={`floating-results ${settings.floatingLayout} display-${settings.floatingDisplayMode}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
     {!results.length ? <section className="floating-empty" onPointerDown={startEmptyWindowDrag}>
       <DropSurface language={settings.language} active={dragging} />
-      <div className="floating-empty-actions">
-        <button className="primary" onPointerDown={(event) => event.stopPropagation()} onClick={() => void chooseLocalImages()}><Icon name="plus" /><T language={settings.language} zh="选择本地图片" en="Choose local images" /></button>
-        <button onPointerDown={(event) => event.stopPropagation()} onClick={() => void api.showMainWindow()}><T language={settings.language} zh="打开工作台" en="Open workbench" /></button>
+      <div className="floating-empty-footer">
+        <span><T language={settings.language} zh="拖动空白区域可移动悬浮窗" en="Drag the empty area to move this window" /></span>
+        <div>
+          <button title={tr(settings.language, "选择本地图片", "Choose local images")} onPointerDown={(event) => event.stopPropagation()} onClick={() => void chooseLocalImages()}><Icon name="plus" /></button>
+          <button title={tr(settings.language, "打开工作台", "Open workbench")} onPointerDown={(event) => event.stopPropagation()} onClick={() => void api.showMainWindow()}><Icon name="external" /></button>
+          <button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onPointerDown={(event) => event.stopPropagation()} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button>
+        </div>
       </div>
-      <span><T language={settings.language} zh="拖动空白区域可移动悬浮窗" en="Drag the empty area to move this window" /></span>
     </section> : <>
-      <div className="floating-list">{results.map((item, index) => {
+      <div className={`floating-list ${settings.floatingDisplayMode}`}>{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
-        return <ResultCard key={item.id} item={item} api={api} settings={settings} active={active} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} />;
+        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} downscale15={() => void reoptimise(item, { mode: "manual", scale: 85, preventLarger: false })} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} /></div>;
       })}</div>
       <footer className="floating-footer">
-        <span className="automatic-badge"><Icon name="spark" /><T language={settings.language} zh="首次自动择优" en="Smart first pass" /></span>
-        <div><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="close" /></button>}</div>
+        <button className={`automatic-badge ${updateNotice?.url ? "has-update" : ""}`} title={updateNotice?.text} onClick={() => updateNotice?.url && void api.openExternal(updateNotice.url)}><Icon name="spark" /><span>{updateNotice?.text || <T language={settings.language} zh="首次自动择优" en="Smart first pass" />}</span></button>
+        <div><button title={tr(settings.language, settings.floatingDisplayMode === "stack" ? "展开结果" : "堆叠结果", settings.floatingDisplayMode === "stack" ? "Expand results" : "Stack results")} onClick={() => setSettings((current) => ({ ...current, floatingDisplayMode: current.floatingDisplayMode === "stack" ? "list" : "stack" }))}><Icon name="results" /></button><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="close" /></button>}<button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button></div>
       </footer>
     </>}
     <button className="floating-resize-handle" aria-label={tr(settings.language, "调整悬浮窗大小", "Resize floating window")} title={tr(settings.language, "拖动调整大小", "Drag to resize")} onPointerDown={(event) => { event.preventDefault(); void api.startResizeDragging("SouthEast"); }} />
@@ -563,9 +607,11 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         <SettingsRow title={<T language={language} zh="显示悬浮结果" en="Show floating results" />}><Switch label="floating" checked={settings.enableFloatingResults} onChange={(value) => patch("enableFloatingResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="屏幕位置" en="Position on screen" />}><Select label="corner" value={settings.floatingCorner} onChange={(value) => patch("floatingCorner", value)}><option value="bottom-right">{tr(language, "右下角", "Bottom right")}</option><option value="bottom-left">{tr(language, "左下角", "Bottom left")}</option><option value="top-right">{tr(language, "右上角", "Top right")}</option><option value="top-left">{tr(language, "左上角", "Top left")}</option></Select></SettingsRow>
         <SettingsRow title={<T language={language} zh="布局" en="Layout" />}><div className="segmented"><button className={settings.floatingLayout === "compact" ? "active" : ""} onClick={() => patch("floatingLayout", "compact")}>{tr(language, "紧凑", "Compact")}</button><button className={settings.floatingLayout === "full" ? "active" : ""} onClick={() => patch("floatingLayout", "full")}>{tr(language, "完整", "Full")}</button></div></SettingsRow>
+        <SettingsRow title={<T language={language} zh="结果展示方式" en="Result presentation" />} note={<T language={language} zh="堆叠占用更少空间，展开可连续浏览" en="Stacked uses less space; list shows every result" />}><div className="segmented"><button className={settings.floatingDisplayMode === "stack" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "stack")}>{tr(language, "堆叠", "Stacked")}</button><button className={settings.floatingDisplayMode === "list" ? "active" : ""} onClick={() => patch("floatingDisplayMode", "list")}>{tr(language, "展开", "List")}</button></div></SettingsRow>
+        <SettingsRow title={<T language={language} zh="最多保留结果" en="Maximum results" />} note={<T language={language} zh="超过数量时自动移除最早的结果" en="The oldest result is dismissed when the limit is reached" />}><span className="number-field"><input type="number" min="1" max="20" value={settings.floatingMaxResults} onChange={(event) => patch("floatingMaxResults", Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /> {tr(language, "张", "images")}</span></SettingsRow>
         <SettingsRow title={<T language={language} zh="自动隐藏" en="Auto hide" />}><Switch label="hide" checked={settings.autoHideResults} onChange={(value) => patch("autoHideResults", value)} /></SettingsRow>
         <SettingsRow title={<T language={language} zh="结果保留时间" en="Dismiss result after" />}><span className="number-field"><input type="number" min="1" max="300" value={settings.autoHideSeconds} onChange={(event) => patch("autoHideSeconds", Math.max(1, Number(event.target.value)))} /> {tr(language, "秒", "seconds")}</span></SettingsRow>
-        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active select={() => undefined} remove={() => undefined} downscale={() => undefined} undo={() => undefined} updateFormat={() => undefined} /></div>
+        <div className="floating-preview"><ResultCard item={{ id: "preview", source: "example-photo.jpg", output: "example-photo-piclite.webp", originalBytes: 750000, outputBytes: 211000, keptOriginal: false, status: "done", width: 1920, height: 1080 }} api={api} settings={settings} active select={() => undefined} remove={() => undefined} downscale={() => undefined} downscale15={() => undefined} undo={() => undefined} updateFormat={() => undefined} /></div>
       </SettingsCard>}
       {section === "shortcuts" && <SettingsCard title={<T language={language} zh="键盘快捷键" en="Keyboard shortcuts" />} note={<T language={language} zh="点击快捷键后直接按下新组合；Delete 可清除，Esc 可取消。剪贴板快捷压缩不依赖自动监听。" en="Click a shortcut and press a new combination. Delete clears it and Esc cancels. Clipboard optimisation works without clipboard monitoring." />}>
         <SettingsRow title={<T language={language} zh="启用全局快捷键" en="Enable global shortcuts" />}><Switch label="shortcuts" checked={settings.shortcutsEnabled} onChange={(value) => patch("shortcutsEnabled", value)} /></SettingsRow>

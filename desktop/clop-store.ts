@@ -29,6 +29,8 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   batchThreshold: 30,
   enableFloatingResults: true,
   floatingLayout: "compact",
+  floatingDisplayMode: "stack",
+  floatingMaxResults: 5,
   floatingCorner: "bottom-right",
   autoHideResults: true,
   autoHideSeconds: 10,
