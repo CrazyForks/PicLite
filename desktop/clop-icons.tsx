@@ -17,7 +17,10 @@ const paths: Record<string, React.ReactNode> = {
   undo: <><path d="m8 8-4 4 4 4"/><path d="M5 12h8a6 6 0 0 1 6 6"/></>,
   save: <><path d="M5 3h12l2 2v16H5z"/><path d="M8 3v6h8V3M8 17h8"/></>,
   close: <path d="m6 6 12 12M18 6 6 18"/>,
+  clear: <circle cx="12" cy="12" r="8"/>,
   minus: <path d="M5 12h14"/>,
+  down15: <><path d="M12 4v12m0 0-4-4m4 4 4-4"/><path d="M5 20h14"/></>,
+  external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v7H4V6h7"/></>,
   sliders: <><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></>,
   play: <path d="m8 5 11 7-11 7z"/>,
   stop: <rect x="6" y="6" width="12" height="12" rx="1"/>,
@@ -25,9 +28,11 @@ const paths: Record<string, React.ReactNode> = {
   plus: <path d="M12 5v14M5 12h14"/>,
   menu: <path d="M5 7h14M5 12h14M5 17h14"/>,
   spark: <path d="m12 2 1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/>,
+  watermark: <><path d="M12 3s5 5.7 5 10a5 5 0 0 1-10 0c0-4.3 5-10 5-10Z"/><path d="M9.5 14.5c.7 1.2 1.6 1.7 2.8 1.7"/></>,
+  upload: <><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M5 14v6h14v-6"/></>,
+  gallery: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m6 16 4-4 3 3 2-2 3 3"/><circle cx="16" cy="9" r="1"/></>,
 };
 
 export function Icon({ name, ...props }: IconProps) {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name] || paths.info}</svg>;
 }
-

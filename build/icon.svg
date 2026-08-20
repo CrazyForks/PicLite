@@ -1,6 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="148" fill="#173b30"/>
-  <circle cx="190" cy="210" r="92" fill="#d9ff74"/>
-  <circle cx="333" cy="329" r="58" fill="#d9ff74"/>
-  <circle cx="342" cy="164" r="34" fill="#ffffff"/>
+  <defs><filter id="shadow" x="-30%" y="-30%" width="170%" height="180%"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#173b30" flood-opacity=".16"/></filter></defs>
+  <rect width="512" height="512" rx="122" fill="#f9fbf8"/>
+  <g filter="url(#shadow)">
+    <rect x="80" y="154" width="252" height="246" rx="50" fill="#98c8b1" stroke="#69a98e" stroke-width="4" transform="rotate(-13 206 277)"/>
+    <rect x="206" y="112" width="226" height="250" rx="48" fill="#c8ff5c" stroke="#9ed23e" stroke-width="4" transform="rotate(10 319 237)"/>
+    <rect x="112" y="72" width="286" height="294" rx="58" fill="#153f33"/>
+    <circle cx="323" cy="151" r="22" fill="#d3ff67"/>
+    <path d="M173 300l57-66 32 31 49-62 63 97c8 13 1 25-16 25H190c-18 0-26-12-17-25z" fill="#5c907d"/>
+    <circle cx="382" cy="382" r="65" fill="#fff" stroke="#dce7df" stroke-width="5"/>
+    <circle cx="382" cy="382" r="52" fill="#c8ff5c"/>
+    <path d="M382 351v62M351 382h62" stroke="#173b30" stroke-width="13"/>
+  </g>
 </svg>

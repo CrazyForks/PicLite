@@ -1,8 +1,39 @@
 export type Language = "zh" | "en";
 export type Appearance = "system" | "light" | "dark";
 export type ResultLayout = "compact" | "full";
+export type ResultDisplayMode = "stack" | "list";
 export type FilePlacement = "same-folder" | "fixed-folder";
 export type ImageFormat = "keep" | "jpeg" | "png" | "webp";
+export type CleanupUnit = "hours" | "days" | "months";
+export type FloatingAction = "downscale" | "watermark" | "undo" | "copy" | "preview" | "reveal" | "gallery" | "upload";
+
+export type FloatingWatermark = {
+  text: string;
+  fontFamily: string;
+  fontScale: number;
+  color: string;
+  opacity: number;
+  rotation: number;
+  density: number;
+  shadow: boolean;
+  shadowBlur: number;
+  shadowColor: string;
+};
+
+export type StoredUploadProfile = {
+  provider: "webdav" | "s3" | "r2" | "oss" | "ftp" | "sftp";
+  endpoint: string;
+  bucket: string;
+  region: string;
+  accessKey: string;
+  username: string;
+  port: number;
+  remotePath: string;
+  publicBaseUrl: string;
+  keyPath: string;
+  pathStyle: boolean;
+  secret: string;
+};
 
 export type OptimisationPreset = {
   mode: "auto" | "manual";
@@ -25,7 +56,11 @@ export type DesktopSettings = {
   filePlacement: FilePlacement;
   outputFolder: string;
   outputSuffix: string;
+  renameTemplate: string;
   preserveDates: boolean;
+  autoCleanupEnabled: boolean;
+  autoCleanupAmount: number;
+  autoCleanupUnit: CleanupUnit;
   stripMetadata: boolean;
   preserveColorProfile: boolean;
   enableDropZone: boolean;
@@ -34,7 +69,13 @@ export type DesktopSettings = {
   batchThreshold: number;
   enableFloatingResults: boolean;
   floatingLayout: ResultLayout;
+  floatingDisplayMode: ResultDisplayMode;
+  floatingMaxResults: number;
   floatingCorner: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  floatingWidth: number;
+  floatingHeight: number;
+  floatingActions: FloatingAction[];
+  floatingWatermark: FloatingWatermark;
   autoHideResults: boolean;
   autoHideSeconds: number;
   followCursorScreen: boolean;
@@ -42,6 +83,12 @@ export type DesktopSettings = {
   hideTooltips: boolean;
   watchFolders: string[];
   pauseAutomaticOptimisations: boolean;
+  shortcutsEnabled: boolean;
+  shortcutToggleDropzone: string;
+  shortcutOptimiseClipboard: string;
+  shortcutShowMain: string;
+  shortcutShowGallery: string;
+  shortcutUploadCurrent: string;
   preset: OptimisationPreset;
 };
 
@@ -54,6 +101,7 @@ export type QuickCompressSettings = {
   preventLarger: boolean;
   exportMode: string;
   exportSuffix: string;
+  renameTemplate?: string;
   fixedFolder?: string;
 };
 
@@ -66,10 +114,21 @@ export type QuickCompressResult = {
   error?: string;
 };
 
+export type CompressedAnimationData = {
+  data: Uint8Array;
+  mimeType: string;
+  extension: string;
+  width: number;
+  height: number;
+  keptOriginal: boolean;
+};
+
 export type WatcherSettings = {
   inputFolder: string;
   inputFolders: string[];
   outputFolder: string;
+  outputSuffix?: string;
+  renameTemplate?: string;
   mode: string;
   quality: number;
   scale: number;
@@ -87,6 +146,7 @@ export type PicLiteBridge = {
   platform: string;
   windowLabel: string;
   readClipboardImage: () => Promise<{ data: Uint8Array } | null>;
+  readClipboardPaths: () => Promise<string[]>;
   copyImageData: (data: Uint8Array) => Promise<void>;
   copyCompressedData: (data: Uint8Array, fileName: string) => Promise<string>;
   cacheImageData: (data: Uint8Array, fileName: string) => Promise<string>;
@@ -98,27 +158,36 @@ export type PicLiteBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  compressAnimationData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<CompressedAnimationData>;
+  configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string; showGallery?: string; uploadCurrent?: string }) => Promise<void>;
+  cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
   revealPath: (path: string) => Promise<void>;
+  openImage: (path: string) => Promise<void>;
+  uploadImage: (payload: StoredUploadProfile & { fileName: string; mimeType: string; data: Uint8Array }) => Promise<{ url: string; remotePath: string }>;
+  loadUploadProfile: () => Promise<StoredUploadProfile | null>;
+  saveUploadProfile: (profile: StoredUploadProfile) => Promise<void>;
+  copyText: (text: string) => Promise<void>;
+  loadImportedFonts: () => Promise<Array<{ family: string; data: Uint8Array }>>;
+  listSystemFonts: () => Promise<Array<{ family: string; path: string; faceIndex: number }>>;
   updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
   setWindowTheme: (theme: Appearance) => Promise<void>;
+  startDragging: () => Promise<void>;
   startResizeDragging: (direction: "SouthEast") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showGalleryWindow: () => Promise<void>;
   showPreferencesWindow: () => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
-  submitCornerDrop: (paths: string[]) => Promise<void>;
-  takePendingCornerDrop: () => Promise<string[]>;
   configureDropzoneWindow: (width: number, height: number) => Promise<void>;
   resizeDropzoneWindow: (width: number, height: number) => Promise<void>;
   setAlwaysOnTop: (enabled: boolean) => Promise<void>;
   hideCurrentWindow: () => Promise<void>;
   quitApplication: () => Promise<void>;
   onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
-  onCornerDrop: (callback: () => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
   onClipboardImage: (callback: (data: Uint8Array) => void) => () => void;
   onClipboardPaths: (callback: (paths: string[]) => void) => () => void;
   onWatcherEvent: (callback: (event: { type: string; message?: string; file?: string; output?: string; originalBytes?: number; outputBytes?: number; time: number }) => void) => () => void;
+  onWindowResized: (callback: (size: { width: number; height: number }) => void) => () => void;
   checkForUpdates: () => Promise<{ currentVersion: string; latestVersion: string; available: boolean; releaseUrl: string }>;
   openExternal: (url: string) => Promise<void>;
 };

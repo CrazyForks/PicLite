@@ -15,7 +15,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use hmac::{Hmac, Mac};
 use image::{
     codecs::{
@@ -34,13 +34,16 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use ssh2::{CheckResult, KnownHostFileKind, Session};
 use tauri::{
+    image::Image as TauriImage,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use url::Url;
-use webp::Encoder as LossyWebPEncoder;
+use webp::{AnimEncoder as AnimatedWebPEncoder, AnimFrame as AnimatedWebPFrame};
+use webp::{Encoder as LossyWebPEncoder, WebPConfig};
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "avif", "tif", "tiff"];
 
@@ -56,19 +59,20 @@ struct DesktopState {
     watcher_settings: Mutex<Option<WatcherSettings>>,
     folders: Mutex<SelectedFolders>,
     source_files: Mutex<HashSet<PathBuf>>,
+    pending_corner_drop: Mutex<Vec<String>>,
     processing: Arc<Mutex<HashSet<PathBuf>>>,
     quitting: AtomicBool,
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
     clipboard_monitor_enabled: AtomicBool,
-    /// File drops can arrive before the hidden result webview has attached its
-    /// event listener. Keep one durable hand-off queue so the drop is never
-    /// lost while the floating window is being shown.
-    pending_corner_drop: Mutex<Vec<String>>,
     /// Timestamp until which clipboard content was written by PicLite itself.
     /// The monitor must record it but must not feed the result back through the
     /// compressor, otherwise a copied result would be compressed repeatedly.
     clipboard_ignore_until_ms: AtomicU64,
+    shortcut_config_lock: Mutex<()>,
+    /// The drop window is placed in its initial corner exactly once. Later
+    /// show/resize calls preserve the position selected by dragging it.
+    dropzone_positioned: AtomicBool,
 }
 
 impl Default for DesktopState {
@@ -78,13 +82,15 @@ impl Default for DesktopState {
             watcher_settings: Mutex::new(None),
             folders: Mutex::new(SelectedFolders::default()),
             source_files: Mutex::new(HashSet::new()),
+            pending_corner_drop: Mutex::new(Vec::new()),
             processing: Arc::new(Mutex::new(HashSet::new())),
             quitting: AtomicBool::new(false),
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
-            pending_corner_drop: Mutex::new(Vec::new()),
             clipboard_ignore_until_ms: AtomicU64::new(0),
+            shortcut_config_lock: Mutex::new(()),
+            dropzone_positioned: AtomicBool::new(false),
         }
     }
 }
@@ -159,7 +165,38 @@ struct QuickCompressSettings {
     prevent_larger: bool,
     export_mode: String,
     export_suffix: String,
+    #[serde(default)]
+    rename_template: String,
     fixed_folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutBindings {
+    enabled: bool,
+    #[serde(default)]
+    toggle_dropzone: String,
+    #[serde(default)]
+    optimise_clipboard: String,
+    #[serde(default)]
+    show_main: String,
+    #[serde(default)]
+    show_gallery: String,
+    #[serde(default)]
+    upload_current: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupRequest {
+    folder: String,
+    suffix: String,
+    older_than_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupResult {
+    deleted: u64,
 }
 
 #[derive(Serialize)]
@@ -173,6 +210,17 @@ struct QuickCompressResult {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressedAnimationData {
+    data: String,
+    mime_type: String,
+    extension: String,
+    width: u32,
+    height: u32,
+    kept_original: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WatcherSettings {
@@ -180,6 +228,10 @@ struct WatcherSettings {
     #[serde(default)]
     input_folders: Vec<String>,
     output_folder: String,
+    #[serde(default)]
+    output_suffix: String,
+    #[serde(default)]
+    rename_template: String,
     mode: String,
     quality: u8,
     scale: f64,
@@ -396,6 +448,43 @@ fn safe_file_name(value: &str) -> String {
         .collect::<String>()
 }
 
+/// Builds output names without teaching the native compressor about UI state.
+/// Templates intentionally stay small and filesystem-safe:
+/// `{name}`, `{suffix}`, `{date}`, `{time}`, `{datetime}`, `{size}`, `{width}`,
+/// `{height}` and `{ext}` are available. The extension is always added when a
+/// template does not include `{ext}` so users cannot accidentally create a
+/// result the OS no longer recognises as an image.
+fn render_output_name(
+    template: &str,
+    base: &str,
+    suffix: &str,
+    extension: &str,
+    bytes: usize,
+    width: u32,
+    height: u32,
+) -> String {
+    let now = Local::now();
+    let template = if template.trim().is_empty() {
+        "{name}{suffix}"
+    } else {
+        template.trim()
+    };
+    let mut value = template
+        .replace("{name}", base)
+        .replace("{suffix}", suffix)
+        .replace("{date}", &now.format("%Y-%m-%d").to_string())
+        .replace("{time}", &now.format("%H-%M-%S").to_string())
+        .replace("{datetime}", &now.format("%Y-%m-%d_%H-%M-%S").to_string())
+        .replace("{size}", &bytes.to_string())
+        .replace("{width}", &width.to_string())
+        .replace("{height}", &height.to_string())
+        .replace("{ext}", extension);
+    if !template.contains("{ext}") {
+        value = format!("{value}.{extension}");
+    }
+    safe_file_name(&value)
+}
+
 fn available_path(directory: &Path, requested_name: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let safe = safe_file_name(requested_name);
@@ -505,6 +594,139 @@ fn encode_gif(original: &[u8], width: u32, height: u32, quality: u8) -> Result<V
     Ok(encoded)
 }
 
+fn gif_delay_ms(delay: image::Delay) -> i32 {
+    let (numerator, denominator) = delay.numer_denom_ms();
+    let denominator = denominator.max(1) as u64;
+    let rounded = (numerator as u64 + denominator / 2) / denominator;
+    rounded.clamp(10, i32::MAX as u64) as i32
+}
+
+fn encode_animated_webp(
+    original: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    let decoder = GifDecoder::new(BufReader::new(Cursor::new(original)))
+        .map_err(|error| error.to_string())?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|error| error.to_string())?;
+    if frames.is_empty() {
+        return Err("GIF 不包含可编码的动画帧".to_string());
+    }
+
+    let mut timestamp = 0_i32;
+    let mut encoded_frames = Vec::with_capacity(frames.len() + 1);
+    for frame in frames {
+        let delay = gif_delay_ms(frame.delay());
+        let mut buffer = frame.into_buffer();
+        if buffer.width() != width || buffer.height() != height {
+            buffer = image::imageops::resize(&buffer, width, height, FilterType::Lanczos3);
+        }
+        encoded_frames.push((buffer.into_raw(), timestamp));
+        timestamp = timestamp.saturating_add(delay);
+    }
+    // libwebp derives the final frame duration from the following timestamp.
+    // Repeating the last pixels at the animation end preserves the GIF delay
+    // without adding a visually distinct frame.
+    if let Some((last, _)) = encoded_frames.last() {
+        encoded_frames.push((last.clone(), timestamp.max(10)));
+    }
+
+    let mut config = WebPConfig::new().map_err(|_| "无法初始化动态 WebP 编码器".to_string())?;
+    config.lossless = 0;
+    config.quality = quality.clamp(1, 100) as f32;
+    config.alpha_quality = quality.clamp(35, 100) as i32;
+    config.method = 6;
+    config.thread_level = 1;
+    let mut encoder = AnimatedWebPEncoder::new(width, height, &config);
+    encoder.set_bgcolor([0, 0, 0, 0]);
+    encoder.set_loop_count(0);
+    for (pixels, frame_timestamp) in &encoded_frames {
+        encoder.add_frame(AnimatedWebPFrame::from_rgba(
+            pixels,
+            width,
+            height,
+            *frame_timestamp,
+        ));
+    }
+    let encoded = encoder
+        .try_encode()
+        .map_err(|error| format!("动态 WebP 编码失败：{error:?}"))?;
+    Ok(encoded.to_vec())
+}
+
+fn optimize_gif_animation(
+    original: &[u8],
+    settings: &WatcherSettings,
+) -> Result<OptimizedImage, String> {
+    let decoder = GifDecoder::new(BufReader::new(Cursor::new(original)))
+        .map_err(|error| error.to_string())?;
+    let (width, height) = decoder.dimensions();
+    let (target_width, target_height) = target_dimensions(width, height, settings);
+
+    if settings.format == "image/webp" {
+        return Ok(OptimizedImage {
+            bytes: encode_animated_webp(original, target_width, target_height, settings.quality)?,
+            extension: "webp".to_string(),
+        });
+    }
+
+    if settings.format == "keep" && matches!(settings.mode.as_str(), "balanced" | "small") {
+        let quality = if settings.mode == "balanced" {
+            settings.quality.clamp(78, 88)
+        } else {
+            settings.quality.min(58).max(1)
+        };
+        let gif = encode_gif(original, target_width, target_height, quality)?;
+        let webp = encode_animated_webp(original, target_width, target_height, quality)?;
+        let mut best = if webp.len() < gif.len() {
+            OptimizedImage {
+                bytes: webp,
+                extension: "webp".to_string(),
+            }
+        } else {
+            OptimizedImage {
+                bytes: gif,
+                extension: "gif".to_string(),
+            }
+        };
+        if settings.prevent_larger && !has_meaningful_savings(original.len(), best.bytes.len()) {
+            best = OptimizedImage {
+                bytes: original.to_vec(),
+                extension: "gif".to_string(),
+            };
+        }
+        return Ok(best);
+    }
+
+    let candidate = encode_gif(original, target_width, target_height, settings.quality)?;
+    let visual_transform = target_width != width || target_height != height;
+    if settings.prevent_larger && candidate.len() >= original.len() {
+        if visual_transform {
+            for quality in guarded_quality_steps(settings.quality) {
+                let guarded = encode_gif(original, target_width, target_height, quality)?;
+                if guarded.len() < original.len() {
+                    return Ok(OptimizedImage {
+                        bytes: guarded,
+                        extension: "gif".to_string(),
+                    });
+                }
+            }
+        }
+        return Ok(OptimizedImage {
+            bytes: original.to_vec(),
+            extension: "gif".to_string(),
+        });
+    }
+    Ok(OptimizedImage {
+        bytes: candidate,
+        extension: "gif".to_string(),
+    })
+}
+
 fn encode_static(
     image: DynamicImage,
     output_extension: &str,
@@ -562,34 +784,8 @@ struct OptimizedImage {
 fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedImage, String> {
     let original = fs::read(path).map_err(|error| error.to_string())?;
     let source_extension = extension_for(path, "keep");
-    if source_extension == "gif" && settings.format == "keep" {
-        let decoder = GifDecoder::new(BufReader::new(Cursor::new(&original)))
-            .map_err(|error| error.to_string())?;
-        let (width, height) = decoder.dimensions();
-        let (target_width, target_height) = target_dimensions(width, height, settings);
-        let candidate = encode_gif(&original, target_width, target_height, settings.quality)?;
-        let visual_transform = target_width != width || target_height != height;
-        if settings.prevent_larger && candidate.len() >= original.len() {
-            if visual_transform {
-                for quality in guarded_quality_steps(settings.quality) {
-                    let guarded = encode_gif(&original, target_width, target_height, quality)?;
-                    if guarded.len() < original.len() {
-                        return Ok(OptimizedImage {
-                            bytes: guarded,
-                            extension: source_extension,
-                        });
-                    }
-                }
-            }
-            return Ok(OptimizedImage {
-                bytes: original,
-                extension: source_extension,
-            });
-        }
-        return Ok(OptimizedImage {
-            bytes: candidate,
-            extension: source_extension,
-        });
+    if source_extension == "gif" && matches!(settings.format.as_str(), "keep" | "image/webp") {
+        return optimize_gif_animation(&original, settings);
     }
 
     let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
@@ -781,17 +977,27 @@ fn resize_and_position_dropzone(app: &AppHandle, width: f64, height: f64) {
     }
 }
 
-fn show_corner_drop_target(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.set_size(LogicalSize::new(96.0, 96.0));
-        let _ = window.show();
-        position_dropzone(&window, 96.0, 96.0);
+fn configure_dropzone_dimensions(app: &AppHandle, state: &DesktopState, width: f64, height: f64) {
+    let width = width.clamp(190.0, 520.0);
+    let height = height.clamp(140.0, 420.0);
+    if !state.dropzone_positioned.swap(true, Ordering::Relaxed) {
+        resize_and_position_dropzone(app, width, height);
+    } else if let Some(window) = app.get_webview_window("dropzone") {
+        // A user-selected position is durable for the current session. Resizing
+        // the window must not snap it back to the lower-right corner.
+        let _ = window.set_size(LogicalSize::new(width, height));
     }
 }
 
-fn hide_corner_drop_target(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("corner-drop-target") {
-        let _ = window.hide();
+fn ensure_dropzone_positioned(app: &AppHandle, state: &DesktopState) {
+    if state.dropzone_positioned.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("dropzone") {
+        if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
+            let logical = size.to_logical::<f64>(monitor.scale_factor());
+            position_dropzone(&window, logical.width, logical.height);
+        }
     }
 }
 
@@ -830,6 +1036,8 @@ fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
         input_folder: String::new(),
         input_folders: Vec::new(),
         output_folder: String::new(),
+        output_suffix: value.export_suffix.clone(),
+        rename_template: value.rename_template.clone(),
         mode: match value.mode.as_str() {
             "auto" => "balanced".to_string(),
             "balanced" | "small" | "lossless" => value.mode.clone(),
@@ -896,11 +1104,22 @@ async fn quick_compress_paths(
                     .ok_or_else(|| "无法定位源文件夹".to_string())?
             };
             // 悬浮压缩坞始终生成新文件，避免一次拖放意外覆盖源图。
-            let output = available_path(
-                &output_directory,
-                &format!("{base}{suffix}.{output_extension}"),
-            )?;
+            let (width, height) = image::load_from_memory(&optimized.bytes)
+                .map(|image| image.dimensions())
+                .or_else(|_| image::image_dimensions(&source))
+                .unwrap_or((0, 0));
+            let output_name = render_output_name(
+                &settings.rename_template,
+                base,
+                suffix,
+                &output_extension,
+                optimized.bytes.len(),
+                width,
+                height,
+            );
+            let output = available_path(&output_directory, &output_name)?;
             fs::write(&output, &optimized.bytes).map_err(|error| error.to_string())?;
+            record_optimised_output(&output_directory, &output)?;
             Ok((
                 output,
                 original_bytes,
@@ -933,6 +1152,44 @@ async fn quick_compress_paths(
 }
 
 #[tauri::command]
+async fn compress_animation_data(
+    data: Vec<u8>,
+    file_name: String,
+    settings: QuickCompressSettings,
+) -> Result<CompressedAnimationData, String> {
+    if data.is_empty() || data.len() > 256 * 1024 * 1024 {
+        return Err("动画图片为空或超过 256 MB".to_string());
+    }
+    let extension = Path::new(&file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension != "gif" {
+        return Err("当前原生动画编码仅接受 GIF".to_string());
+    }
+    let compression = quick_settings(&settings);
+    let decoder =
+        GifDecoder::new(BufReader::new(Cursor::new(&data))).map_err(|error| error.to_string())?;
+    let (source_width, source_height) = decoder.dimensions();
+    let (width, height) = target_dimensions(source_width, source_height, &compression);
+    let optimized = optimize_gif_animation(&data, &compression)?;
+    let mime_type = if optimized.extension == "webp" {
+        "image/webp"
+    } else {
+        "image/gif"
+    };
+    Ok(CompressedAnimationData {
+        kept_original: optimized.extension == "gif" && optimized.bytes == data,
+        data: BASE64.encode(optimized.bytes),
+        mime_type: mime_type.to_string(),
+        extension: optimized.extension,
+        width,
+        height,
+    })
+}
+
+#[tauri::command]
 async fn update_desktop_preferences(
     preferences: NativeDesktopPreferences,
     state: State<'_, DesktopState>,
@@ -947,6 +1204,173 @@ async fn update_desktop_preferences(
 }
 
 #[tauri::command]
+async fn configure_global_shortcuts(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    bindings: ShortcutBindings,
+) -> Result<(), String> {
+    let _guard = state
+        .shortcut_config_lock
+        .lock()
+        .map_err(|_| "快捷键配置状态不可用".to_string())?;
+    let shortcuts = app.global_shortcut();
+    shortcuts
+        .unregister_all()
+        .map_err(|error| error.to_string())?;
+    if !bindings.enabled {
+        return Ok(());
+    }
+
+    let mut configured = HashSet::new();
+    let entries = [
+        (
+            bindings.toggle_dropzone.trim().to_string(),
+            "toggle_dropzone",
+        ),
+        (
+            bindings.optimise_clipboard.trim().to_string(),
+            "optimise_clipboard",
+        ),
+        (bindings.show_main.trim().to_string(), "show_main"),
+        (bindings.show_gallery.trim().to_string(), "show_gallery"),
+        (bindings.upload_current.trim().to_string(), "upload_current"),
+    ];
+    for (shortcut, action) in entries {
+        if shortcut.is_empty() || !configured.insert(shortcut.clone()) {
+            continue;
+        }
+        shortcuts
+            .on_shortcut(shortcut.as_str(), move |app, _, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                match action {
+                    "toggle_dropzone" => {
+                        if let Some(window) = app.get_webview_window("dropzone") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let state = app.state::<DesktopState>();
+                                ensure_dropzone_positioned(app, &state);
+                                show_window(app, "dropzone");
+                            }
+                        }
+                    }
+                    "optimise_clipboard" => {
+                        let state = app.state::<DesktopState>();
+                        ensure_dropzone_positioned(app, &state);
+                        show_window(app, "dropzone");
+                        let _ = app.emit("tray:action", "optimise_clipboard");
+                    }
+                    "show_main" => show_window(app, "main"),
+                    "show_gallery" => {
+                        show_window(app, "main");
+                        let _ = app.emit("tray:action", "gallery");
+                    }
+                    "upload_current" => {
+                        let state = app.state::<DesktopState>();
+                        ensure_dropzone_positioned(app, &state);
+                        show_window(app, "dropzone");
+                        let _ = app.emit("tray:action", "upload_current");
+                    }
+                    _ => {}
+                }
+            })
+            .map_err(|error| format!("快捷键 {shortcut} 注册失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn cleanup_marked_files(
+    directory: &Path,
+    suffix: &str,
+    cutoff: SystemTime,
+    deleted: &mut u64,
+) -> Result<(), String> {
+    let manifest = directory.join(".piclite-generated.txt");
+    let mut registered = if manifest.is_file() {
+        fs::read_to_string(&manifest)
+            .unwrap_or_default()
+            .lines()
+            .map(PathBuf::from)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            cleanup_marked_files(&path, suffix, cutoff, deleted)?;
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !is_image(&path) || (!stem.contains(suffix) && !registered.contains(&canonical)) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::now());
+        if modified <= cutoff && fs::remove_file(&path).is_ok() {
+            *deleted += 1;
+            registered.remove(&canonical);
+        }
+    }
+    registered.retain(|path| path.is_file());
+    if manifest.is_file() || !registered.is_empty() {
+        let contents = registered
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&manifest, if contents.is_empty() { contents } else { format!("{contents}\n") })
+            .map_err(|error| format!("无法更新 PicLite 清理记录：{error}"))?;
+    }
+    Ok(())
+}
+
+fn record_optimised_output(directory: &Path, output: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let canonical = fs::canonicalize(output).unwrap_or_else(|_| output.to_path_buf());
+    let manifest = directory.join(".piclite-generated.txt");
+    let existing = fs::read_to_string(&manifest).unwrap_or_default();
+    if existing.lines().any(|line| Path::new(line) == canonical) {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest)
+        .map_err(|error| format!("无法记录 PicLite 输出文件：{error}"))?;
+    writeln!(file, "{}", canonical.to_string_lossy())
+        .map_err(|error| format!("无法记录 PicLite 输出文件：{error}"))
+}
+
+#[tauri::command]
+async fn cleanup_optimised_files(request: CleanupRequest) -> Result<CleanupResult, String> {
+    let suffix = request.suffix.trim();
+    if suffix.len() < 3 {
+        return Err("为避免误删，定期清理要求文件名后缀至少包含 3 个字符".to_string());
+    }
+    let directory = fs::canonicalize(PathBuf::from(request.folder.trim()))
+        .map_err(|_| "清理目录不存在或无法访问".to_string())?;
+    if !directory.is_dir() {
+        return Err("清理目标不是文件夹".to_string());
+    }
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(request.older_than_seconds.max(60)))
+        .unwrap_or(UNIX_EPOCH);
+    let mut deleted = 0;
+    cleanup_marked_files(&directory, suffix, cutoff, &mut deleted)?;
+    Ok(CleanupResult { deleted })
+}
+
+#[tauri::command]
 async fn show_main_window(app: AppHandle) -> Result<(), String> {
     show_window(&app, "main");
     Ok(())
@@ -954,49 +1378,36 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn show_gallery_window(app: AppHandle) -> Result<(), String> {
-    app.emit("tray:action", "gallery").map_err(|error| error.to_string())?;
+    app.emit("tray:action", "gallery")
+        .map_err(|error| error.to_string())?;
     show_window(&app, "main");
-    Ok(())
-}
-
-#[tauri::command]
-async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
-    show_window(&app, "preferences");
-    Ok(())
-}
-
-#[tauri::command]
-async fn show_dropzone_window(app: AppHandle) -> Result<(), String> {
-    hide_corner_drop_target(&app);
-    if let Some(window) = app.get_webview_window("dropzone") {
-        if let (Ok(size), Ok(Some(monitor))) = (window.outer_size(), window.current_monitor()) {
-            let logical = size.to_logical::<f64>(monitor.scale_factor());
-            position_dropzone(&window, logical.width, logical.height);
-        }
-    }
-    show_window(&app, "dropzone");
     Ok(())
 }
 
 #[tauri::command]
 async fn submit_corner_drop(
     app: AppHandle,
-    paths: Vec<String>,
     state: State<'_, DesktopState>,
+    paths: Vec<String>,
 ) -> Result<(), String> {
-    if paths.is_empty() {
-        return Ok(());
+    let valid = paths
+        .into_iter()
+        .filter(|path| {
+            let path = Path::new(path);
+            path.is_file() && is_image(path)
+        })
+        .collect::<Vec<_>>();
+    if valid.is_empty() {
+        return Err("拖放内容中没有支持的图片".to_string());
     }
     *state
         .pending_corner_drop
         .lock()
-        .map_err(|_| "拖放队列不可用".to_string())? = paths;
-    hide_corner_drop_target(&app);
-    resize_and_position_dropzone(&app, 420.0, 320.0);
+        .map_err(|_| "拖放队列不可用".to_string())? = valid;
+    ensure_dropzone_positioned(&app, &state);
     show_window(&app, "dropzone");
-    app.emit_to("dropzone", "dropzone:paths-ready", ())
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    app.emit("corner:drop", ())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1009,8 +1420,29 @@ async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<
 }
 
 #[tauri::command]
-async fn configure_dropzone_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    resize_and_position_dropzone(&app, width, height);
+async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "preferences");
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_dropzone_window(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<(), String> {
+    ensure_dropzone_positioned(&app, &state);
+    show_window(&app, "dropzone");
+    Ok(())
+}
+
+#[tauri::command]
+async fn configure_dropzone_window(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    configure_dropzone_dimensions(&app, &state, width, height);
     Ok(())
 }
 
@@ -1021,11 +1453,8 @@ async fn resize_dropzone_window(app: AppHandle, width: f64, height: f64) -> Resu
 }
 
 #[tauri::command]
-async fn hide_current_window(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+async fn hide_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|error| error.to_string())?;
-    if window.label() == "dropzone" {
-        show_corner_drop_target(&app);
-    }
     Ok(())
 }
 
@@ -1071,9 +1500,27 @@ fn process_watched_file(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("image");
-        let output_path =
-            available_path(&output_directory, &format!("{base}-piclite.{extension}"))?;
+        let suffix = if settings.output_suffix.trim().is_empty() {
+            "-piclite"
+        } else {
+            settings.output_suffix.trim()
+        };
+        let (width, height) = image::load_from_memory(&optimized.bytes)
+            .map(|image| image.dimensions())
+            .or_else(|_| image::image_dimensions(&canonical))
+            .unwrap_or((0, 0));
+        let output_name = render_output_name(
+            &settings.rename_template,
+            base,
+            suffix,
+            &extension,
+            optimized.bytes.len(),
+            width,
+            height,
+        );
+        let output_path = available_path(&output_directory, &output_name)?;
         fs::write(&output_path, &optimized.bytes).map_err(|error| error.to_string())?;
+        record_optimised_output(&output_directory, &output_path)?;
         Ok((output_path, original_bytes, optimized.bytes.len() as u64))
     })();
 
@@ -1085,7 +1532,8 @@ fn process_watched_file(
             event.original_bytes = Some(original_bytes);
             event.output_bytes = Some(output_bytes);
             emit_event(&app, event);
-            resize_and_position_dropzone(&app, 420.0, 320.0);
+            let state = app.state::<DesktopState>();
+            configure_dropzone_dimensions(&app, &state, 420.0, 320.0);
             if let Some(window) = app.get_webview_window("dropzone") {
                 let _ = window.show();
             }
@@ -1239,6 +1687,13 @@ fn clipboard_image_paths() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
     tauri::async_runtime::spawn_blocking(clipboard_image)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_clipboard_paths() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard_image_paths)
         .await
         .map_err(|error| error.to_string())?
 }
@@ -1432,6 +1887,18 @@ async fn copy_image_path(path: String, state: State<'_, DesktopState>) -> Result
         suppress_next_clipboard_observation(&state);
     }
     result
+}
+
+#[tauri::command]
+async fn copy_text(text: String, state: State<'_, DesktopState>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+        clipboard.set_text(text).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    suppress_next_clipboard_observation(&state);
+    Ok(())
 }
 
 fn collect_font_files(directory: &Path, depth: usize, files: &mut Vec<PathBuf>) {
@@ -1771,7 +2238,10 @@ async fn load_imported_fonts(app: AppHandle) -> Result<Vec<ImportedFontData>, St
 
 #[tauri::command]
 async fn save_imported_font(app: AppHandle, payload: ImportedFontPayload) -> Result<(), String> {
-    if payload.family.trim().is_empty() || payload.data.is_empty() || payload.data.len() > 64 * 1024 * 1024 {
+    if payload.family.trim().is_empty()
+        || payload.data.is_empty()
+        || payload.data.len() > 64 * 1024 * 1024
+    {
         return Err("字体文件无效或超过 64 MB".to_string());
     }
     let file_name = format!("{:x}.font", Sha256::digest(&payload.data));
@@ -1785,15 +2255,22 @@ async fn save_imported_font(app: AppHandle, payload: ImportedFontPayload) -> Res
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path).map_err(|error| format!("无法缓存字体文件：{error}"))?;
-        file.write_all(&payload.data).map_err(|error| format!("无法保存字体文件：{error}"))?;
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("无法缓存字体文件：{error}"))?;
+        file.write_all(&payload.data)
+            .map_err(|error| format!("无法保存字体文件：{error}"))?;
         file.flush().map_err(|error| error.to_string())?;
     }
     let mut manifest = read_imported_font_manifest(&app)?;
     manifest.retain(|font| font.family != payload.family);
-    manifest.push(StoredImportedFont { family: payload.family, file_name });
+    manifest.push(StoredImportedFont {
+        family: payload.family,
+        file_name,
+    });
     let data = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
-    fs::write(imported_fonts_manifest_path(&app)?, data).map_err(|error| format!("无法保存字体记录：{error}"))
+    fs::write(imported_fonts_manifest_path(&app)?, data)
+        .map_err(|error| format!("无法保存字体记录：{error}"))
 }
 
 #[tauri::command]
@@ -1859,6 +2336,43 @@ async fn reveal_path(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("无法打开文件位置：{error}"))
+}
+
+#[tauri::command]
+async fn open_image(path: String) -> Result<(), String> {
+    let target = fs::canonicalize(PathBuf::from(path))
+        .map_err(|_| "图片已经不存在".to_string())?;
+    if !target.is_file() || !is_image(&target) {
+        return Err("目标不是支持的图片文件".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&target);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new("rundll32.exe");
+        let file_url = Url::from_file_path(&target)
+            .map_err(|_| "无法生成图片文件链接".to_string())?;
+        command
+            .args(["url.dll,FileProtocolHandler", file_url.as_str()])
+            .creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&target);
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法用系统看图程序打开图片：{error}"))
 }
 
 const URL_PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -2574,10 +3088,7 @@ async fn start_watcher(
         }
         let inputs = requested_inputs
             .iter()
-            .map(|input| {
-                fs::canonicalize(input)
-                    .map_err(|_| format!("监测文件夹不存在：{input}"))
-            })
+            .map(|input| fs::canonicalize(input).map_err(|_| format!("监测文件夹不存在：{input}")))
             .collect::<Result<Vec<_>, _>>()?;
         let fixed_output = (!settings.output_folder.is_empty()
             && settings.output_folder != "@same-folder")
@@ -2605,7 +3116,9 @@ async fn start_watcher(
                             .filter(|input| path.starts_with(input))
                             .max_by_key(|input| input.components().count())
                             .cloned();
-                        let Some(source_root) = source_root else { continue };
+                        let Some(source_root) = source_root else {
+                            continue;
+                        };
                         let default_output = source_root.join("PicLite");
                         let already_optimised = path
                             .file_stem()
@@ -2613,7 +3126,9 @@ async fn start_watcher(
                             .is_some_and(|value| value.contains("-piclite"));
                         if !is_image(&path)
                             || already_optimised
-                            || path.starts_with(output_for_callback.as_ref().unwrap_or(&default_output))
+                            || path.starts_with(
+                                output_for_callback.as_ref().unwrap_or(&default_output),
+                            )
                         {
                             continue;
                         }
@@ -2713,6 +3228,7 @@ async fn get_watcher_state(state: State<'_, DesktopState>) -> Result<WatcherStat
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let preferences = MenuItem::with_id(app, "preferences", "设置…", true, None::<&str>)?;
     let batch = MenuItem::with_id(app, "show", "完整工作台", true, None::<&str>)?;
+    let floating = MenuItem::with_id(app, "dropzone", "打开悬浮窗", true, None::<&str>)?;
     let launch = MenuItem::with_id(app, "launch_at_login", "登录时启动", true, None::<&str>)?;
 
     let optimise = MenuItem::with_id(app, "optimise_clipboard", "优化", true, None::<&str>)?;
@@ -2723,13 +3239,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let downscale = MenuItem::with_id(
-        app,
-        "downscale_clipboard",
-        "缩小尺寸",
-        true,
-        None::<&str>,
-    )?;
+    let downscale = MenuItem::with_id(app, "downscale_clipboard", "缩小尺寸", true, None::<&str>)?;
     let quicklook = MenuItem::with_id(app, "quicklook_clipboard", "快速预览", true, None::<&str>)?;
     let clipboard = Submenu::with_items(
         app,
@@ -2738,9 +3248,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         &[&optimise, &aggressive, &downscale, &quicklook],
     )?;
 
-    let open_workdir = MenuItem::with_id(app, "open_workdir", "打开工作目录", true, None::<&str>)?;
-    let bring_back = MenuItem::with_id(app, "bring_back_result", "恢复上一个结果", true, None::<&str>)?;
-    let backups = Submenu::with_items(app, "备份", true, &[&open_workdir, &bring_back])?;
+    let upload_current = MenuItem::with_id(app, "upload_current", "上传当前悬浮结果", true, None::<&str>)?;
+    let image_host_settings = MenuItem::with_id(app, "image_host_settings", "图床设置…", true, None::<&str>)?;
+    let image_hosting = Submenu::with_items(app, "上传图床", true, &[&upload_current, &image_host_settings])?;
 
     let pause = MenuItem::with_id(app, "pause_automatic", "暂停自动优化", true, None::<&str>)?;
     let check_updates = MenuItem::with_id(app, "check_updates", "检查更新", true, None::<&str>)?;
@@ -2754,10 +3264,11 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         &[
             &preferences,
             &batch,
+            &floating,
             &launch,
             &separator_one,
             &clipboard,
-            &backups,
+            &image_hosting,
             &separator_two,
             &pause,
             &about,
@@ -2775,6 +3286,18 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
             "preferences" => show_window(app, "preferences"),
+            "image_host_settings" => {
+                show_window(app, "preferences");
+                let _ = app.emit("tray:action", "image_host_settings");
+            }
+            "dropzone" => {
+                let state = app.state::<DesktopState>();
+                ensure_dropzone_positioned(app, &state);
+                show_window(app, "dropzone");
+            }
+            "about" => {
+                let _ = open_url("https://github.com/amiaoapp/PicLite");
+            }
             "quit" => {
                 app.state::<DesktopState>()
                     .quitting
@@ -2784,9 +3307,8 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             action => {
                 if matches!(
                     action,
-                    "optimise_clipboard" | "optimise_clipboard_aggressive" | "downscale_clipboard"
+                    "optimise_clipboard" | "optimise_clipboard_aggressive" | "downscale_clipboard" | "upload_current"
                 ) {
-                    hide_corner_drop_target(app);
                     show_window(app, "dropzone");
                 }
                 let _ = app.emit("tray:action", action.to_string());
@@ -2806,8 +3328,17 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn apply_tray_icon_theme(_app: &AppHandle, _dark: bool) {
-    // PicLite 使用统一的原始应用图标，不随主题切换替换托盘图标。
+fn apply_tray_icon_theme(app: &AppHandle, dark: bool) {
+    let bytes = if dark {
+        include_bytes!("../icons/tray-dark.png").as_slice()
+    } else {
+        include_bytes!("../icons/tray-light.png").as_slice()
+    };
+    if let (Some(tray), Ok(icon)) = (app.tray_by_id("piclite-tray"), TauriImage::from_bytes(bytes)) {
+        let _ = tray.set_icon(Some(icon));
+        #[cfg(target_os = "macos")]
+        let _ = tray.set_icon_as_template(true);
+    }
 }
 
 #[tauri::command]
@@ -3011,8 +3542,6 @@ pub fn run() {
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
 
             start_clipboard_monitor(app.handle().clone());
-            show_corner_drop_target(app.handle());
-
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -3047,10 +3576,12 @@ pub fn run() {
             select_images,
             read_images_from_paths,
             read_clipboard_image,
+            read_clipboard_paths,
             copy_image_data,
             copy_compressed_data,
             cache_image_data,
             copy_image_path,
+            copy_text,
             list_system_fonts,
             read_system_font,
             load_app_profile,
@@ -3058,21 +3589,25 @@ pub fn run() {
             load_imported_fonts,
             save_imported_font,
             reveal_path,
+            open_image,
             upload_image,
             load_upload_profile,
             save_upload_profile,
             export_images,
             quick_compress_paths,
+            compress_animation_data,
+            configure_global_shortcuts,
+            cleanup_optimised_files,
             update_desktop_preferences,
             set_tray_theme,
             check_for_updates,
             open_external_url,
             show_main_window,
             show_gallery_window,
-            show_preferences_window,
-            show_dropzone_window,
             submit_corner_drop,
             take_pending_corner_drop,
+            show_preferences_window,
+            show_dropzone_window,
             configure_dropzone_window,
             resize_dropzone_window,
             hide_current_window,
@@ -3101,6 +3636,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_template_expands_size_dimensions_and_extension() {
+        let name = render_output_name(
+            "{name}_{width}x{height}_{size}{suffix}.{ext}",
+            "photo",
+            "-piclite",
+            "webp",
+            12_345,
+            1920,
+            1080,
+        );
+        assert_eq!(name, "photo_1920x1080_12345-piclite.webp");
+    }
+
+    #[test]
     fn automatic_first_pass_keeps_dimensions_and_selects_a_smaller_format() {
         let mut pixels = image::RgbImage::new(640, 360);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
@@ -3111,8 +3660,8 @@ mod tests {
                 noise.wrapping_add((y % 71) as u8),
             ]);
         }
-        let original = encode_static(DynamicImage::ImageRgb8(pixels), "png", 100)
-            .expect("encode source png");
+        let original =
+            encode_static(DynamicImage::ImageRgb8(pixels), "png", 100).expect("encode source png");
         let path = std::env::temp_dir().join(format!(
             "piclite-auto-first-pass-{}-{}.png",
             std::process::id(),
@@ -3123,6 +3672,8 @@ mod tests {
             input_folder: String::new(),
             input_folders: Vec::new(),
             output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
             mode: "balanced".to_string(),
             quality: 86,
             scale: 100.0,
@@ -3142,7 +3693,10 @@ mod tests {
 
         assert_eq!(dimensions, (640, 360));
         assert!(optimized.bytes.len() < original.len());
-        assert!(matches!(optimized.extension.as_str(), "jpg" | "webp" | "png"));
+        assert!(matches!(
+            optimized.extension.as_str(),
+            "jpg" | "webp" | "png"
+        ));
     }
 
     #[test]
@@ -3157,7 +3711,12 @@ mod tests {
         let mut pixels = image::RgbaImage::new(320, 180);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             let noise = ((x * 17 + y * 31 + (x * y) % 251) % 256) as u8;
-            *pixel = image::Rgba([noise, noise.wrapping_add((x % 93) as u8), noise.wrapping_add((y % 71) as u8), 255]);
+            *pixel = image::Rgba([
+                noise,
+                noise.wrapping_add((x % 93) as u8),
+                noise.wrapping_add((y % 71) as u8),
+                255,
+            ]);
         }
         let image = DynamicImage::ImageRgba8(pixels);
         let small = encode_static(image.clone(), "webp", 35).expect("encode small webp");
@@ -3165,7 +3724,51 @@ mod tests {
 
         assert_eq!(&small[8..12], b"WEBP");
         assert_eq!(&detailed[8..12], b"WEBP");
-        assert!(small.len() < detailed.len(), "low quality WebP should be smaller: {} vs {}", small.len(), detailed.len());
+        assert!(
+            small.len() < detailed.len(),
+            "low quality WebP should be smaller: {} vs {}",
+            small.len(),
+            detailed.len()
+        );
+    }
+
+    #[test]
+    fn animated_gif_converts_to_animated_webp_with_timing() {
+        let width = 48;
+        let height = 32;
+        let mut gif = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut gif);
+            encoder.set_repeat(Repeat::Infinite).expect("set GIF loop");
+            for (index, color) in [[255, 32, 32, 255], [32, 255, 32, 180], [32, 32, 255, 255]]
+                .into_iter()
+                .enumerate()
+            {
+                let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        buffer,
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80 + index as u32 * 40, 1),
+                    ))
+                    .expect("encode GIF frame");
+            }
+        }
+
+        let webp = encode_animated_webp(&gif, width, height, 72).expect("encode animated WebP");
+        let decoded = webp::AnimDecoder::new(&webp)
+            .decode()
+            .expect("decode animated WebP");
+
+        assert_eq!(&webp[8..12], b"WEBP");
+        assert!(decoded.has_animation());
+        assert!(decoded.len() >= 3);
+        let timestamps = decoded
+            .into_iter()
+            .map(|frame| frame.get_time_ms())
+            .collect::<Vec<_>>();
+        assert!(timestamps.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -3186,8 +3789,8 @@ mod tests {
         let expected = decoded_webp.to_rgba8();
 
         for quality in [1, 25, 80, 100] {
-            let png = encode_static(decoded_webp.clone(), "png", quality)
-                .expect("encode png result");
+            let png =
+                encode_static(decoded_webp.clone(), "png", quality).expect("encode png result");
             let actual = image::load_from_memory(&png)
                 .expect("decode png result")
                 .to_rgba8();
@@ -3221,6 +3824,8 @@ mod tests {
             input_folder: String::new(),
             input_folders: Vec::new(),
             output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
             mode: "lossless".to_string(),
             quality: 100,
             scale: 75.0,

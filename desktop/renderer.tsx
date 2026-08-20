@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 const root = document.getElementById("root");
 if (!root) throw new Error("PicLite renderer root is missing");
 
-const floatingWindow = ["dropzone", "corner-drop-target", "preferences"].includes(window.picLite?.windowLabel || "main");
+const floatingWindow = ["dropzone", "preferences"].includes(window.picLite?.windowLabel || "main");
 
 async function mount() {
   if (floatingWindow) {
