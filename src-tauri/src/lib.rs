@@ -746,22 +746,58 @@ fn encode_static(
                 .map_err(|error| error.to_string())?;
         }
         "png" => {
-            // PNG conversion is lossless. Do not quantize RGBA based on the
-            // generic quality slider: that previously caused WebP -> PNG
-            // conversions to lose colour fidelity.
             let rgba = image.to_rgba8();
-            PngEncoder::new_with_quality(
-                &mut encoded,
-                CompressionType::Best,
-                PngFilterType::Adaptive,
-            )
-            .write_image(
-                &rgba,
-                rgba.width(),
-                rgba.height(),
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|error| error.to_string())?;
+            if quality >= 100 {
+                // 100% is the explicit true-colour, pixel-lossless PNG mode.
+                PngEncoder::new_with_quality(
+                    &mut encoded,
+                    CompressionType::Best,
+                    PngFilterType::Adaptive,
+                )
+                .write_image(
+                    &rgba,
+                    rgba.width(),
+                    rgba.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                // PNG has no standard "quality" field. Use an indexed palette
+                // below 100%, matching common PNG optimisers while retaining
+                // per-entry alpha instead of silently ignoring the slider.
+                let normalized = (quality.clamp(1, 99) as f32 / 100.0).clamp(0.01, 0.99);
+                let colors = (64.0 + 192.0 * normalized.powf(1.35))
+                    .round()
+                    .clamp(64.0, 256.0) as usize;
+                let quantizer = color_quant::NeuQuant::new(10, colors, rgba.as_raw());
+                let color_map = quantizer.color_map_rgba();
+                let indices = rgba
+                    .as_raw()
+                    .chunks_exact(4)
+                    .map(|pixel| quantizer.index_of(pixel) as u8)
+                    .collect::<Vec<_>>();
+                let mut palette = Vec::with_capacity(colors * 3);
+                let mut transparency = Vec::with_capacity(colors);
+                for color in color_map.chunks_exact(4) {
+                    palette.extend_from_slice(&color[..3]);
+                    transparency.push(color[3]);
+                }
+                while transparency.last() == Some(&u8::MAX) {
+                    transparency.pop();
+                }
+                let mut encoder = png::Encoder::new(&mut encoded, rgba.width(), rgba.height());
+                encoder.set_color(png::ColorType::Indexed);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.set_palette(palette);
+                if !transparency.is_empty() {
+                    encoder.set_trns(transparency);
+                }
+                encoder
+                    .write_header()
+                    .map_err(|error| error.to_string())?
+                    .write_image_data(&indices)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         "webp" => {
             let rgba = image.to_rgba8();
@@ -888,8 +924,12 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
         target_width != width || target_height != height || settings.format != "keep";
     if settings.prevent_larger && candidate.len() >= original.len() {
         if visual_transform {
+            let mut smallest = candidate;
             for quality in guarded_quality_steps(settings.quality) {
                 let guarded = encode_static(resized.clone(), &output_extension, quality)?;
+                if guarded.len() < smallest.len() {
+                    smallest = guarded.clone();
+                }
                 if guarded.len() < original.len() {
                     return Ok(OptimizedImage {
                         bytes: guarded,
@@ -897,6 +937,10 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
                     });
                 }
             }
+            return Ok(OptimizedImage {
+                bytes: smallest,
+                extension: output_extension,
+            });
         }
         return Ok(OptimizedImage {
             bytes: original,
@@ -1328,8 +1372,15 @@ fn cleanup_marked_files(
             .map(|path| path.to_string_lossy())
             .collect::<Vec<_>>()
             .join("\n");
-        fs::write(&manifest, if contents.is_empty() { contents } else { format!("{contents}\n") })
-            .map_err(|error| format!("无法更新 PicLite 清理记录：{error}"))?;
+        fs::write(
+            &manifest,
+            if contents.is_empty() {
+                contents
+            } else {
+                format!("{contents}\n")
+            },
+        )
+        .map_err(|error| format!("无法更新 PicLite 清理记录：{error}"))?;
     }
     Ok(())
 }
@@ -2340,8 +2391,7 @@ async fn reveal_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn open_image(path: String) -> Result<(), String> {
-    let target = fs::canonicalize(PathBuf::from(path))
-        .map_err(|_| "图片已经不存在".to_string())?;
+    let target = fs::canonicalize(PathBuf::from(path)).map_err(|_| "图片已经不存在".to_string())?;
     if !target.is_file() || !is_image(&target) {
         return Err("目标不是支持的图片文件".to_string());
     }
@@ -2356,8 +2406,8 @@ async fn open_image(path: String) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut command = Command::new("rundll32.exe");
-        let file_url = Url::from_file_path(&target)
-            .map_err(|_| "无法生成图片文件链接".to_string())?;
+        let file_url =
+            Url::from_file_path(&target).map_err(|_| "无法生成图片文件链接".to_string())?;
         command
             .args(["url.dll,FileProtocolHandler", file_url.as_str()])
             .creation_flags(CREATE_NO_WINDOW);
@@ -3248,9 +3298,21 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         &[&optimise, &aggressive, &downscale, &quicklook],
     )?;
 
-    let upload_current = MenuItem::with_id(app, "upload_current", "上传当前悬浮结果", true, None::<&str>)?;
-    let image_host_settings = MenuItem::with_id(app, "image_host_settings", "图床设置…", true, None::<&str>)?;
-    let image_hosting = Submenu::with_items(app, "上传图床", true, &[&upload_current, &image_host_settings])?;
+    let upload_current = MenuItem::with_id(
+        app,
+        "upload_current",
+        "上传当前悬浮结果",
+        true,
+        None::<&str>,
+    )?;
+    let image_host_settings =
+        MenuItem::with_id(app, "image_host_settings", "图床设置…", true, None::<&str>)?;
+    let image_hosting = Submenu::with_items(
+        app,
+        "上传图床",
+        true,
+        &[&upload_current, &image_host_settings],
+    )?;
 
     let pause = MenuItem::with_id(app, "pause_automatic", "暂停自动优化", true, None::<&str>)?;
     let check_updates = MenuItem::with_id(app, "check_updates", "检查更新", true, None::<&str>)?;
@@ -3309,7 +3371,10 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             action => {
                 if matches!(
                     action,
-                    "optimise_clipboard" | "optimise_clipboard_aggressive" | "downscale_clipboard" | "upload_current"
+                    "optimise_clipboard"
+                        | "optimise_clipboard_aggressive"
+                        | "downscale_clipboard"
+                        | "upload_current"
                 ) {
                     show_window(app, "dropzone");
                 }
@@ -3338,7 +3403,10 @@ fn apply_tray_icon_theme(app: &AppHandle, dark: bool) {
     } else {
         include_bytes!("../icons/tray-light.png").as_slice()
     };
-    if let (Some(tray), Ok(icon)) = (app.tray_by_id("piclite-tray"), TauriImage::from_bytes(bytes)) {
+    if let (Some(tray), Ok(icon)) = (
+        app.tray_by_id("piclite-tray"),
+        TauriImage::from_bytes(bytes),
+    ) {
         let _ = tray.set_icon(Some(icon));
         #[cfg(target_os = "macos")]
         let _ = tray.set_icon_as_template(false);
@@ -3431,17 +3499,25 @@ async fn fetch_plugin_source(url: String) -> Result<String, String> {
         }
         let response = Client::builder()
             .timeout(Duration::from_secs(15))
-            .user_agent(format!("PicLite/{}/PluginRuntime", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!(
+                "PicLite/{}/PluginRuntime",
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .map_err(|error| format!("无法创建插件请求：{error}"))?
             .get(parsed)
             .send()
             .and_then(|response| response.error_for_status())
             .map_err(|error| format!("读取插件失败：{error}"))?;
-        if response.content_length().is_some_and(|length| length > MAX_PLUGIN_BYTES as u64) {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_PLUGIN_BYTES as u64)
+        {
             return Err("插件页面超过 8 MB，已停止载入".to_string());
         }
-        let bytes = response.bytes().map_err(|error| format!("读取插件内容失败：{error}"))?;
+        let bytes = response
+            .bytes()
+            .map_err(|error| format!("读取插件内容失败：{error}"))?;
         if bytes.len() > MAX_PLUGIN_BYTES {
             return Err("插件页面超过 8 MB，已停止载入".to_string());
         }
@@ -3814,7 +3890,7 @@ mod tests {
     }
 
     #[test]
-    fn png_conversion_preserves_decoded_pixels_at_every_quality() {
+    fn png_quality_controls_palette_output_and_100_is_lossless() {
         let mut pixels = image::RgbaImage::new(48, 32);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             *pixel = image::Rgba([
@@ -3830,18 +3906,24 @@ mod tests {
         let decoded_webp = image::load_from_memory(&webp).expect("decode webp source");
         let expected = decoded_webp.to_rgba8();
 
-        for quality in [1, 25, 80, 100] {
-            let png =
-                encode_static(decoded_webp.clone(), "png", quality).expect("encode png result");
-            let actual = image::load_from_memory(&png)
-                .expect("decode png result")
-                .to_rgba8();
-            assert_eq!(
-                actual.as_raw(),
-                expected.as_raw(),
-                "PNG quality {quality} must not quantize or recolor pixels"
-            );
-        }
+        let lossless =
+            encode_static(decoded_webp.clone(), "png", 100).expect("encode lossless png");
+        let detailed = encode_static(decoded_webp.clone(), "png", 82).expect("encode detailed png");
+        let small = encode_static(decoded_webp, "png", 25).expect("encode small png");
+        let actual_lossless = image::load_from_memory(&lossless)
+            .expect("decode lossless png")
+            .to_rgba8();
+
+        assert_eq!(actual_lossless.as_raw(), expected.as_raw());
+        assert!(
+            small.len() < detailed.len(),
+            "low-quality palette PNG should be smaller"
+        );
+        assert!(
+            detailed.len() < lossless.len(),
+            "palette PNG should be smaller than true-colour PNG"
+        );
+        assert!(image::load_from_memory(&small).is_ok());
     }
 
     #[test]

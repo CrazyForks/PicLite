@@ -30,7 +30,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" |
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.0.5";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -1048,16 +1048,79 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
   applyWatermark(context, width, height, settings.watermark);
 
   const quality = Math.min(1, Math.max(0.01, settings.quality / 100));
-  // PNG is lossless: the quality slider must never alter its pixels. Earlier
-  // versions treated PNG quality like a palette-size control, which visibly
-  // changed colours when converting from WebP. Keep decoded RGBA intact.
-  const result = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
+  // Canvas ignores the quality argument for PNG. At 100% we deliberately keep
+  // true-colour lossless output; below 100% we write an indexed PNG so that the
+  // shared quality control has a real, predictable effect while retaining alpha.
+  const result = outputType === "image/png" && settings.quality < 100
+    ? await encodeIndexedPng(context, width, height, settings.quality)
+    : await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
   if (!result) throw new Error("当前浏览器不支持所选输出格式");
   if (settings.quality >= 100 && settings.format === "keep" && sameSize && !settings.watermark.enabled && result.size >= item.originalBytes) {
     const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
     return { blob, width, height };
   }
   return { blob: result, width, height };
+}
+
+function pngPaletteSize(quality: number) {
+  const normalized = Math.min(0.99, Math.max(0.01, quality / 100));
+  return Math.max(64, Math.min(256, Math.round(64 + 192 * normalized ** 1.35)));
+}
+
+const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+const PNG_CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function pngChunk(type: string, data: Uint8Array) {
+  const typeBytes = new TextEncoder().encode(type);
+  const chunk = new Uint8Array(12 + data.length);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, data.length);
+  chunk.set(typeBytes, 4);
+  chunk.set(data, 8);
+  let crc = 0xffffffff;
+  for (let index = 4; index < 8 + data.length; index += 1) crc = PNG_CRC_TABLE[(crc ^ chunk[index]) & 0xff] ^ (crc >>> 8);
+  view.setUint32(8 + data.length, (crc ^ 0xffffffff) >>> 0);
+  return chunk;
+}
+
+async function encodeIndexedPng(context: CanvasRenderingContext2D, width: number, height: number, quality: number) {
+  if (typeof CompressionStream === "undefined") {
+    return new Promise<Blob | null>((resolve) => context.canvas.toBlob(resolve, "image/png"));
+  }
+  const rgba = context.getImageData(0, 0, width, height).data;
+  const palette = quantize(rgba, pngPaletteSize(quality), { format: "rgba4444", oneBitAlpha: false });
+  const indexed = applyPalette(rgba, palette, "rgba4444");
+  const scanlines = new Uint8Array((width + 1) * height);
+  for (let row = 0; row < height; row += 1) scanlines.set(indexed.subarray(row * width, (row + 1) * width), row * (width + 1) + 1);
+
+  const compressed = new Uint8Array(await new Response(
+    new Blob([scanlines.buffer]).stream().pipeThrough(new CompressionStream("deflate")),
+  ).arrayBuffer());
+  const header = new Uint8Array(13);
+  const headerView = new DataView(header.buffer);
+  headerView.setUint32(0, width);
+  headerView.setUint32(4, height);
+  header.set([8, 3, 0, 0, 0], 8);
+  const paletteRgb = new Uint8Array(palette.length * 3);
+  const paletteAlpha = new Uint8Array(palette.length);
+  palette.forEach((color, index) => {
+    paletteRgb.set(color.slice(0, 3), index * 3);
+    paletteAlpha[index] = color[3] ?? 255;
+  });
+  let alphaLength = paletteAlpha.length;
+  while (alphaLength > 0 && paletteAlpha[alphaLength - 1] === 255) alphaLength -= 1;
+  const chunks = [PNG_SIGNATURE, pngChunk("IHDR", header), pngChunk("PLTE", paletteRgb)];
+  if (alphaLength > 0) chunks.push(pngChunk("tRNS", paletteAlpha.subarray(0, alphaLength)));
+  chunks.push(pngChunk("IDAT", compressed), pngChunk("IEND", new Uint8Array()));
+  return new Blob(chunks.map((chunk) => chunk.buffer as ArrayBuffer), { type: "image/png" });
 }
 
 type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean; sizeGuardQuality?: number; strategy?: string };
@@ -1154,7 +1217,8 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
     || settings.watermark.enabled;
 
   if (settings.preventLarger && candidate.blob.size >= item.originalBytes) {
-    if (hasVisualTransform && settings.quality > 1) {
+    if (hasVisualTransform) {
+      let smallest = { ...candidate, quality: settings.quality };
       const qualitySteps = Array.from(new Set([
         settings.quality - 4,
         settings.quality - 8,
@@ -1169,10 +1233,15 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
 
       for (const quality of qualitySteps) {
         const guardedCandidate = await encodeCandidate({ ...settings, quality });
+        if (guardedCandidate.blob.size < smallest.blob.size) smallest = { ...guardedCandidate, quality };
         if (guardedCandidate.blob.size < item.originalBytes) {
           return { ...guardedCandidate, sizeGuardQuality: quality };
         }
       }
+      // A requested resize/format/watermark is a hard output constraint. Return
+      // the smallest valid transformed result instead of silently restoring the
+      // original dimensions or format and making the controls appear frozen.
+      return { blob: smallest.blob, width: smallest.width, height: smallest.height, sizeGuardQuality: smallest.quality };
     }
     return { blob: item.file, width: item.width, height: item.height, keptOriginal: true };
   }
@@ -3170,7 +3239,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 <strong>{selected?.status === "processing" ? t("计算中…", "Calculating…") : selected?.outputBytes ? formatBytes(selected.outputBytes) : t("导入图片后显示", "Shown after import")}</strong>
                 <small>{selected?.outputBytes ? selected.keptOriginal ? selected.strategy || t("所有候选都更大，已保留原图", "Every candidate was larger; original kept") : selected.strategy ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("智能选择", "Smart choice")} ${selected.strategy}` : selected.sizeGuardQuality ? `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${t("已自动调整编码质量至", "Quality adjusted to")} ${selected.sizeGuardQuality}%` : `${formatBytes(selected.originalBytes)} → ${formatBytes(selected.outputBytes)} · ${savedPercent(selected.originalBytes, selected.outputBytes) >= 0 ? t("节省", "Saved") : t("增加", "Larger")} ${Math.abs(savedPercent(selected.originalBytes, selected.outputBytes))}%` : t("显示的是本机实际编码后的文件大小", "Actual local encoding result")}</small>
               </div>
-              <p className="setting-hint"><i /> {t("智能平衡会实测原格式、WebP 与几档画质/尺寸，再在保真范围内选择最小结果；PNG 始终保持像素无损，JPG / WebP 调整编码质量，GIF 调整每帧色板。", "Smart balance measures the original format, WebP, and several quality/scale candidates before choosing the smallest faithful result. PNG stays pixel-lossless; JPG/WebP use encoding quality and GIF adjusts its frame palette.")}</p>
+              <p className="setting-hint"><i /> {t("智能平衡会实测多档画质/尺寸并选择较小结果。PNG 在 100% 时保持真彩无损，低于 100% 时通过调色板减色压缩；JPG / WebP 调整编码质量，GIF 调整每帧色板。", "Smart balance measures several quality/scale candidates and chooses a smaller result. PNG is true-colour lossless at 100%; below 100% it uses palette reduction. JPG/WebP use encoding quality and GIF adjusts its frame palette.")}</p>
             </div>
 
             <div className="setting-section slider-section">
@@ -3201,7 +3270,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 <select id="output-format" value={settings.format} onChange={(event) => setSettings((current) => ({ ...current, format: event.target.value as OutputFormat }))}>
                   <option value="keep">{t("保持原格式", "Keep original")}</option>
                   <option value="image/jpeg">{t("JPG · 适合照片", "JPG · photos")}</option>
-                  <option value="image/png">{t("PNG · 透明与无损", "PNG · alpha/lossless")}</option>
+                  <option value="image/png">{t("PNG · 透明 / 100% 无损", "PNG · alpha / lossless at 100%")}</option>
                   <option value="image/webp">{t("WebP · 适合网页", "WebP · web")}</option>
                 </select>
               </div>
@@ -3243,7 +3312,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
 
             <div className="setting-section compact">
               <label className="check-row"><input type="checkbox" checked={settings.stripMetadata} onChange={(event) => setSettings((current) => ({ ...current, stripMetadata: event.target.checked }))} /><span><strong>{t("移除隐私元数据", "Strip private metadata")}</strong><small>{t("删除位置、相机与拍摄信息", "Remove location, camera and capture details")}</small></span></label>
-              {!nativeBridge && <label className="check-row secondary-check"><input type="checkbox" checked={settings.preventLarger} onChange={(event) => setSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span><strong>{t("始终避免文件变大", "Never make files larger")}</strong><small>{t("必要时自动降低编码质量；仍无法变小时保留原图", "Lower quality when needed; keep the original if no candidate is smaller")}</small></span></label>}
+              {!nativeBridge && <label className="check-row secondary-check"><input type="checkbox" checked={settings.preventLarger} onChange={(event) => setSettings((current) => ({ ...current, preventLarger: event.target.checked }))} /><span><strong>{t("避免无意义地变大", "Avoid unnecessary size increases")}</strong><small>{t("普通优化会保留更小的原图；明确改格式、尺寸或水印时始终按设置输出", "Keep the smaller original for ordinary optimisation; explicit format, resize, or watermark changes are always honoured")}</small></span></label>}
             </div>
 
             <div className={`setting-section export-settings ${nativeBridge ? "desktop-hidden-setting" : ""}`}>
@@ -3421,7 +3490,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
             {(preferenceSection === "clipboard" || preferenceSection === "images") && <section className="preference-card">
               <div className="preference-card-heading"><span>{preferenceSection === "clipboard" ? t("剪贴板优化", "Clipboard optimiser") : t("图片优化", "Image optimisation")}</span><small>{t("全局保护策略", "Global safeguards")}</small></div>
               <label className="preference-row clickable">
-                <div><strong>{t("始终避免文件变大", "Never make files larger")}</strong><small>{t("自动尝试更合适的编码质量；仍无法变小时保留原图", "Try safer quality levels and keep the original if no candidate is smaller")}</small></div>
+                <div><strong>{t("避免无意义地变大", "Avoid unnecessary size increases")}</strong><small>{t("普通优化会保留更小的原图；明确改格式、尺寸或水印时始终按设置输出", "Keep the smaller original for ordinary optimisation; explicit format, resize, or watermark changes are always honoured")}</small></div>
                 <button className={`switch ${desktopPreferences.preventLarger ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.preventLarger} onClick={() => setDesktopPreferences((current) => ({ ...current, preventLarger: !current.preventLarger }))}><i /></button>
               </label>
               <label className="preference-row clickable">

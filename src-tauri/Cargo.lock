@@ -2532,15 +2532,17 @@ dependencies = [
 
 [[package]]
 name = "piclite"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "arboard",
  "base64 0.22.1",
  "chrono",
+ "color_quant",
  "hmac",
  "image",
  "notify",
  "percent-encoding",
+ "png 0.18.1",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
