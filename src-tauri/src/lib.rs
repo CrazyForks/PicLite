@@ -817,16 +817,18 @@ struct OptimizedImage {
     extension: String,
 }
 
-fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedImage, String> {
-    let original = fs::read(path).map_err(|error| error.to_string())?;
-    let source_extension = extension_for(path, "keep");
+fn optimize_image_data(
+    original: Vec<u8>,
+    source_extension: String,
+    settings: &WatcherSettings,
+) -> Result<OptimizedImage, String> {
     if source_extension == "gif" && matches!(settings.format.as_str(), "keep" | "image/webp") {
         return optimize_gif_animation(&original, settings);
     }
 
     let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
     let (width, height) = decoded.dimensions();
-    if settings.format == "keep" && matches!(settings.mode.as_str(), "balanced" | "small") {
+    if matches!(settings.mode.as_str(), "balanced" | "small") {
         // The desktop auto modes mirror the workbench: encode a short ladder
         // of format/quality/scale candidates and pick the smallest real file,
         // while retaining PNG/WebP alpha by never forcing JPEG conversion.
@@ -851,24 +853,30 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
             ]
         };
         let source_supported = matches!(source_extension.as_str(), "jpg" | "jpeg" | "png" | "webp");
-        let mut formats = vec![if source_supported {
-            source_extension.clone()
+        let mut formats = if settings.format == "keep" {
+            vec![if source_supported {
+                source_extension.clone()
+            } else {
+                "webp".to_string()
+            }]
         } else {
-            "webp".to_string()
-        }];
-        if !formats.iter().any(|format| format == "webp") {
-            formats.push("webp".to_string());
-        }
-        let has_alpha = decoded
-            .to_rgba8()
-            .pixels()
-            .any(|pixel| pixel.0[3] != u8::MAX);
-        let fallback = if has_alpha { "png" } else { "jpg" };
-        if !formats
-            .iter()
-            .any(|format| format == fallback || (fallback == "jpg" && format == "jpeg"))
-        {
-            formats.push(fallback.to_string());
+            vec![extension_for(Path::new("image.png"), &settings.format)]
+        };
+        if settings.format == "keep" {
+            if !formats.iter().any(|format| format == "webp") {
+                formats.push("webp".to_string());
+            }
+            let has_alpha = decoded
+                .to_rgba8()
+                .pixels()
+                .any(|pixel| pixel.0[3] != u8::MAX);
+            let fallback = if has_alpha { "png" } else { "jpg" };
+            if !formats
+                .iter()
+                .any(|format| format == fallback || (fallback == "jpg" && format == "jpeg"))
+            {
+                formats.push(fallback.to_string());
+            }
         }
         let mut best: Option<OptimizedImage> = None;
         for output_extension in formats {
@@ -918,7 +926,11 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
     } else {
         decoded
     };
-    let output_extension = extension_for(path, &settings.format);
+    let output_extension = if settings.format == "keep" {
+        source_extension.clone()
+    } else {
+        extension_for(Path::new("image.png"), &settings.format)
+    };
     let candidate = encode_static(resized.clone(), &output_extension, settings.quality)?;
     let visual_transform =
         target_width != width || target_height != height || settings.format != "keep";
@@ -951,6 +963,12 @@ fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedIm
         bytes: candidate,
         extension: output_extension,
     })
+}
+
+fn optimize_image(path: &Path, settings: &WatcherSettings) -> Result<OptimizedImage, String> {
+    let original = fs::read(path).map_err(|error| error.to_string())?;
+    let source_extension = extension_for(path, "keep");
+    optimize_image_data(original, source_extension, settings)
 }
 
 #[cfg(test)]
@@ -1084,7 +1102,7 @@ fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
         rename_template: value.rename_template.clone(),
         mode: match value.mode.as_str() {
             "auto" => "balanced".to_string(),
-            "balanced" | "small" | "lossless" => value.mode.clone(),
+            "balanced" | "small" | "lossless" | "manual" => value.mode.clone(),
             _ => inferred_mode.to_string(),
         },
         quality: value.quality.clamp(1, 100),
@@ -1230,6 +1248,58 @@ async fn compress_animation_data(
         extension: optimized.extension,
         width,
         height,
+    })
+}
+
+#[tauri::command]
+async fn compress_image_data(
+    data: Vec<u8>,
+    file_name: String,
+    settings: QuickCompressSettings,
+) -> Result<CompressedAnimationData, String> {
+    if data.is_empty() || data.len() > 256 * 1024 * 1024 {
+        return Err("图片为空或超过 256 MB".to_string());
+    }
+    let named_extension = Path::new(&file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let source_extension = match named_extension.as_str() {
+        "jpg" | "jpeg" => "jpg".to_string(),
+        "png" | "webp" | "gif" => named_extension,
+        _ => match image::guess_format(&data).map_err(|error| error.to_string())? {
+            image::ImageFormat::Jpeg => "jpg".to_string(),
+            image::ImageFormat::Png => "png".to_string(),
+            image::ImageFormat::WebP => "webp".to_string(),
+            image::ImageFormat::Gif => "gif".to_string(),
+            _ => return Err("当前原生编码不支持该图片格式".to_string()),
+        },
+    };
+    let compression = quick_settings(&settings);
+    let optimized = optimize_image_data(data.clone(), source_extension.clone(), &compression)?;
+    let (width, height) = image::load_from_memory(&optimized.bytes)
+        .map(|image| image.dimensions())
+        .unwrap_or_else(|_| {
+            image::load_from_memory(&data)
+                .map(|image| target_dimensions(image.width(), image.height(), &compression))
+                .unwrap_or((0, 0))
+        });
+    let mime_type = match optimized.extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    };
+    let kept_original = optimized.extension == source_extension && optimized.bytes == data;
+    Ok(CompressedAnimationData {
+        data: BASE64.encode(optimized.bytes),
+        mime_type: mime_type.to_string(),
+        extension: optimized.extension,
+        width,
+        height,
+        kept_original,
     })
 }
 
@@ -3712,6 +3782,7 @@ pub fn run() {
             save_upload_profile,
             export_images,
             quick_compress_paths,
+            compress_image_data,
             compress_animation_data,
             configure_global_shortcuts,
             cleanup_optimised_files,
@@ -3847,6 +3918,64 @@ mod tests {
             "low quality WebP should be smaller: {} vs {}",
             small.len(),
             detailed.len()
+        );
+    }
+
+    #[test]
+    fn workbench_native_webp_modes_encode_real_webp_and_change_the_result() {
+        let mut pixels = image::RgbImage::new(640, 360);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            let noise = ((x * 19 + y * 37 + (x * y) % 241) % 256) as u8;
+            *pixel = image::Rgb([
+                noise,
+                noise.wrapping_add((x % 81) as u8),
+                noise.wrapping_add((y % 67) as u8),
+            ]);
+        }
+        let original =
+            encode_static(DynamicImage::ImageRgb8(pixels), "jpg", 95).expect("encode source JPEG");
+        let balanced = WatcherSettings {
+            input_folder: String::new(),
+            input_folders: Vec::new(),
+            output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
+            mode: "balanced".to_string(),
+            quality: 82,
+            scale: 100.0,
+            format: "image/webp".to_string(),
+            resize: false,
+            max_width: u32::MAX,
+            max_height: u32::MAX,
+            strip_metadata: true,
+            prevent_larger: true,
+        };
+        let balanced_result = optimize_image_data(original.clone(), "jpg".to_string(), &balanced)
+            .expect("balanced native WebP");
+        let mut small = balanced.clone();
+        small.mode = "small".to_string();
+        small.quality = 45;
+        small.scale = 75.0;
+        let small_result = optimize_image_data(original.clone(), "jpg".to_string(), &small)
+            .expect("small native WebP");
+
+        assert_eq!(balanced_result.extension, "webp");
+        assert_eq!(&balanced_result.bytes[8..12], b"WEBP");
+        assert!(balanced_result.bytes.len() < original.len());
+        assert_eq!(
+            image::load_from_memory(&balanced_result.bytes)
+                .expect("decode balanced WebP")
+                .dimensions(),
+            (640, 360)
+        );
+        assert_eq!(small_result.extension, "webp");
+        assert_eq!(&small_result.bytes[8..12], b"WEBP");
+        assert!(small_result.bytes.len() < balanced_result.bytes.len());
+        assert!(
+            image::load_from_memory(&small_result.bytes)
+                .expect("decode small WebP")
+                .width()
+                < 640
         );
     }
 

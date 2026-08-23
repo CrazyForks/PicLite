@@ -2,10 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  isRequestedMimeType,
   isSmartCompressionWorthwhile,
   minimumSmartSavingsBytes,
   smartCandidateOutputFormats,
 } from "../app/compression-policy.ts";
+
+test("rejects a WebView encoder fallback that labels PNG bytes as requested WebP", () => {
+  assert.equal(isRequestedMimeType("image/webp", "image/webp"), true);
+  assert.equal(isRequestedMimeType("image/png", "image/webp"), false);
+  assert.equal(isRequestedMimeType("image/jpg", "image/jpeg"), true);
+});
 
 test("smart balance treats keep-original as a hard format constraint", () => {
   assert.deepEqual(smartCandidateOutputFormats("keep"), ["keep"]);

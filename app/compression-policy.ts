@@ -10,6 +10,11 @@ export function smartCandidateOutputFormats<T extends string>(requestedFormat: T
   return [requestedFormat];
 }
 
+export function isRequestedMimeType(actualType: string, requestedType: string) {
+  const normalize = (value: string) => value.toLowerCase() === "image/jpg" ? "image/jpeg" : value.toLowerCase();
+  return normalize(actualType) === normalize(requestedType);
+}
+
 /**
  * Lossy smart compression should save enough bytes to justify changing the
  * decoded image. Tiny, already-optimised assets otherwise lose visible detail

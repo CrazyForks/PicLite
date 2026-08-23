@@ -15,9 +15,9 @@ import {
 } from "react";
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
-import { isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
+import { isRequestedMimeType, isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
 
-type CompressionMode = "lossless" | "balanced" | "small";
+type CompressionMode = "lossless" | "balanced" | "small" | "manual";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
 type ViewName = "workspace" | "watcher" | "gallery" | "preferences" | `plugin:${string}`;
 type PreviewMode = "compare" | "original" | "result";
@@ -30,7 +30,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" |
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -136,6 +136,7 @@ type NativeBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  compressImageData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<{ data: Uint8Array; mimeType: string; extension: string; width: number; height: number; keptOriginal: boolean }>;
   compressAnimationData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<{ data: Uint8Array; mimeType: string; extension: string; width: number; height: number; keptOriginal: boolean }>;
   configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string; showGallery?: string; uploadCurrent?: string }) => Promise<void>;
   cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
@@ -740,8 +741,7 @@ function sizeChangeLabel(original = 0, output = 0) {
 
 function modeFromQuality(quality: number): CompressionMode {
   if (quality >= 100) return "lossless";
-  if (quality >= 55) return "balanced";
-  return "small";
+  return "manual";
 }
 
 function formatScale(scale: number) {
@@ -1068,6 +1068,9 @@ async function canvasCompress(item: ImageItem, settings: CompressionSettings) {
     ? await encodeIndexedPng(context, width, height, settings.quality)
     : await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, outputType, quality));
   if (!result) throw new Error("当前浏览器不支持所选输出格式");
+  if (!isRequestedMimeType(result.type, outputType)) {
+    throw new Error(`当前浏览器把 ${outputType} 回退成了 ${result.type || "未知格式"}，已阻止错误格式结果`);
+  }
   if (settings.quality >= 100 && settings.format === "keep" && sameSize && !settings.watermark.enabled && result.size >= item.originalBytes) {
     const blob = settings.stripMetadata ? await optimizeLosslessly(item.file) : item.file;
     return { blob, width, height };
@@ -1139,7 +1142,7 @@ async function encodeIndexedPng(context: CanvasRenderingContext2D, width: number
 type CompressionResult = { blob: Blob; width: number; height: number; keptOriginal?: boolean; sizeGuardQuality?: number; strategy?: string };
 
 function smartCandidates(item: ImageItem, settings: CompressionSettings) {
-  if (settings.mode === "lossless" || settings.format !== "keep" || item.type === "image/gif") return [settings];
+  if (settings.mode === "lossless" || settings.mode === "manual" || item.type === "image/gif") return [settings];
 
   // These are quality guard rails, not just named presets. We try a small set
   // of real encodes and retain the smallest result within the mode's visual
@@ -1194,6 +1197,33 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
   }
   if (item.type === "image/gif" && settings.format === "image/webp") {
     throw new Error("动态 WebP 转换需要 PicLite 桌面客户端；网页端会保留 GIF 动画");
+  }
+  if (nativeBridge && item.type !== "image/gif" && !settings.watermark.enabled) {
+    const sourceFormat = item.type === "image/jpg" ? "image/jpeg" : item.type;
+    const requestedFormat = settings.format === "keep"
+      ? (["image/jpeg", "image/png", "image/webp"].includes(sourceFormat) ? sourceFormat as OutputFormat : "image/png")
+      : settings.format;
+    const result = await nativeBridge.compressImageData(
+      new Uint8Array(await item.file.arrayBuffer()),
+      item.name,
+      {
+        mode: settings.mode,
+        quality: settings.quality,
+        scale: settings.scale,
+        format: requestedFormat,
+        stripMetadata: settings.stripMetadata,
+        preventLarger: settings.preventLarger,
+        exportMode: "same-folder",
+        exportSuffix: "-piclite",
+      },
+    );
+    return {
+      blob: new Blob([new Uint8Array(result.data)], { type: result.mimeType }),
+      width: result.width,
+      height: result.height,
+      keptOriginal: result.keptOriginal,
+      strategy: `${result.extension.toUpperCase()} · ${settings.mode === "manual" ? `${Math.round(settings.quality)}%` : settings.mode}`,
+    };
   }
   const encodeCandidate = (candidateSettings: CompressionSettings) => item.type === "image/gif" && candidateSettings.format === "keep"
     ? animatedGifCompress(item, candidateSettings)

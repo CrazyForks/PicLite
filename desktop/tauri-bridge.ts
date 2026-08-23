@@ -56,6 +56,10 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: () => invoke("stop_watcher"),
     getWatcherState: () => invoke("get_watcher_state"),
     quickCompressPaths: (paths, settings) => invoke("quick_compress_paths", { paths, settings }),
+    compressImageData: async (data, fileName, settings) => {
+      const result = await invoke<Omit<import("./clop-types").CompressedAnimationData, "data"> & { data: string }>("compress_image_data", { data: Array.from(data), fileName, settings });
+      return { ...result, data: decodeBase64(result.data) };
+    },
     compressAnimationData: async (data, fileName, settings) => {
       const result = await invoke<Omit<import("./clop-types").CompressedAnimationData, "data"> & { data: string }>("compress_animation_data", { data: Array.from(data), fileName, settings });
       return { ...result, data: decodeBase64(result.data) };
@@ -215,6 +219,7 @@ if ("__TAURI_INTERNALS__" in window) {
     stopWatcher: async () => ({ ok: true }),
     getWatcherState: async () => ({ active: false }),
     quickCompressPaths: async () => [],
+    compressImageData: async () => { throw new Error("Native image encoding requires the desktop app"); },
     compressAnimationData: async () => { throw new Error("Animated WebP encoding requires the desktop app"); },
     configureGlobalShortcuts: noop,
     cleanupOptimisedFiles: async () => ({ deleted: 0 }),

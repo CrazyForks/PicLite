@@ -158,6 +158,7 @@ export type PicLiteBridge = {
   stopWatcher: () => Promise<{ ok: boolean }>;
   getWatcherState: () => Promise<{ active: boolean; settings?: WatcherSettings }>;
   quickCompressPaths: (paths: string[], settings: QuickCompressSettings) => Promise<QuickCompressResult[]>;
+  compressImageData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<CompressedAnimationData>;
   compressAnimationData: (data: Uint8Array, fileName: string, settings: QuickCompressSettings) => Promise<CompressedAnimationData>;
   configureGlobalShortcuts: (bindings: { enabled: boolean; toggleDropzone: string; optimiseClipboard: string; showMain: string; showGallery?: string; uploadCurrent?: string }) => Promise<void>;
   cleanupOptimisedFiles: (payload: { folder: string; suffix: string; olderThanSeconds: number }) => Promise<{ deleted: number }>;
