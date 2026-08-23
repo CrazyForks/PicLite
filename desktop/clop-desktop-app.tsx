@@ -283,18 +283,25 @@ async function makeWatermarkedImage(api: PicLiteBridge, item: ResultItem, waterm
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas is unavailable");
   context.drawImage(bitmap, 0, 0); bitmap.close();
+  const watermarkLayer = document.createElement("canvas");
+  watermarkLayer.width = canvas.width; watermarkLayer.height = canvas.height;
+  const watermarkContext = watermarkLayer.getContext("2d", { alpha: true });
+  if (!watermarkContext) throw new Error("Watermark canvas is unavailable");
   const fontSize = Math.max(8, Math.round(Math.min(canvas.width, canvas.height) * watermark.fontScale / 100));
-  context.font = `700 ${fontSize}px ${JSON.stringify(watermark.fontFamily)}, sans-serif`;
-  context.fillStyle = watermark.color;
-  context.globalAlpha = Math.max(0.01, Math.min(1, watermark.opacity / 100));
-  context.textAlign = "center"; context.textBaseline = "middle";
-  if (watermark.shadow) { context.shadowColor = watermark.shadowColor; context.shadowBlur = watermark.shadowBlur; }
-  const textWidth = Math.max(context.measureText(watermark.text).width, fontSize * 2);
+  watermarkContext.font = `700 ${fontSize}px ${JSON.stringify(watermark.fontFamily)}, sans-serif`;
+  watermarkContext.fillStyle = watermark.color;
+  watermarkContext.textAlign = "center"; watermarkContext.textBaseline = "middle";
+  if (watermark.shadow) { watermarkContext.shadowColor = watermark.shadowColor; watermarkContext.shadowBlur = watermark.shadowBlur; }
+  const textWidth = Math.max(watermarkContext.measureText(watermark.text).width, fontSize * 2);
   const gap = Math.max(fontSize * 1.6, textWidth * (0.7 + (100 - watermark.density) / 25));
+  watermarkContext.save();
+  watermarkContext.translate(canvas.width / 2, canvas.height / 2); watermarkContext.rotate(watermark.rotation * Math.PI / 180);
+  for (let y = -canvas.height * 1.5; y <= canvas.height * 1.5; y += gap) for (let x = -canvas.width * 1.5; x <= canvas.width * 1.5; x += gap) watermarkContext.fillText(watermark.text, x, y);
+  watermarkContext.restore();
   context.save();
-  context.translate(canvas.width / 2, canvas.height / 2); context.rotate(watermark.rotation * Math.PI / 180);
-  for (let y = -canvas.height * 1.5; y <= canvas.height * 1.5; y += gap) for (let x = -canvas.width * 1.5; x <= canvas.width * 1.5; x += gap) context.fillText(watermark.text, x, y);
-  context.restore(); context.globalAlpha = 1;
+  context.globalAlpha = Math.max(0.01, Math.min(1, watermark.opacity / 100));
+  context.drawImage(watermarkLayer, 0, 0);
+  context.restore();
   const output = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Watermark encoding failed")), "image/png"));
   return api.cacheImageData(new Uint8Array(await output.arrayBuffer()), `watermark-${Date.now()}.png`);
 }
@@ -481,7 +488,17 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const applySavedWatermark = async (item: ResultItem) => {
     try {
       const path = await makeWatermarkedImage(api, item, settings.floatingWatermark);
-      await reoptimise(item, { mode: "manual", format: "png", scale: 100, quality: 100, preventLarger: false }, path);
+      const currentFormat = resultFormat(item);
+      const format: ImageFormat = currentFormat === "jpeg" || currentFormat === "webp" || currentFormat === "png" ? currentFormat : "keep";
+      // Preserve the displayed format. The old path forced every watermarked
+      // result through lossless PNG, turning small WebP files into multi-MB PNGs.
+      await reoptimise(item, {
+        mode: format === "keep" ? "auto" : "manual",
+        format,
+        scale: 100,
+        quality: format === "png" ? Math.min(90, settings.preset.quality || 86) : settings.preset.mode === "auto" ? 86 : settings.preset.quality,
+        preventLarger: false,
+      }, path);
     } catch (error) {
       setUpdateNotice({ text: error instanceof Error ? error.message : String(error) });
     }

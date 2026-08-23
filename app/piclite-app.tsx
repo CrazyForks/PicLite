@@ -30,7 +30,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" |
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.1.0";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -386,7 +386,7 @@ function PluginRuntime({ plugin, bridge, language }: { plugin: WorkspacePlugin; 
         const shadow = activeHost.shadowRoot || activeHost.attachShadow({ mode: "open" });
         shadow.replaceChildren();
         const runtimeStyle = document.createElement("style");
-        runtimeStyle.textContent = ":host{display:block;width:100%;height:100%;min-height:480px;background:#fff;color:#172033}.piclite-plugin-page{width:100%;height:100%;min-height:480px;overflow:auto;box-sizing:border-box}";
+        runtimeStyle.textContent = ":host{display:block;width:100%;min-height:100%;background:#fff;color:#172033}.piclite-plugin-page{width:100%;min-height:100%;height:auto;overflow:visible;box-sizing:border-box}";
         shadow.append(runtimeStyle);
 
         for (const style of Array.from(parsed.querySelectorAll("style"))) {
@@ -912,47 +912,59 @@ function getTargetDimensions(item: Pick<ImageItem, "width" | "height">, settings
   };
 }
 
-function applyWatermark(context: CanvasRenderingContext2D, width: number, height: number, watermark: WatermarkSettings) {
+function createWatermarkLayer(width: number, height: number, watermark: WatermarkSettings) {
   const text = watermark.text.trim();
-  if (!watermark.enabled || !text) return;
+  if (!watermark.enabled || !text) return null;
 
   const fontSize = Math.max(8, Math.min(width, height) * (watermark.fontScale / 100));
-  context.save();
-  context.globalAlpha = Math.min(1, Math.max(0.01, watermark.opacity / 100));
-  context.fillStyle = watermark.color;
-  context.font = `${fontSize}px "${watermark.fontFamily.replaceAll('"', "")}", sans-serif`;
-  context.textAlign = "center";
-  context.textBaseline = "middle";
+  const layer = document.createElement("canvas");
+  layer.width = width;
+  layer.height = height;
+  const layerContext = layer.getContext("2d", { alpha: true });
+  if (!layerContext) return null;
+  layerContext.fillStyle = watermark.color;
+  layerContext.font = `${fontSize}px "${watermark.fontFamily.replaceAll('"', "")}", sans-serif`;
+  layerContext.textAlign = "center";
+  layerContext.textBaseline = "middle";
   if (watermark.shadow) {
-    context.shadowColor = watermark.shadowColor;
-    context.shadowBlur = watermark.shadowBlur;
-    context.shadowOffsetX = Math.max(1, watermark.shadowBlur * 0.2);
-    context.shadowOffsetY = Math.max(1, watermark.shadowBlur * 0.2);
+    layerContext.shadowColor = watermark.shadowColor;
+    layerContext.shadowBlur = watermark.shadowBlur;
+    layerContext.shadowOffsetX = Math.max(1, watermark.shadowBlur * 0.2);
+    layerContext.shadowOffsetY = Math.max(1, watermark.shadowBlur * 0.2);
   }
 
   const angle = watermark.rotation * Math.PI / 180;
   if (watermark.layout === "single") {
-    context.translate(width * watermark.positionX / 100, height * watermark.positionY / 100);
-    context.rotate(angle);
-    context.fillText(text, 0, 0);
+    layerContext.translate(width * watermark.positionX / 100, height * watermark.positionY / 100);
+    layerContext.rotate(angle);
+    layerContext.fillText(text, 0, 0);
   } else {
     const diagonal = Math.hypot(width, height);
-    const measured = Math.max(fontSize * 2, context.measureText(text).width);
+    const measured = Math.max(fontSize * 2, layerContext.measureText(text).width);
     const density = Math.min(1, Math.max(0, watermark.density / 100));
     // A non-linear curve gives the low end real breathing room: 0% is deliberately
     // sparse enough for one or two marks on ordinary photos, while 100% stays dense.
     const sparse = (1 - density) ** 2;
     const stepX = measured + fontSize * (1.05 + sparse * 18);
     const stepY = fontSize * (1.45 + sparse * 14);
-    context.translate(width / 2, height / 2);
-    context.rotate(angle);
+    layerContext.translate(width / 2, height / 2);
+    layerContext.rotate(angle);
     let row = 0;
     for (let y = -diagonal; y <= diagonal; y += stepY) {
       const offset = row % 2 ? stepX / 2 : 0;
-      for (let x = -diagonal - offset; x <= diagonal; x += stepX) context.fillText(text, x + offset, y);
+      for (let x = -diagonal - offset; x <= diagonal; x += stepX) layerContext.fillText(text, x + offset, y);
       row += 1;
     }
   }
+  return layer;
+}
+
+function applyWatermark(context: CanvasRenderingContext2D, width: number, height: number, watermark: WatermarkSettings, layer = createWatermarkLayer(width, height, watermark)) {
+  if (!layer) return;
+  // Composite once so the opacity applies equally to the glyph and shadow.
+  context.save();
+  context.globalAlpha = Math.min(1, Math.max(0.01, watermark.opacity / 100));
+  context.drawImage(layer, 0, 0);
   context.restore();
 }
 
@@ -991,13 +1003,14 @@ async function animatedGifCompress(item: ImageItem, settings: CompressionSetting
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
   const colors = Math.max(2, Math.min(256, Math.round(2 + 254 * (settings.quality / 100) ** 1.45)));
+  const watermarkLayer = createWatermarkLayer(width, height, settings.watermark);
 
   try {
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
       const { image } = await decoder.decode({ frameIndex });
       context.clearRect(0, 0, width, height);
       context.drawImage(image as unknown as CanvasImageSource, 0, 0, width, height);
-      applyWatermark(context, width, height, settings.watermark);
+      applyWatermark(context, width, height, settings.watermark, watermarkLayer);
       const rgba = context.getImageData(0, 0, width, height).data;
       const palette = quantize(rgba, colors, { format: "rgba4444", oneBitAlpha: true });
       const indexed = applyPalette(rgba, palette, "rgba4444");
@@ -1216,7 +1229,7 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
     || settings.format !== "keep"
     || settings.watermark.enabled;
 
-  if (settings.preventLarger && candidate.blob.size >= item.originalBytes) {
+  if ((settings.preventLarger || settings.watermark.enabled) && candidate.blob.size >= item.originalBytes) {
     if (hasVisualTransform) {
       let smallest = { ...candidate, quality: settings.quality };
       const qualitySteps = Array.from(new Set([

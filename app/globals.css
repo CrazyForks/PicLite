@@ -1638,12 +1638,14 @@ html[data-theme="light"] .clop-dock .clop-drop-zone > strong { color: #213328; }
 .preferences-sidebar { min-height: 0; padding: 22px 12px 18px; display: flex; flex-direction: column; border-right: 1px solid rgba(61,75,66,.12); background: rgba(233,236,234,.84); backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px); }
 .preferences-sidebar-title { height: 42px; padding: 0 10px; display: flex; align-items: center; gap: 10px; }
 .preferences-sidebar-title .brand-mark { width: 29px; height: 29px; border-radius: 9px; }
-.plugin-workspace { min-height: 0; display: grid; grid-template-rows: auto 1fr; gap: 14px; padding: 18px; }
+.plugin-workspace { height: calc(100vh - var(--desktop-bar, 0px)); min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 14px; padding: 18px; overflow: hidden; }
 .plugin-workspace > header { display: flex; align-items: center; justify-content: space-between; padding: 2px 8px; }
 .plugin-workspace h1 { margin: 3px 0 0; font-size: 22px; }
 .plugin-workspace > header button, .plugin-import-panel button { min-height: 36px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.plugin-runtime-shell { position: relative; width: 100%; height: 100%; min-height: 480px; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: white; box-shadow: var(--shadow-soft); }
-.plugin-runtime { width: 100%; height: 100%; min-height: 480px; background: white; }
+.plugin-runtime-shell { position: relative; width: 100%; height: 100%; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; border: 1px solid var(--line); border-radius: 20px; background: white; box-shadow: var(--shadow-soft); }
+.plugin-runtime-shell::-webkit-scrollbar { width: 10px; height: 10px; }
+.plugin-runtime-shell::-webkit-scrollbar-thumb { border: 2px solid white; border-radius: 999px; background: rgba(62,84,72,.35); }
+.plugin-runtime { width: 100%; min-height: 100%; background: white; }
 .plugin-runtime-error { position: absolute; z-index: 3; inset: 22px; height: max-content; padding: 18px; border: 1px solid rgba(191,65,65,.22); border-radius: 14px; color: #7a2424; background: #fff2f2; box-shadow: 0 10px 28px rgba(100,30,30,.08); }
 .plugin-runtime-error p { margin: 6px 0 0; font-size: 12px; line-height: 1.55; }
 .plugin-row-actions { display: flex; align-items: center; gap: 8px; }
