@@ -19,6 +19,12 @@ function platformName() {
   return "linux";
 }
 
+const SUPPORTED_IMAGE_PATH = /\.(?:jpe?g|png|webp|gif|avif|tiff?)$/i;
+
+function imagePathsOnly(paths: string[]) {
+  return paths.filter((path) => SUPPORTED_IMAGE_PATH.test(path.split(/[\\/]/).pop() || path));
+}
+
 if ("__TAURI_INTERNALS__" in window) {
   const currentWindow = getCurrentWindow();
   const currentWebview = getCurrentWebview();
@@ -109,7 +115,10 @@ if ("__TAURI_INTERNALS__" in window) {
       let unlisten: (() => void) | undefined;
       let disposed = false;
       void currentWebview.onDragDropEvent((event) => {
-        if (event.payload.type === "drop") callback({ type: "drop", paths: event.payload.paths });
+        if (event.payload.type === "drop") {
+          const paths = imagePathsOnly(event.payload.paths);
+          callback(paths.length ? { type: "drop", paths } : { type: "leave" });
+        }
         else if (event.payload.type === "over") callback({ type: "over" });
         else callback({ type: "leave" });
       }).then((stop) => {

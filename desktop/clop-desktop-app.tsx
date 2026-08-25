@@ -23,6 +23,11 @@ const BUILTIN_WORKSPACE_PLUGINS: WorkspacePlugin[] = [
   { id: "watcher", nameZh: "文件夹监测", nameEn: "Folder watch", kind: "builtin", enabled: true },
   { id: "gallery", nameZh: "图库", nameEn: "Library", kind: "builtin", enabled: true },
 ];
+const SUPPORTED_IMAGE_PATH = /\.(?:jpe?g|png|webp|gif|avif|tiff?)$/i;
+
+function supportedImagePaths(paths: string[]) {
+  return [...new Set(paths.filter((path) => SUPPORTED_IMAGE_PATH.test(fileName(path))))];
+}
 
 function loadWorkspacePlugins() {
   try {
@@ -143,22 +148,20 @@ async function attachPreviews(items: ResultItem[], api: PicLiteBridge) {
   try {
     const images = await api.readImagesFromPaths(paths);
     const byPath = new Map(images.map((image) => [image.path, image]));
-    const withPreviews = items.map((item) => {
+    return await Promise.all(items.map(async (item) => {
       const image = item.output ? byPath.get(item.output) : undefined;
       if (!image) return item;
       const blob = new Blob([image.data.slice().buffer as ArrayBuffer], { type: image.type });
       const preview = URL.createObjectURL(blob);
-      return { ...item, preview };
-    });
-    return await Promise.all(withPreviews.map(async (item) => {
-      if (!item.preview) return item;
       try {
-        const bitmap = await createImageBitmap(await (await fetch(item.preview)).blob());
-        const detailed = { ...item, width: bitmap.width, height: bitmap.height };
+        // Decode directly from the blob. Fetching the freshly-created object
+        // URL made a second full image copy and caused large transient spikes.
+        const bitmap = await createImageBitmap(blob);
+        const detailed = { ...item, preview, width: bitmap.width, height: bitmap.height };
         bitmap.close();
         return detailed;
       } catch {
-        return item;
+        return { ...item, preview };
       }
     }));
   } catch {
@@ -168,8 +171,14 @@ async function attachPreviews(items: ResultItem[], api: PicLiteBridge) {
 
 function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings) {
   const [results, setResults] = useState<ResultItem[]>([]);
+  const resultsRef = useRef<ResultItem[]>([]);
   const [working, setWorking] = useState(false);
   const resultLimit = Math.max(1, Math.min(20, settings.floatingMaxResults || 5));
+
+  useEffect(() => { resultsRef.current = results; }, [results]);
+  useEffect(() => () => {
+    resultsRef.current.forEach((item) => item.preview && URL.revokeObjectURL(item.preview));
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setResults((current) => {
@@ -181,9 +190,10 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
   }, [resultLimit]);
 
   const optimise = useCallback(async (paths: string[], replace = false, overrides: Partial<OptimisationPreset> = {}) => {
-    if (!api || !paths.length) return [] as ResultItem[];
+    const imagePaths = supportedImagePaths(paths);
+    if (!api || !imagePaths.length) return [] as ResultItem[];
     const effectiveSettings = { ...settings, preset: { ...settings.preset, ...overrides } };
-    const unique = [...new Set(paths)];
+    const unique = imagePaths;
     setWorking(true);
     const placeholders: ResultItem[] = unique.map((source) => ({ id: `${source}-${Date.now()}-${Math.random()}`, source, keptOriginal: false, status: "working" }));
     setResults((current) => {

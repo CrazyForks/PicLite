@@ -1330,6 +1330,12 @@ function fileNameFromPath(path: string) {
   return path.split(/[\\/]/).pop() || path;
 }
 
+const SUPPORTED_IMAGE_PATH = /\.(?:jpe?g|png|webp|gif|avif|tiff?)$/i;
+
+function supportedImagePaths(paths: string[]) {
+  return [...new Set(paths.filter((path) => SUPPORTED_IMAGE_PATH.test(fileNameFromPath(path))))];
+}
+
 type BrowserPlatform = "generic" | "windows" | "macos" | "linux";
 
 function detectBrowserPlatform(): BrowserPlatform {
@@ -1434,26 +1440,31 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   }, [bridge]);
 
   const runCompression = useCallback(async (paths: string[], nextQuality = quality, nextScale = scale, nextFormat = format, remember = true) => {
-    if (!paths.length) return;
+    const imagePaths = supportedImagePaths(paths);
+    if (!imagePaths.length) {
+      setIsDragging(false);
+      setNotice(dt("只支持 JPG、PNG、WebP、GIF、AVIF 和 TIFF 图片", "Only JPG, PNG, WebP, GIF, AVIF and TIFF images are supported"));
+      return;
+    }
     const runId = ++compressionRunRef.current;
     if (remember && results.length) {
       historyRef.current.push({ ...resultSettingsRef.current, results });
       historyRef.current = historyRef.current.slice(-12);
     }
-    lastPathsRef.current = paths;
+    lastPathsRef.current = imagePaths;
     setIsProcessing(true);
     setNotice(dt("正在从原图重新计算…", "Reprocessing from the original…"));
     Object.values(previewUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
     previewUrlsRef.current = {};
     setPreviewUrls({});
-    setResults(paths.map((source) => ({ source, keptOriginal: false })));
+    setResults(imagePaths.map((source) => ({ source, keptOriginal: false })));
     try {
       let preferences = DEFAULT_DESKTOP_PREFERENCES;
       try {
         const stored = window.localStorage.getItem("piclite.desktopPreferences.v1");
         if (stored) preferences = { ...preferences, ...JSON.parse(stored) };
       } catch { /* 使用安全默认值 */ }
-      const next = await bridge.quickCompressPaths(paths, {
+      const next = await bridge.quickCompressPaths(imagePaths, {
         quality: nextQuality,
         scale: nextScale,
         format: nextFormat,
@@ -1470,7 +1481,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       setNotice(dt(`已按 ${nextQuality}% 画质 · ${formatScale(nextScale)} 尺寸 · ${nextFormat === "keep" ? "原格式" : nextFormat.split("/")[1].toUpperCase()} 生成`, `Generated at ${nextQuality}% quality · ${formatScale(nextScale)} scale · ${nextFormat === "keep" ? "original format" : nextFormat.split("/")[1].toUpperCase()}`));
       void saveDockResults(next);
     } catch (error) {
-      if (runId === compressionRunRef.current) setResults(paths.map((source) => ({ source, keptOriginal: false, error: error instanceof Error ? error.message : dt("压缩失败", "Optimisation failed") })));
+      if (runId === compressionRunRef.current) setResults(imagePaths.map((source) => ({ source, keptOriginal: false, error: error instanceof Error ? error.message : dt("压缩失败", "Optimisation failed") })));
     } finally {
       if (runId === compressionRunRef.current) setIsProcessing(false);
     }

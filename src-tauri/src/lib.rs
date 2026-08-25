@@ -37,7 +37,8 @@ use tauri::{
     image::Image as TauriImage,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -1015,6 +1016,51 @@ fn show_window(app: &AppHandle, label: &str) {
     }
 }
 
+/// The preferences webview used to be declared in `tauri.conf.json`, which
+/// made a complete renderer process live for the entire application lifetime
+/// even when settings had never been opened. Create it only on demand; closing
+/// it destroys the webview so its memory is returned to the OS.
+fn ensure_preferences_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("preferences") {
+        let _ = window.unminimize();
+        window.show().map_err(|error| error.to_string())?;
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        "preferences",
+        WebviewUrl::App("index.html?window=preferences".into()),
+    )
+    .title("PicLite 应用设置")
+    .inner_size(980.0, 700.0)
+    .min_inner_size(680.0, 500.0)
+    .resizable(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
+fn open_preferences_from_menu(app: &AppHandle, action: Option<&'static str>) {
+    // Tauri/WebView2 warns against building a webview synchronously inside a
+    // menu callback on Windows, so perform the on-demand creation off-callback.
+    let app = app.clone();
+    thread::spawn(move || {
+        if ensure_preferences_window(&app).is_ok() {
+            if let Some(action) = action {
+                // The renderer installs its app-event listener during mount.
+                thread::sleep(Duration::from_millis(250));
+                let _ = app.emit("tray:action", action);
+            }
+        }
+    });
+}
+
 fn position_dropzone(window: &tauri::WebviewWindow, logical_width: f64, logical_height: f64) {
     let Ok(Some(monitor)) = window.current_monitor() else {
         return;
@@ -1542,8 +1588,7 @@ async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<
 
 #[tauri::command]
 async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
-    show_window(&app, "preferences");
-    Ok(())
+    ensure_preferences_window(&app)
 }
 
 #[tauri::command]
@@ -1791,25 +1836,40 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
     }))
 }
 
-fn clipboard_image_paths() -> Result<Vec<String>, String> {
+/// Returns `Some` whenever the clipboard contains a file-list payload, even
+/// when none of those files are supported images. Finder/Explorer often also
+/// expose a thumbnail bitmap for copied PDF/Office documents; preserving the
+/// distinction prevents PicLite from compressing that document icon.
+fn clipboard_file_image_paths() -> Result<Option<Vec<String>>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
     match clipboard.get().file_list() {
-        Ok(paths) => Ok(paths
-            .into_iter()
-            .filter(|path| is_image(path))
-            .map(|path| fs::canonicalize(&path).unwrap_or(path))
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()),
-        Err(arboard::Error::ContentNotAvailable) => Ok(Vec::new()),
+        Ok(paths) => Ok(Some(
+            paths
+                .into_iter()
+                .filter(|path| is_image(path))
+                .map(|path| fs::canonicalize(&path).unwrap_or(path))
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        )),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
 }
 
+fn clipboard_image_paths() -> Result<Vec<String>, String> {
+    Ok(clipboard_file_image_paths()?.unwrap_or_default())
+}
+
 #[tauri::command]
 async fn read_clipboard_image() -> Result<Option<ClipboardImage>, String> {
-    tauri::async_runtime::spawn_blocking(clipboard_image)
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(|| {
+        if clipboard_file_image_paths()?.is_some() {
+            return Ok(None);
+        }
+        clipboard_image()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3419,10 +3479,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app, "main"),
-            "preferences" => show_window(app, "preferences"),
+            "preferences" => open_preferences_from_menu(app, None),
             "image_host_settings" => {
-                show_window(app, "preferences");
-                let _ = app.emit("tray:action", "image_host_settings");
+                open_preferences_from_menu(app, Some("image_host_settings"));
             }
             "dropzone" => {
                 let state = app.state::<DesktopState>();
@@ -3658,22 +3717,15 @@ fn start_clipboard_monitor(app: AppHandle) {
                 continue;
             }
 
-            match clipboard_image() {
-                Ok(Some(image)) => {
-                    let fingerprint = format!("{:x}", Sha256::digest(image.data.as_bytes()));
-                    let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
-                    if !was_enabled {
-                        last_fingerprint = Some(fingerprint);
+            match clipboard_file_image_paths() {
+                Ok(Some(paths)) => {
+                    // A copied document may expose both a file path and its
+                    // Finder/Explorer thumbnail as a bitmap. A file-list takes
+                    // precedence, and non-image files are deliberately ignored.
+                    if paths.is_empty() {
                         was_enabled = true;
-                    } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
-                        last_fingerprint = Some(fingerprint);
-                        if !ignored {
-                            let _ = app.emit("clipboard:image", image);
-                        }
-                    }
-                }
-                Ok(None) => match clipboard_image_paths() {
-                    Ok(paths) if !paths.is_empty() => {
+                        last_fingerprint = Some("non-image-file-list".to_string());
+                    } else {
                         let fingerprint = format!("paths:{}", paths.join("\u{1f}"));
                         let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
                         if !was_enabled {
@@ -3686,7 +3738,22 @@ fn start_clipboard_monitor(app: AppHandle) {
                             }
                         }
                     }
-                    Ok(_) => {
+                }
+                Ok(None) => match clipboard_image() {
+                    Ok(Some(image)) => {
+                        let fingerprint = format!("{:x}", Sha256::digest(image.data.as_bytes()));
+                        let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
+                        if !was_enabled {
+                            last_fingerprint = Some(fingerprint);
+                            was_enabled = true;
+                        } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                            last_fingerprint = Some(fingerprint);
+                            if !ignored {
+                                let _ = app.emit("clipboard:image", image);
+                            }
+                        }
+                    }
+                    Ok(None) => {
                         was_enabled = true;
                         last_fingerprint = None;
                     }
@@ -3740,11 +3807,17 @@ pub fn run() {
             let state = window.state::<DesktopState>();
             match event {
                 WindowEvent::CloseRequested { api, .. }
-                    if state.tray_available.load(Ordering::Relaxed)
+                    if window.label() != "preferences"
+                        && state.tray_available.load(Ordering::Relaxed)
                         && !state.quitting.load(Ordering::Relaxed) =>
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                WindowEvent::CloseRequested { .. } if window.label() == "preferences" => {
+                    // Do not keep the settings renderer hidden in memory.
+                    // Allow the close request to destroy it; it is recreated
+                    // lazily by `ensure_preferences_window` next time.
                 }
                 WindowEvent::Resized(_)
                     if state.tray_available.load(Ordering::Relaxed)
@@ -4172,5 +4245,32 @@ mod tests {
         assert!(version_is_newer("1.0.0", "0.99.99"));
         assert!(!version_is_newer("v0.10.0", "0.10.0"));
         assert!(!version_is_newer("0.9.9", "0.10.0"));
+    }
+
+    #[test]
+    fn file_ingress_accepts_images_and_rejects_documents() {
+        for name in [
+            "photo.jpg",
+            "PHOTO.JPEG",
+            "graphic.png",
+            "animation.gif",
+            "modern.webp",
+            "modern.avif",
+            "scan.tiff",
+        ] {
+            assert!(is_image(Path::new(name)), "{name} should be an image");
+        }
+        for name in [
+            "report.pdf",
+            "draft.doc",
+            "draft.docx",
+            "sheet.xlsx",
+            "slides.pptx",
+            "archive.zip",
+            "image.png.pdf",
+            "no-extension",
+        ] {
+            assert!(!is_image(Path::new(name)), "{name} must be rejected");
+        }
     }
 }
