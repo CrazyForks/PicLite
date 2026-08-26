@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "piclite"
-version = "1.1.2"
+version = "1.1.3"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -2541,6 +2541,7 @@ dependencies = [
  "hmac",
  "image",
  "notify",
+ "objc2-app-kit",
  "percent-encoding",
  "png 0.18.1",
  "reqwest 0.12.28",
@@ -2557,6 +2558,7 @@ dependencies = [
  "ttf-parser",
  "url",
  "webp",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

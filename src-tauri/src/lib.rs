@@ -1822,8 +1822,18 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
         Err(arboard::Error::ContentNotAvailable) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
+    encode_clipboard_bitmap(&image).map(Some)
+}
+
+/// Encode clipboard pixels only after the monitor has established that the
+/// clipboard actually changed. `CompressionType::Best` used to run on every
+/// poll (including an unchanged multi-megapixel screenshot), which could keep
+/// one CPU core busy indefinitely. The cached image is re-encoded by the real
+/// optimisation pipeline immediately afterwards, so a fast, lossless transfer
+/// PNG is both sufficient and substantially cheaper here.
+fn encode_clipboard_bitmap(image: &arboard::ImageData<'_>) -> Result<ClipboardImage, String> {
     let mut png = Vec::new();
-    PngEncoder::new_with_quality(&mut png, CompressionType::Best, PngFilterType::Adaptive)
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, PngFilterType::Adaptive)
         .write_image(
             &image.bytes,
             image.width as u32,
@@ -1831,9 +1841,56 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|error| error.to_string())?;
-    Ok(Some(ClipboardImage {
+    Ok(ClipboardImage {
         data: BASE64.encode(png),
-    }))
+    })
+}
+
+/// A bounded-cost fingerprint for clipboard pixels. Hashing a handful of
+/// evenly distributed samples avoids scanning and PNG-compressing tens of
+/// megabytes every second while still detecting same-sized replacement images.
+fn clipboard_bitmap_fingerprint(image: &arboard::ImageData<'_>) -> String {
+    const SAMPLE_COUNT: usize = 32;
+    const SAMPLE_BYTES: usize = 128;
+
+    let bytes = image.bytes.as_ref();
+    let mut digest = Sha256::new();
+    digest.update(image.width.to_le_bytes());
+    digest.update(image.height.to_le_bytes());
+    digest.update(bytes.len().to_le_bytes());
+    if bytes.len() <= SAMPLE_COUNT * SAMPLE_BYTES {
+        digest.update(bytes);
+    } else {
+        let last_start = bytes.len().saturating_sub(SAMPLE_BYTES);
+        for index in 0..SAMPLE_COUNT {
+            let start = last_start.saturating_mul(index) / (SAMPLE_COUNT - 1);
+            digest.update(&bytes[start..start + SAMPLE_BYTES]);
+        }
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Return the operating system's cheap clipboard generation counter where it
+/// is available. This lets the monitor avoid even requesting the bitmap while
+/// the clipboard is unchanged. Linux desktop stacks do not expose one common
+/// counter, so they fall back to the bounded pixel fingerprint above.
+#[cfg(target_os = "macos")]
+fn clipboard_change_token() -> Option<u64> {
+    use objc2_app_kit::NSPasteboard;
+
+    Some(NSPasteboard::generalPasteboard().changeCount().max(0) as u64)
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_change_token() -> Option<u64> {
+    // SAFETY: GetClipboardSequenceNumber has no parameters and only reads the
+    // system-maintained clipboard counter.
+    Some(unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() } as u64)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn clipboard_change_token() -> Option<u64> {
+    None
 }
 
 /// Returns `Some` whenever the clipboard contains a file-list payload, even
@@ -3472,6 +3529,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let initial_tray_icon = TauriImage::from_bytes(include_bytes!("../icons/tray-light.png"))
         .unwrap_or_else(|_| app.default_window_icon().expect("missing app icon").clone());
+    #[allow(unused_variables)]
     let tray = TrayIconBuilder::with_id("piclite-tray")
         .tooltip("PicLite · Drop to optimise")
         .icon(initial_tray_icon)
@@ -3698,6 +3756,7 @@ fn start_clipboard_monitor(app: AppHandle) {
     thread::spawn(move || {
         let mut was_enabled = false;
         let mut last_fingerprint: Option<String> = None;
+        let mut last_change_token: Option<u64> = None;
         loop {
             let (enabled, quitting, ignore_until_ms) = {
                 let state = app.state::<DesktopState>();
@@ -3713,8 +3772,23 @@ fn start_clipboard_monitor(app: AppHandle) {
             if !enabled {
                 was_enabled = false;
                 last_fingerprint = None;
-                thread::sleep(Duration::from_millis(800));
+                last_change_token = None;
+                // Monitoring is disabled: wake infrequently just to observe a
+                // settings change. This thread otherwise consumes no CPU.
+                thread::sleep(Duration::from_millis(1500));
                 continue;
+            }
+
+            // macOS and Windows expose a generation counter that changes only
+            // when clipboard contents change. Previously every pass decoded
+            // and PNG-compressed the same bitmap; for a large screenshot that
+            // alone could sustain 20–30% CPU usage.
+            if let Some(change_token) = clipboard_change_token() {
+                if was_enabled && last_change_token == Some(change_token) {
+                    thread::sleep(Duration::from_millis(650));
+                    continue;
+                }
+                last_change_token = Some(change_token);
             }
 
             match clipboard_file_image_paths() {
@@ -3739,29 +3813,42 @@ fn start_clipboard_monitor(app: AppHandle) {
                         }
                     }
                 }
-                Ok(None) => match clipboard_image() {
-                    Ok(Some(image)) => {
-                        let fingerprint = format!("{:x}", Sha256::digest(image.data.as_bytes()));
-                        let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
-                        if !was_enabled {
-                            last_fingerprint = Some(fingerprint);
-                            was_enabled = true;
-                        } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
-                            last_fingerprint = Some(fingerprint);
-                            if !ignored {
-                                let _ = app.emit("clipboard:image", image);
+                Ok(None) => {
+                    let bitmap = arboard::Clipboard::new()
+                        .map_err(|error| error.to_string())
+                        .and_then(|mut clipboard| match clipboard.get_image() {
+                            Ok(image) => Ok(Some(image.to_owned_img())),
+                            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+                            Err(error) => Err(error.to_string()),
+                        });
+                    match bitmap {
+                        Ok(Some(image)) => {
+                            let fingerprint = clipboard_bitmap_fingerprint(&image);
+                            let ignored = ignore_until_ms > now_ms().min(u64::MAX as u128) as u64;
+                            if !was_enabled {
+                                last_fingerprint = Some(fingerprint);
+                                was_enabled = true;
+                            } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+                                last_fingerprint = Some(fingerprint);
+                                if !ignored {
+                                    if let Ok(encoded) = encode_clipboard_bitmap(&image) {
+                                        let _ = app.emit("clipboard:image", encoded);
+                                    }
+                                }
                             }
                         }
+                        Ok(None) => {
+                            was_enabled = true;
+                            last_fingerprint = None;
+                        }
+                        Err(_) => {}
                     }
-                    Ok(None) => {
-                        was_enabled = true;
-                        last_fingerprint = None;
-                    }
-                    Err(_) => {}
-                },
+                }
                 Err(_) => {}
             }
-            thread::sleep(Duration::from_millis(800));
+            // A lightweight counter check at this cadence feels immediate to
+            // users without continuously waking the expensive image path.
+            thread::sleep(Duration::from_millis(650));
         }
     });
 }
@@ -4272,5 +4359,37 @@ mod tests {
         ] {
             assert!(!is_image(Path::new(name)), "{name} must be rejected");
         }
+    }
+
+    #[test]
+    fn clipboard_fingerprint_detects_changed_pixels_without_png_encoding() {
+        let pixels = vec![24_u8; 256 * 256 * 4];
+        let original = arboard::ImageData {
+            width: 256,
+            height: 256,
+            bytes: Cow::Owned(pixels.clone()),
+        };
+        let same = arboard::ImageData {
+            width: 256,
+            height: 256,
+            bytes: Cow::Owned(pixels.clone()),
+        };
+        let mut changed_pixels = pixels;
+        let last = changed_pixels.len() - 1;
+        changed_pixels[last] = 25;
+        let changed = arboard::ImageData {
+            width: 256,
+            height: 256,
+            bytes: Cow::Owned(changed_pixels),
+        };
+
+        assert_eq!(
+            clipboard_bitmap_fingerprint(&original),
+            clipboard_bitmap_fingerprint(&same)
+        );
+        assert_ne!(
+            clipboard_bitmap_fingerprint(&original),
+            clipboard_bitmap_fingerprint(&changed)
+        );
     }
 }
