@@ -99,7 +99,10 @@ if ("__TAURI_INTERNALS__" in window) {
     startResizeDragging: (direction) => currentWindow.startResizeDragging(direction),
     showMainWindow: () => invoke("show_main_window"),
     showGalleryWindow: () => invoke("show_gallery_window"),
-    showPreferencesWindow: () => invoke("show_preferences_window"),
+    showPreferencesWindow: (section) => {
+      if (section) localStorage.setItem("piclite.preferences.requested-section", section);
+      return invoke("show_preferences_window", { section });
+    },
     showDropzoneWindow: () => invoke("show_dropzone_window"),
     submitCornerDrop: (paths) => invoke("submit_corner_drop", { paths }),
     takePendingCornerDrop: () => invoke<string[]>("take_pending_corner_drop"),

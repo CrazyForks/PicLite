@@ -1587,8 +1587,27 @@ async fn take_pending_corner_drop(state: State<'_, DesktopState>) -> Result<Vec<
 }
 
 #[tauri::command]
-async fn show_preferences_window(app: AppHandle) -> Result<(), String> {
-    ensure_preferences_window(&app)
+async fn show_preferences_window(app: AppHandle, section: Option<String>) -> Result<(), String> {
+    ensure_preferences_window(&app)?;
+    if let Some(section) = section.filter(|value| {
+        matches!(
+            value.as_str(),
+            "general"
+                | "clipboard"
+                | "files"
+                | "images"
+                | "dropzone"
+                | "zones"
+                | "floating"
+                | "hosting"
+                | "plugins"
+                | "shortcuts"
+                | "about"
+        )
+    }) {
+        let _ = app.emit("tray:action", format!("preferences_section:{section}"));
+    }
+    Ok(())
 }
 
 #[tauri::command]

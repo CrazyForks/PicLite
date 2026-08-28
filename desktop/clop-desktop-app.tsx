@@ -3,6 +3,7 @@ import { disable as disableAutostart, enable as enableAutostart, isEnabled as is
 import { Icon } from "./clop-icons";
 import { fileName, formatBytes, loadSettings, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
 import type { DesktopSettings, FloatingAction, FloatingWatermark, ImageFormat, Language, OptimisationPreset, PicLiteBridge, QuickCompressResult, QuickCompressSettings, StoredUploadProfile } from "./clop-types";
+import packageManifest from "../package.json";
 
 type ResultItem = QuickCompressResult & {
   id: string;
@@ -18,6 +19,8 @@ const bridge = window.picLite as unknown as PicLiteBridge | undefined;
 type SystemFontInfo = { family: string; path: string; faceIndex: number };
 type WorkspacePlugin = { id: string; nameZh: string; nameEn: string; kind: "builtin" | "html" | "url"; enabled: boolean; source?: string; url?: string };
 const WORKSPACE_PLUGINS_KEY = "piclite.workspacePlugins.v1";
+const REQUESTED_SETTINGS_SECTION_KEY = "piclite.preferences.requested-section";
+const APP_VERSION = packageManifest.version;
 const loadedFontFaces = new Set<string>();
 const BUILTIN_WORKSPACE_PLUGINS: WorkspacePlugin[] = [
   { id: "watcher", nameZh: "文件夹监测", nameEn: "Folder watch", kind: "builtin", enabled: true },
@@ -579,6 +582,15 @@ function BatchOptimiser({ api }: { api: PicLiteBridge }) {
 
 type SettingsSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "zones" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
+const SETTINGS_SECTIONS = new Set<SettingsSection>(["general", "clipboard", "files", "images", "dropzone", "zones", "floating", "hosting", "plugins", "shortcuts", "about"]);
+
+function requestedSettingsSection(): SettingsSection {
+  const requested = localStorage.getItem(REQUESTED_SETTINGS_SECTION_KEY);
+  localStorage.removeItem(REQUESTED_SETTINGS_SECTION_KEY);
+  if (requested && SETTINGS_SECTIONS.has(requested as SettingsSection)) return requested as SettingsSection;
+  return "general";
+}
+
 const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: string; group?: string }> = [
   { id: "general", icon: "gear", zh: "通用", en: "General" },
   { id: "clipboard", icon: "clipboard", zh: "剪贴板", en: "Clipboard" },
@@ -622,7 +634,7 @@ function SettingsCard({ title, note, children }: { title?: React.ReactNode; note
 
 function Preferences({ api }: { api: PicLiteBridge }) {
   const [settings, setSettings] = useDesktopSettings();
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>(requestedSettingsSection);
   const [updateText, setUpdateText] = useState("");
   const [watchStatus, setWatchStatus] = useState("");
   const [recordingShortcut, setRecordingShortcut] = useState<"shortcutToggleDropzone" | "shortcutOptimiseClipboard" | "shortcutShowMain" | "shortcutShowGallery" | "shortcutUploadCurrent" | null>(null);
@@ -658,7 +670,25 @@ function Preferences({ api }: { api: PicLiteBridge }) {
     return () => window.clearTimeout(timer);
   }, [api, refreshFonts]);
   useEffect(() => { localStorage.setItem(WORKSPACE_PLUGINS_KEY, JSON.stringify(workspacePlugins)); }, [workspacePlugins]);
-  useEffect(() => api.onTrayAction((action) => { if (action === "image_host_settings") setSection("hosting"); }), [api]);
+  useEffect(() => api.onTrayAction((action) => {
+    if (action === "image_host_settings") setSection("hosting");
+    if (action.startsWith("preferences_section:")) {
+      const requested = action.slice("preferences_section:".length) as SettingsSection;
+      if (SETTINGS_SECTIONS.has(requested)) setSection(requested);
+    }
+  }), [api]);
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== REQUESTED_SETTINGS_SECTION_KEY || !event.newValue) return;
+      const requested = event.newValue as SettingsSection;
+      if (SETTINGS_SECTIONS.has(requested)) {
+        setSection(requested);
+        localStorage.removeItem(REQUESTED_SETTINGS_SECTION_KEY);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (settings.pauseAutomaticOptimisations || !settings.watchFolders.length) {
@@ -805,6 +835,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         const marker = item.group ? <span className="nav-group" key={`${item.group}-label`}>{item.group === "types" ? tr(language, "文件类型", "File types") : item.group === "results" ? tr(language, "拖放与结果", "Drops & Results") : item.group === "automation" ? tr(language, "快捷键与自动化", "Shortcuts & Automation") : tr(language, "支持", "Support")}</span> : null;
         return <span className="nav-entry" key={item.id}>{marker}<button className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{tr(language, item.zh, item.en)}</span></button></span>;
       })}</nav>
+      <small className="settings-version">PicLite {APP_VERSION}<br />Tauri 2 · Rust</small>
     </aside>
     <div className="settings-content">
       {section === "general" && <>

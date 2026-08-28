@@ -16,6 +16,7 @@ import {
 import { applyPalette, GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { isRequestedMimeType, isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
+import packageManifest from "../package.json";
 
 type CompressionMode = "lossless" | "balanced" | "small" | "manual";
 type OutputFormat = "keep" | "image/jpeg" | "image/png" | "image/webp";
@@ -30,7 +31,7 @@ type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" |
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
-const APP_VERSION = "1.1.1";
+const APP_VERSION = packageManifest.version;
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -157,7 +158,7 @@ type NativeBridge = {
   startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
   showMainWindow: () => Promise<void>;
   showGalleryWindow: () => Promise<void>;
-  showPreferencesWindow: () => Promise<void>;
+  showPreferencesWindow: (section?: PreferenceSection) => Promise<void>;
   showDropzoneWindow: () => Promise<void>;
   submitCornerDrop: (paths: string[]) => Promise<void>;
   takePendingCornerDrop: () => Promise<string[]>;
@@ -3492,7 +3493,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         </section>
       ) : view.startsWith("plugin:") ? (
         <section className="plugin-workspace" aria-label={t("插件工作台", "Plugin workbench")}>
-          {(() => { const plugin = workspacePlugins.find((item) => `plugin:${item.id}` === view); if (!plugin) return null; return <><header><div><span className="section-index">PLUGIN / TRUSTED RUNTIME</span><h1>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</h1></div><button type="button" onClick={() => { setPreferenceSection("plugins"); setView("preferences"); }}>{t("管理插件", "Manage plugins")}</button></header><PluginRuntime plugin={plugin} bridge={nativeBridge} language={desktopPreferences.language} /></>; })()}
+          {(() => { const plugin = workspacePlugins.find((item) => `plugin:${item.id}` === view); if (!plugin) return null; return <><header><div><span className="section-index">PLUGIN / TRUSTED RUNTIME</span><h1>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</h1></div><button type="button" onClick={() => { if (nativeBridge) void nativeBridge.showPreferencesWindow("plugins"); else { setPreferenceSection("plugins"); setView("preferences"); } }}>{t("管理插件", "Manage plugins")}</button></header><PluginRuntime plugin={plugin} bridge={nativeBridge} language={desktopPreferences.language} /></>; })()}
         </section>
       ) : (
         <section className="preferences-page clop-preferences" aria-label={t("PicLite 应用设置", "PicLite preferences")}>
