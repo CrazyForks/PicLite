@@ -26,6 +26,7 @@ type ItemStatus = "ready" | "processing" | "done" | "error";
 type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
 type WatermarkLayout = "tile" | "single";
 type ThemeMode = "system" | "light" | "dark";
+type ColorTheme = "graphite" | "mist" | "violet" | "green";
 type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" | "shortcutGallery" | "shortcutUpload";
 type DockLayout = "compact" | "full";
@@ -251,6 +252,7 @@ type DesktopPreferences = {
   confirmOverwrite: boolean;
   preventLarger: boolean;
   theme: ThemeMode;
+  colorTheme: ColorTheme;
   dockTheme: ThemeMode;
   density: UiDensity;
   minimizeToTray: boolean;
@@ -507,6 +509,7 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   confirmOverwrite: true,
   preventLarger: true,
   theme: "system",
+  colorTheme: "graphite",
   dockTheme: "system",
   density: "auto",
   minimizeToTray: true,
@@ -545,7 +548,10 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
     if (!saved) return DEFAULT_DESKTOP_PREFERENCES;
     const preferences = { ...DEFAULT_DESKTOP_PREFERENCES, ...JSON.parse(saved) } as DesktopPreferences & { dockLayout?: string };
     // 0.11 之前的“桌宠”偏好自动迁移到紧凑压缩坞。
-    return { ...preferences, dockLayout: preferences.dockLayout === "full" ? "full" : "compact", language: preferences.language === "en" ? "en" : "zh" };
+    const colorTheme: ColorTheme = ["graphite", "mist", "violet", "green"].includes(preferences.colorTheme)
+      ? preferences.colorTheme
+      : "graphite";
+    return { ...preferences, colorTheme, dockLayout: preferences.dockLayout === "full" ? "full" : "compact", language: preferences.language === "en" ? "en" : "zh" };
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
   }
@@ -1361,6 +1367,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
   const [scale, setScale] = useState(initialSettings.scale);
   const [format, setFormat] = useState<OutputFormat>(initialSettings.format);
   const [dockTheme, setDockTheme] = useState<ThemeMode>(initialPreferences.dockTheme);
+  const [colorTheme, setColorTheme] = useState<ColorTheme>(initialPreferences.colorTheme);
   const [dockLayout, setDockLayout] = useState<DockLayout>(initialPreferences.dockLayout);
   const [floatingResultSeconds, setFloatingResultSeconds] = useState(initialPreferences.floatingResultSeconds);
   const [clipboardWatcherEnabled, setClipboardWatcherEnabled] = useState(initialPreferences.clipboardWatcherEnabled);
@@ -1400,6 +1407,7 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
       if (profile.desktopPreferences) {
         const preferences = { ...DEFAULT_DESKTOP_PREFERENCES, ...profile.desktopPreferences };
         setDockTheme(preferences.dockTheme);
+        setColorTheme(preferences.colorTheme);
         setDockLayout(preferences.dockLayout === "full" ? "full" : "compact");
         setFloatingResultSeconds(preferences.floatingResultSeconds);
         setClipboardWatcherEnabled(preferences.clipboardWatcherEnabled);
@@ -1635,19 +1643,21 @@ function TrayDropDock({ bridge }: { bridge: NativeBridge }) {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const applyDockTheme = () => {
       document.documentElement.dataset.theme = resolveTheme(dockTheme);
+      document.documentElement.dataset.palette = colorTheme;
       document.documentElement.style.colorScheme = resolveTheme(dockTheme);
     };
     applyDockTheme();
     document.documentElement.dataset.density = "comfortable";
     media.addEventListener("change", applyDockTheme);
     return () => media.removeEventListener("change", applyDockTheme);
-  }, [dockTheme]);
+  }, [colorTheme, dockTheme]);
 
   useEffect(() => {
     const syncPreferences = (event: StorageEvent) => {
       if (event.key === "piclite.desktopPreferences.v1") {
         const preferences = loadStoredDesktopPreferences();
         setDockTheme(preferences.dockTheme);
+        setColorTheme(preferences.colorTheme);
         setDockLayout(preferences.dockLayout);
         setFloatingResultSeconds(preferences.floatingResultSeconds);
         setClipboardWatcherEnabled(preferences.clipboardWatcherEnabled);
@@ -2183,6 +2193,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         ? (window.innerWidth <= 860 || window.innerHeight <= 540 ? "compact" : "comfortable")
         : desktopPreferences.density;
       document.documentElement.dataset.theme = resolvedTheme;
+      document.documentElement.dataset.palette = desktopPreferences.colorTheme;
       document.documentElement.dataset.density = resolvedDensity;
       document.documentElement.style.colorScheme = resolvedTheme;
       if (nativeBridge) void nativeBridge.setWindowTheme(desktopPreferences.theme).catch(() => showToast(t("系统主题同步失败，已保留应用内主题", "Could not sync the system appearance; the in-app theme is still active")));
@@ -2194,7 +2205,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       media.removeEventListener("change", applyAppearance);
       window.removeEventListener("resize", applyAppearance);
     };
-  }, [desktopPreferences.density, desktopPreferences.theme, nativeBridge, showToast, t]);
+  }, [desktopPreferences.colorTheme, desktopPreferences.density, desktopPreferences.theme, nativeBridge, showToast, t]);
 
   useEffect(() => {
     window.localStorage.setItem("piclite.customPresets.v1", JSON.stringify(presets.filter((preset) => preset.custom)));
@@ -3560,6 +3571,17 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 <div><strong>{t("主题", "Appearance")}</strong><small>{t("可跟随 Windows / macOS 系统外观", "Can follow the Windows or macOS appearance")}</small></div>
                 <div className="preference-segments">
                   {([['system', t('跟随系统', 'System')], ['light', t('浅色', 'Light')], ['dark', t('深色', 'Dark')]] as const).map(([value, label]) => <button className={desktopPreferences.theme === value ? "active" : ""} type="button" key={value} onClick={() => setDesktopPreferences((current) => ({ ...current, theme: value }))}>{label}</button>)}
+                </div>
+              </div>
+              <div className="preference-row column">
+                <div><strong>{t("界面配色", "Colour theme")}</strong><small>{t("石墨蓝更清爽，也可以随时切回经典绿色", "Graphite is cleaner, and the classic green remains available")}</small></div>
+                <div className="palette-picker">
+                  {([
+                    ['graphite', t('石墨蓝', 'Graphite'), t('克制 · 清晰', 'Neutral · crisp')],
+                    ['mist', t('雾蓝', 'Mist blue'), t('轻盈 · 通透', 'Light · airy')],
+                    ['violet', t('紫晶', 'Violet'), t('柔和 · 现代', 'Soft · modern')],
+                    ['green', t('经典绿', 'Classic green'), t('原有品牌色', 'Original palette')],
+                  ] as const).map(([value, label, note]) => <button className={`palette-choice ${value} ${desktopPreferences.colorTheme === value ? "active" : ""}`} type="button" key={value} aria-pressed={desktopPreferences.colorTheme === value} onClick={() => setDesktopPreferences((current) => ({ ...current, colorTheme: value }))}><span className="palette-swatch" aria-hidden="true"><i /><i /><i /></span><span><strong>{label}</strong><small>{note}</small></span></button>)}
                 </div>
               </div>
               <div className="preference-row column">

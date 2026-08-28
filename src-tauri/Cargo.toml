@@ -1,6 +1,6 @@
 [package]
 name = "piclite"
-version = "1.1.5"
+version = "1.1.6"
 description = "PicLite local-first image compressor"
 authors = ["PicLite contributors"]
 edition = "2021"
@@ -33,6 +33,7 @@ tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-pn
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 ttf-parser = "0.25"
 url = "2.5"
 webp = "0.3.1"

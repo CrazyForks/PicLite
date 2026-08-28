@@ -3909,6 +3909,12 @@ fn start_clipboard_monitor(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // Register this first so a second launch never initializes another
+        // tray, clipboard monitor, or webview. It simply restores the main
+        // window owned by the original PicLite process.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app, "main");
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
