@@ -1915,18 +1915,52 @@ fn clipboard_change_token() -> Option<u64> {
 /// Returns `Some` whenever the clipboard contains a file-list payload, even
 /// when none of those files are supported images. Finder/Explorer often also
 /// expose a thumbnail bitmap for copied PDF/Office documents; preserving the
-/// distinction prevents PicLite from compressing that document icon.
+/// distinction prevents PicLite from compressing that document icon. Some
+/// apps (notably WeChat on macOS) publish both an image-looking protected temp
+/// path and real bitmap data. When every image candidate is unreadable, return
+/// `None` so the caller can fall back to the bitmap instead of surfacing EPERM.
+fn select_readable_clipboard_image_paths<F>(
+    paths: Vec<PathBuf>,
+    mut can_read: F,
+) -> Option<Vec<PathBuf>>
+where
+    F: FnMut(&Path) -> bool,
+{
+    let mut had_image_candidate = false;
+    let mut readable_images = Vec::new();
+
+    for path in paths {
+        if !is_image(&path) {
+            continue;
+        }
+        had_image_candidate = true;
+        if can_read(&path) {
+            readable_images.push(path);
+        }
+    }
+
+    if had_image_candidate && readable_images.is_empty() {
+        None
+    } else {
+        Some(readable_images)
+    }
+}
+
 fn clipboard_file_image_paths() -> Result<Option<Vec<String>>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
     match clipboard.get().file_list() {
-        Ok(paths) => Ok(Some(
-            paths
-                .into_iter()
-                .filter(|path| is_image(path))
-                .map(|path| fs::canonicalize(&path).unwrap_or(path))
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-        )),
+        Ok(paths) => {
+            Ok(
+                select_readable_clipboard_image_paths(paths, |path| fs::File::open(path).is_ok())
+                    .map(|paths| {
+                        paths
+                            .into_iter()
+                            .map(|path| fs::canonicalize(&path).unwrap_or(path))
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect()
+                    }),
+            )
+        }
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -4378,6 +4412,38 @@ mod tests {
         ] {
             assert!(!is_image(Path::new(name)), "{name} must be rejected");
         }
+    }
+
+    #[test]
+    fn protected_clipboard_image_path_falls_back_to_bitmap_data() {
+        let protected = PathBuf::from("/private/wechat/protected-image.png");
+        assert_eq!(
+            select_readable_clipboard_image_paths(vec![protected], |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn document_file_list_does_not_fall_back_to_its_thumbnail() {
+        assert_eq!(
+            select_readable_clipboard_image_paths(
+                vec![PathBuf::from("report.pdf"), PathBuf::from("draft.docx")],
+                |_| true,
+            ),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn readable_clipboard_image_keeps_native_file_ingress() {
+        let readable = PathBuf::from("/tmp/wechat-image.jpg");
+        assert_eq!(
+            select_readable_clipboard_image_paths(
+                vec![readable.clone(), PathBuf::from("notes.pdf")],
+                |path| path == readable,
+            ),
+            Some(vec![readable])
+        );
     }
 
     #[test]
