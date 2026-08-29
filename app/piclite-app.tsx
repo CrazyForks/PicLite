@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { applyPalette, GIFEncoder, quantize } from "gifenc";
+import { GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { isRequestedMimeType, isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
 import packageManifest from "../package.json";
@@ -1028,7 +1028,7 @@ async function animatedGifCompress(item: ImageItem, settings: CompressionSetting
       applyWatermark(context, width, height, settings.watermark, watermarkLayer);
       const rgba = context.getImageData(0, 0, width, height).data;
       const palette = quantize(rgba, colors, { format: "rgba4444", oneBitAlpha: true });
-      const indexed = applyPalette(rgba, palette, "rgba4444");
+      const indexed = ditherToPalette(rgba, palette, width, height);
       const transparentIndex = palette.findIndex((color) => color[3] === 0);
       encoder.writeFrame(indexed, width, height, {
         palette,
@@ -1098,6 +1098,73 @@ function pngPaletteSize(quality: number) {
   return Math.max(64, Math.min(256, Math.round(64 + 192 * normalized ** 1.35)));
 }
 
+function ditherToPalette(
+  rgba: Uint8ClampedArray,
+  palette: number[][],
+  width: number,
+  height: number,
+) {
+  const indices = new Uint8Array(width * height);
+  const cache = new Int16Array(65_536);
+  cache.fill(-1);
+  let currentError = new Float32Array((width + 2) * 3);
+  let nextError = new Float32Array((width + 2) * 3);
+  const clampByte = (value: number) => Math.max(0, Math.min(255, Math.round(value)));
+  const paletteIndex = (red: number, green: number, blue: number, alpha: number) => {
+    const key = (red >> 4) | ((green >> 4) << 4) | ((blue >> 4) << 8) | ((alpha >> 4) << 12);
+    const cached = cache[key];
+    if (cached >= 0) return cached;
+    let best = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < palette.length; index += 1) {
+      const color = palette[index];
+      const redError = red - color[0];
+      const greenError = green - color[1];
+      const blueError = blue - color[2];
+      const alphaError = alpha - (color[3] ?? 255);
+      const distance = redError ** 2 + greenError ** 2 + blueError ** 2 + alphaError ** 2 * 2;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    }
+    cache[key] = best;
+    return best;
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    const direction = y % 2 === 0 ? 1 : -1;
+    const start = direction === 1 ? 0 : width - 1;
+    const end = direction === 1 ? width : -1;
+    for (let x = start; x !== end; x += direction) {
+      const pixelOffset = (y * width + x) * 4;
+      const errorOffset = (x + 1) * 3;
+      const red = clampByte(rgba[pixelOffset] + currentError[errorOffset]);
+      const green = clampByte(rgba[pixelOffset + 1] + currentError[errorOffset + 1]);
+      const blue = clampByte(rgba[pixelOffset + 2] + currentError[errorOffset + 2]);
+      const alpha = rgba[pixelOffset + 3];
+      const index = paletteIndex(red, green, blue, alpha);
+      indices[y * width + x] = index;
+      if (alpha === 0) continue;
+      const color = palette[index];
+      const errors = [red - color[0], green - color[1], blue - color[2]];
+      const rightOffset = (x + 1 + direction) * 3;
+      const downLeftOffset = (x + 1 - direction) * 3;
+      const downOffset = (x + 1) * 3;
+      const downRightOffset = (x + 1 + direction) * 3;
+      for (let channel = 0; channel < 3; channel += 1) {
+        currentError[rightOffset + channel] += errors[channel] * 7 / 16;
+        nextError[downLeftOffset + channel] += errors[channel] * 3 / 16;
+        nextError[downOffset + channel] += errors[channel] * 5 / 16;
+        nextError[downRightOffset + channel] += errors[channel] * 1 / 16;
+      }
+    }
+    currentError = nextError;
+    nextError = new Float32Array((width + 2) * 3);
+  }
+  return indices;
+}
+
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 const PNG_CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -1128,7 +1195,7 @@ async function encodeIndexedPng(context: CanvasRenderingContext2D, width: number
   }
   const rgba = context.getImageData(0, 0, width, height).data;
   const palette = quantize(rgba, pngPaletteSize(quality), { format: "rgba4444", oneBitAlpha: false });
-  const indexed = applyPalette(rgba, palette, "rgba4444");
+  const indexed = ditherToPalette(rgba, palette, width, height);
   const scanlines = new Uint8Array((width + 1) * height);
   for (let row = 0; row < height; row += 1) scanlines.set(indexed.subarray(row * width, (row + 1) * width), row * (width + 1) + 1);
 
@@ -1275,7 +1342,8 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
     || settings.watermark.enabled;
 
   if ((settings.preventLarger || settings.watermark.enabled) && candidate.blob.size >= item.originalBytes) {
-    if (hasVisualTransform) {
+    const mayReduceQuality = settings.mode !== "lossless" && settings.quality < 100;
+    if (hasVisualTransform && mayReduceQuality) {
       let smallest = { ...candidate, quality: settings.quality };
       const qualitySteps = Array.from(new Set([
         settings.quality - 4,
@@ -1301,6 +1369,7 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
       // original dimensions or format and making the controls appear frozen.
       return { blob: smallest.blob, width: smallest.width, height: smallest.height, sizeGuardQuality: smallest.quality };
     }
+    if (hasVisualTransform) return candidate;
     return { blob: item.file, width: item.width, height: item.height, keptOriginal: true };
   }
   return candidate;
@@ -3301,7 +3370,18 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
                 ] as const).map(([value, quality, label, note, icon]) => (
                   <button className={settings.mode === value ? "active" : ""} type="button" key={value} onClick={() => {
                     const preset = BUILT_IN_PRESETS.find((candidate) => candidate.id === value);
-                    if (preset) applyPreset({ ...preset, settings: { ...settings, mode: value, quality } });
+                    if (preset) applyPreset({
+                      ...preset,
+                      settings: {
+                        ...settings,
+                        mode: value,
+                        quality,
+                        scale: preset.settings.scale,
+                        format: preset.settings.format,
+                        resize: preset.settings.resize,
+                        watermark: { ...settings.watermark },
+                      },
+                    });
                   }}>
                     <span>{icon}</span><strong>{label}</strong><small>{note}</small>
                   </button>

@@ -22,6 +22,7 @@ use image::{
         gif::{GifDecoder, GifEncoder, Repeat},
         jpeg::JpegEncoder,
         png::{CompressionType, FilterType as PngFilterType, PngEncoder},
+        webp::WebPEncoder,
     },
     imageops::FilterType,
     AnimationDecoder, DynamicImage, Frame, GenericImageView, ImageDecoder, ImageEncoder,
@@ -668,6 +669,20 @@ fn optimize_gif_animation(
     let (width, height) = decoder.dimensions();
     let (target_width, target_height) = target_dimensions(width, height, settings);
 
+    // GIF is already an indexed lossless format. Re-quantising an unchanged GIF
+    // cannot improve fidelity and may introduce banding, so an honest lossless
+    // preset keeps the source bytes verbatim.
+    if settings.mode == "lossless"
+        && settings.format == "keep"
+        && target_width == width
+        && target_height == height
+    {
+        return Ok(OptimizedImage {
+            bytes: original.to_vec(),
+            extension: "gif".to_string(),
+        });
+    }
+
     if settings.format == "image/webp" {
         return Ok(OptimizedImage {
             bytes: encode_animated_webp(original, target_width, target_height, settings.quality)?,
@@ -772,7 +787,11 @@ fn encode_static(
                     .clamp(64.0, 256.0) as usize;
                 let quantizer = color_quant::NeuQuant::new(10, colors, rgba.as_raw());
                 let color_map = quantizer.color_map_rgba();
-                let indices = rgba
+                let mut dithered = rgba.clone();
+                if dithered.width() > 1 && dithered.height() > 1 {
+                    image::imageops::dither(&mut dithered, &quantizer);
+                }
+                let indices = dithered
                     .as_raw()
                     .chunks_exact(4)
                     .map(|pixel| quantizer.index_of(pixel) as u8)
@@ -802,11 +821,22 @@ fn encode_static(
         }
         "webp" => {
             let rgba = image.to_rgba8();
-            // image-rs exposes a lossless-only WebP encoder. Using libwebp here is
-            // deliberate: the WebP quality control must behave like the JPG slider.
-            let webp = LossyWebPEncoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
-                .encode(quality.clamp(1, 100) as f32);
-            encoded.extend_from_slice(webp.as_ref());
+            if quality >= 100 {
+                WebPEncoder::new_lossless(&mut encoded)
+                    .write_image(
+                        &rgba,
+                        rgba.width(),
+                        rgba.height(),
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else {
+                // Below 100%, use libwebp so the quality slider changes the real
+                // encoded output. The 100% path above is genuinely pixel-lossless.
+                let webp = LossyWebPEncoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+                    .encode(quality.clamp(1, 99) as f32);
+                encoded.extend_from_slice(webp.as_ref());
+            }
         }
         _ => return Err(format!("自动监测暂不支持编码 .{output_extension}")),
     }
@@ -932,13 +962,31 @@ fn optimize_image_data(
     } else {
         extension_for(Path::new("image.png"), &settings.format)
     };
-    let candidate = encode_static(resized.clone(), &output_extension, settings.quality)?;
+    let encode_quality = if settings.mode == "lossless" {
+        100
+    } else {
+        settings.quality
+    };
+    if settings.mode == "lossless"
+        && settings.format == "keep"
+        && target_width == width
+        && target_height == height
+        && matches!(source_extension.as_str(), "jpg" | "jpeg")
+    {
+        // JPEG cannot be re-encoded losslessly. Keeping its original bytes is
+        // the only honest implementation of the lossless preset.
+        return Ok(OptimizedImage {
+            bytes: original,
+            extension: source_extension,
+        });
+    }
+    let candidate = encode_static(resized.clone(), &output_extension, encode_quality)?;
     let visual_transform =
         target_width != width || target_height != height || settings.format != "keep";
     if settings.prevent_larger && candidate.len() >= original.len() {
-        if visual_transform {
+        if visual_transform && settings.mode != "lossless" {
             let mut smallest = candidate;
-            for quality in guarded_quality_steps(settings.quality) {
+            for quality in guarded_quality_steps(encode_quality) {
                 let guarded = encode_static(resized.clone(), &output_extension, quality)?;
                 if guarded.len() < smallest.len() {
                     smallest = guarded.clone();
@@ -952,6 +1000,14 @@ fn optimize_image_data(
             }
             return Ok(OptimizedImage {
                 bytes: smallest,
+                extension: output_extension,
+            });
+        }
+        if visual_transform {
+            // A requested lossless resize/format change may legitimately be
+            // larger. Never satisfy the size guard by silently lowering quality.
+            return Ok(OptimizedImage {
+                bytes: candidate,
                 extension: output_extension,
             });
         }
@@ -1140,18 +1196,23 @@ fn quick_settings(value: &QuickCompressSettings) -> WatcherSettings {
     } else {
         "small"
     };
+    let mode = match value.mode.as_str() {
+        "auto" => "balanced".to_string(),
+        "balanced" | "small" | "lossless" | "manual" => value.mode.clone(),
+        _ => inferred_mode.to_string(),
+    };
     WatcherSettings {
         input_folder: String::new(),
         input_folders: Vec::new(),
         output_folder: String::new(),
         output_suffix: value.export_suffix.clone(),
         rename_template: value.rename_template.clone(),
-        mode: match value.mode.as_str() {
-            "auto" => "balanced".to_string(),
-            "balanced" | "small" | "lossless" | "manual" => value.mode.clone(),
-            _ => inferred_mode.to_string(),
+        quality: if mode == "lossless" {
+            100
+        } else {
+            value.quality.clamp(1, 100)
         },
-        quality: value.quality.clamp(1, 100),
+        mode,
         scale: value.scale.clamp(0.1, 100.0),
         format: value.format.clone(),
         resize: false,
@@ -4138,6 +4199,81 @@ mod tests {
     }
 
     #[test]
+    fn webp_quality_100_is_pixel_lossless() {
+        let mut pixels = image::RgbaImage::new(96, 64);
+        for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = image::Rgba([
+                ((x * 7 + y * 3) % 256) as u8,
+                ((x * 2 + y * 11) % 256) as u8,
+                ((x * 13 + y * 5) % 256) as u8,
+                if (x + y) % 7 == 0 { 160 } else { 255 },
+            ]);
+        }
+        let encoded = encode_static(DynamicImage::ImageRgba8(pixels.clone()), "webp", 100)
+            .expect("encode lossless WebP");
+        let decoded = image::load_from_memory(&encoded)
+            .expect("decode lossless WebP")
+            .to_rgba8();
+
+        assert_eq!(decoded.as_raw(), pixels.as_raw());
+    }
+
+    #[test]
+    fn lossless_quick_settings_discard_stale_lossy_quality() {
+        let quick = QuickCompressSettings {
+            mode: "lossless".to_string(),
+            quality: 31,
+            scale: 100.0,
+            format: "keep".to_string(),
+            strip_metadata: true,
+            prevent_larger: true,
+            export_mode: "source".to_string(),
+            export_suffix: "-piclite".to_string(),
+            rename_template: String::new(),
+            fixed_folder: None,
+        };
+
+        let settings = quick_settings(&quick);
+        assert_eq!(settings.mode, "lossless");
+        assert_eq!(settings.quality, 100);
+        assert_eq!(settings.scale, 100.0);
+    }
+
+    #[test]
+    fn lossless_keep_jpeg_preserves_original_bytes() {
+        let pixels = image::RgbImage::from_fn(128, 96, |x, y| {
+            image::Rgb([
+                ((x * 5 + y) % 256) as u8,
+                ((x + y * 7) % 256) as u8,
+                ((x * 3 + y * 2) % 256) as u8,
+            ])
+        });
+        let original =
+            encode_static(DynamicImage::ImageRgb8(pixels), "jpg", 44).expect("encode JPEG");
+        let settings = WatcherSettings {
+            input_folder: String::new(),
+            input_folders: Vec::new(),
+            output_folder: String::new(),
+            output_suffix: String::new(),
+            rename_template: String::new(),
+            mode: "lossless".to_string(),
+            quality: 22,
+            scale: 100.0,
+            format: "keep".to_string(),
+            resize: false,
+            max_width: u32::MAX,
+            max_height: u32::MAX,
+            strip_metadata: true,
+            prevent_larger: true,
+        };
+
+        let optimized = optimize_image_data(original.clone(), "jpg".to_string(), &settings)
+            .expect("keep JPEG losslessly");
+        assert_eq!(optimized.extension, "jpg");
+        assert_eq!(optimized.bytes, original);
+    }
+
+    #[test]
     fn workbench_native_webp_modes_encode_real_webp_and_change_the_result() {
         let mut pixels = image::RgbImage::new(640, 360);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
@@ -4272,7 +4408,7 @@ mod tests {
     }
 
     #[test]
-    fn resizing_a_precompressed_jpeg_never_increases_file_size() {
+    fn lossless_jpeg_resize_does_not_silently_lower_encoding_quality() {
         let mut pixels = image::RgbImage::new(640, 360);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
             *pixel = image::Rgb([
@@ -4307,18 +4443,20 @@ mod tests {
         };
 
         let optimized = optimize_bytes(&path, &settings).expect("optimize jpeg");
+        let decoded = image::load_from_memory(&original).expect("decode source jpeg");
+        let expected = encode_static(
+            decoded.resize_exact(480, 270, FilterType::Lanczos3),
+            "jpg",
+            100,
+        )
+        .expect("encode expected quality-100 jpeg");
         let dimensions = image::load_from_memory(&optimized)
             .expect("decode optimized jpeg")
             .dimensions();
         let _ = fs::remove_file(&path);
 
         assert_eq!(dimensions, (480, 270));
-        assert!(
-            optimized.len() < original.len(),
-            "{} should be smaller than {}",
-            optimized.len(),
-            original.len()
-        );
+        assert_eq!(optimized, expected);
     }
 
     #[test]

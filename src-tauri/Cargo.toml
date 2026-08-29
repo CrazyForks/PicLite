@@ -19,7 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 color_quant = "1.1"
 hmac = "0.12"
-image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["color_quant", "gif", "jpeg", "png", "webp"] }
 notify = "8.2"
 percent-encoding = "2.3"
 png = "0.18.1"
