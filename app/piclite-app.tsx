@@ -3025,6 +3025,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     if (!pendingTrayAction) return;
     const action = pendingTrayAction;
     setPendingTrayAction(null);
+    if (action === "check_updates") {
+      void checkForUpdates(false);
+      return;
+    }
     if (action === "preferences") {
       void nativeBridge?.showPreferencesWindow();
       return;
@@ -3058,7 +3062,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     }
     const preset = presets.find((candidate) => candidate.id === presetId);
     if (preset) applyPreset(preset);
-  }, [applyPreset, nativeBridge, pendingTrayAction, presets, showToast, t]);
+  }, [applyPreset, checkForUpdates, nativeBridge, pendingTrayAction, presets, showToast, t]);
 
   const onDrop = useCallback((event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -3120,10 +3124,13 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       <input ref={pluginInputRef} className="visually-hidden" type="file" accept=".html,.htm,.js,.json,text/html,text/javascript,application/json" onChange={importPlugin} />
 
       <header className="topbar">
-        <button className="brand" type="button" onClick={() => standalonePreferences ? void nativeBridge?.hideCurrentWindow() : setView("workspace")}>
-          <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
-          <span><strong>PicLite</strong><small>{desktopPreferences.language === "zh" ? "图轻" : "Image Optimiser"}</small></span>
-        </button>
+        <div className="brand">
+          <button className="brand-home" type="button" onClick={() => standalonePreferences ? void nativeBridge?.hideCurrentWindow() : setView("workspace")}>
+            <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
+            <span><strong>PicLite</strong><small>{desktopPreferences.language === "zh" ? "图轻" : "Image Optimiser"}</small></span>
+          </button>
+          {nativeBridge && <button className="brand-version" type="button" title={t("静默检查更新", "Check for updates in the background")} aria-label={t(`当前版本 ${APP_VERSION}，静默检查更新`, `Version ${APP_VERSION}; check for updates in the background`)} disabled={checkingUpdate} onClick={() => void checkForUpdates(false)}>v{APP_VERSION}</button>}
+        </div>
         {standalonePreferences ? <div className="standalone-window-title"><span className="eyebrow">PREFERENCES</span><strong>{t("应用设置", "Preferences")}</strong></div> : <nav className="main-nav" aria-label={t("主要功能", "Main navigation")}>
           <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{t(nativeBridge ? "工作台" : "压缩工作台", "Workspace")}</button>
           {workspacePlugins.find((plugin) => plugin.id === "watcher")?.enabled && <button className={view === "watcher" ? "active" : ""} type="button" onClick={() => setView("watcher")}>{t("文件夹监测", "Folder watch")}{watcherActive && <span className="live-dot" aria-label={t("监测中", "Watching")} />}</button>}
@@ -3131,7 +3138,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           {workspacePlugins.filter((plugin) => plugin.kind !== "builtin" && plugin.enabled).map((plugin) => <button key={plugin.id} className={view === `plugin:${plugin.id}` ? "active" : ""} type="button" onClick={() => setView(`plugin:${plugin.id}`)}>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</button>)}
         </nav>}
         <div className="topbar-actions">
-          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <>{nativeBridge ? <div className="desktop-settings-entry"><button type="button" onClick={() => void nativeBridge.showPreferencesWindow("general")} title={t("打开外观与通用设置", "Open appearance and general settings")} aria-label={t("打开设置", "Open settings")}><span aria-hidden="true">⚙</span></button><span>v{APP_VERSION}</span></div> : <span className="privacy-badge"><i /> {t("本地处理，图片不上传", "Local processing")}</span>}<span className="topbar-quick-controls">{nativeBridge && <button type="button" className="floating-entry-button" title={t("打开悬浮压缩窗", "Open floating optimiser")} aria-label={t("打开悬浮压缩窗", "Open floating optimiser")} onClick={() => void nativeBridge.showDropzoneWindow()}><span aria-hidden="true">▣</span></button>}<button type="button" title={t("切换浅色 / 深色主题", "Toggle light / dark theme")} aria-label={t("切换主题", "Toggle theme")} onClick={toggleHeaderTheme}>{resolveTheme(desktopPreferences.theme) === "dark" ? "☀" : "☾"}</button><button type="button" title={t("切换中文 / English", "Switch Chinese / English")} aria-label={t("切换语言", "Switch language")} onClick={toggleHeaderLanguage}>{desktopPreferences.language === "zh" ? "EN" : "中"}</button></span></>}
+          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <>{!nativeBridge && <span className="privacy-badge"><i /> {t("本地处理，图片不上传", "Local processing")}</span>}<span className="topbar-quick-controls">{nativeBridge && <button type="button" className="settings-entry-button" title={t("打开设置", "Open settings")} aria-label={t("打开设置", "Open settings")} onClick={() => void nativeBridge.showPreferencesWindow("general")}><span aria-hidden="true">⚙</span></button>}{nativeBridge && <button type="button" className="floating-entry-button" title={t("打开悬浮压缩窗", "Open floating optimiser")} aria-label={t("打开悬浮压缩窗", "Open floating optimiser")} onClick={() => void nativeBridge.showDropzoneWindow()}><span aria-hidden="true">▣</span></button>}<button type="button" title={t("切换浅色 / 深色主题", "Toggle light / dark theme")} aria-label={t("切换主题", "Toggle theme")} onClick={toggleHeaderTheme}>{resolveTheme(desktopPreferences.theme) === "dark" ? "☀" : "☾"}</button><button type="button" title={t("切换中文 / English", "Switch Chinese / English")} aria-label={t("切换语言", "Switch language")} onClick={toggleHeaderLanguage}>{desktopPreferences.language === "zh" ? "EN" : "中"}</button></span></>}
         </div>
       </header>
 

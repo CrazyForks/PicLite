@@ -465,10 +465,6 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
       void api.openExternal("https://github.com/amiaoapp/PicLite");
       return;
     }
-    if (action === "check_updates") {
-      void checkUpdates(true);
-      return;
-    }
     if (action === "dropzone") { void api.showDropzoneWindow(); return; }
     if (action === "gallery") { void api.showGalleryWindow(); return; }
     if (action === "image_host_settings") { void api.showPreferencesWindow(); return; }

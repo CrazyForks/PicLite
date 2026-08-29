@@ -3519,8 +3519,6 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let preferences = MenuItem::with_id(app, "preferences", "设置…", true, None::<&str>)?;
     let batch = MenuItem::with_id(app, "show", "完整工作台", true, None::<&str>)?;
     let floating = MenuItem::with_id(app, "dropzone", "打开悬浮窗", true, None::<&str>)?;
-    let launch = MenuItem::with_id(app, "launch_at_login", "登录时启动", true, None::<&str>)?;
-
     let optimise = MenuItem::with_id(app, "optimise_clipboard", "优化", true, None::<&str>)?;
     let aggressive = MenuItem::with_id(
         app,
@@ -3567,7 +3565,6 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             &preferences,
             &batch,
             &floating,
-            &launch,
             &separator_one,
             &clipboard,
             &image_hosting,
@@ -3601,9 +3598,6 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "about" => {
                 let _ = open_url("https://github.com/amiaoapp/PicLite");
-            }
-            "check_updates" => {
-                open_preferences_from_menu(app, Some("preferences_section:about"));
             }
             "quit" => {
                 app.state::<DesktopState>()

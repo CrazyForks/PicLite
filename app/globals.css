@@ -68,19 +68,27 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: max-content;
+}
+.brand-home {
   border: 0;
   background: none;
   padding: 0;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  width: max-content;
   cursor: pointer;
 }
 
-.brand > span:last-child { display: flex; align-items: baseline; gap: 7px; }
+.brand-home > span:last-child { display: flex; align-items: baseline; gap: 7px; }
 .brand strong { font-size: 20px; letter-spacing: -0.7px; }
-.brand small { color: var(--muted); font-weight: 700; font-size: 12px; }
+.brand small { color: var(--muted); font-weight: 700; font-size: 13px; }
+.brand-version { margin: 5px 0 0; padding: 2px 4px; border: 0; border-radius: 5px; background: transparent; color: color-mix(in srgb, var(--muted) 78%, transparent); font-size: 8px; line-height: 1; font-weight: 760; letter-spacing: .05px; cursor: pointer; }
+.brand-version:hover { color: var(--deep); background: color-mix(in srgb, var(--deep) 7%, transparent); }
+.brand-version:disabled { cursor: wait; opacity: .55; }
 
 .brand-mark {
   width: 31px;
@@ -123,6 +131,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .topbar-quick-controls { display: flex; align-items: center; gap: 6px; }
 .topbar-quick-controls button { width: 34px; height: 34px; border: 1px solid rgba(59,88,70,.13); border-radius: 10px; background: rgba(255,255,255,.58); color: #3e5648; font-size: 11px; font-weight: 850; cursor: pointer; box-shadow: inset 0 1px rgba(255,255,255,.92), 0 4px 14px rgba(34,57,45,.05); }
 .topbar-quick-controls button:hover { border-color: rgba(72,124,88,.42); background: rgba(255,255,255,.84); transform: translateY(-1px); }
+.topbar-quick-controls .settings-entry-button { font-size: 18px; line-height: 1; }
 .topbar-quick-controls .floating-entry-button { color: #174936; font-size: 15px; }
 
 .desktop-download-guide,
@@ -151,11 +160,6 @@ html[data-theme="dark"] .update-notice { border-color: #304039; background: rgba
 }
 
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 12px; }
-.desktop-settings-entry { height: 34px; display: flex; align-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--deep) 15%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--surface) 76%, transparent); box-shadow: inset 0 1px rgba(255,255,255,.62), 0 4px 14px color-mix(in srgb, var(--deep) 6%, transparent); }
-.desktop-settings-entry button { width: 34px; height: 100%; padding: 0; display: grid; place-items: center; border: 0; border-right: 1px solid color-mix(in srgb, var(--deep) 13%, transparent); color: var(--ink); background: transparent; font-size: 11px; font-weight: 800; cursor: pointer; }
-.desktop-settings-entry button:hover { background: color-mix(in srgb, var(--deep) 8%, transparent); }
-.desktop-settings-entry button > span { color: var(--deep); font-size: 13px; }
-.desktop-settings-entry > span { padding: 0 9px; color: var(--muted); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .privacy-badge { font-size: 11px; color: #658075; background: #eef5ef; border: 1px solid #d9e8dd; border-radius: 999px; padding: 7px 11px; font-weight: 650; white-space: nowrap; }
 .privacy-badge i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #4aa071; margin-right: 5px; }
 .icon-button { border: 1px solid var(--line); background: #fff; border-radius: 50%; width: 32px; height: 32px; cursor: pointer; display: grid; place-items: center; font-size: 13px; font-weight: 800; }
@@ -491,7 +495,7 @@ html[data-theme="dark"] .update-notice { border-color: #304039; background: rgba
 .desktop-app .brand { gap: 8px; }
 .desktop-app .brand-mark { width: clamp(29px, 2.2vw, 36px); height: clamp(29px, 2.2vw, 36px); border-radius: 9px; }
 .desktop-app .brand strong { font-size: clamp(18px, 1.25vw, 22px); }
-.desktop-app .brand small { font-size: clamp(10px, .7vw, 12px); }
+.desktop-app .brand small { font-size: clamp(12px, .78vw, 14px); }
 .desktop-app .main-nav { gap: clamp(21px, 2.2vw, 38px); }
 .desktop-app .main-nav button { font-size: clamp(12px, .82vw, 15px); }
 .desktop-app .privacy-badge { padding: 6px 10px; font-size: clamp(10px, .68vw, 12px); }
@@ -753,7 +757,6 @@ html[data-theme="dark"] .preference-badge { border-color: #34443b; color: #c9dbc
 
 @media (max-width: 920px) {
   .topbar { grid-template-columns: auto 1fr auto; padding-inline: 17px; }
-  .brand small { display: none; }
   .main-nav { gap: 18px; }
   .workspace { display: grid; grid-template-columns: 210px minmax(0,1fr); }
   .settings-panel { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(2, 1fr); padding: 0 14px 16px; position: static; height: auto; overflow: visible; }
@@ -774,6 +777,7 @@ html[data-theme="dark"] .preference-badge { border-color: #34443b; color: #c9dbc
 }
 
 @media (max-width: 680px) {
+  .brand small { display: none; }
   .topbar { height: 62px; }
   .brand-mark { width: 28px; height: 28px; }
   .brand strong { font-size: 17px; }

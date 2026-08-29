@@ -40,6 +40,7 @@ next-env.d.ts
 /dist/
 /release/
 /desktop-dist/
+/pages-dist/
 /src-tauri/target/
 /src-tauri/gen/
 /.wrangler/

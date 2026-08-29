@@ -2,7 +2,7 @@
 
 A local-first image optimiser for content creators and developers, available on Windows, macOS, Linux, and as a self-hosted web app.
 
-[中文](README.md) · [Desktop downloads](https://github.com/amiaoapp/PicLite/releases) · [Web demo](https://piclite-image-optimiser.ritchiecessac4273.chatgpt.site) · [Plugin development](docs/PLUGIN_DEVELOPMENT.en-US.md) · [Issues](https://github.com/amiaoapp/PicLite/issues)
+[中文](README.md) · [Desktop downloads](https://github.com/amiaoapp/PicLite/releases) · [Web demo](https://amiaoapp.github.io/PicLite/) · [Plugin development](docs/PLUGIN_DEVELOPMENT.en-US.md) · [Issues](https://github.com/amiaoapp/PicLite/issues)
 
 ![PicLite workspace](public/og.png)
 
@@ -31,6 +31,10 @@ The current macOS builds use ad-hoc signing. On first launch, macOS may require 
 
 ## Web and Docker
 
+The [GitHub Pages demo](https://amiaoapp.github.io/PicLite/) is a static, install-free build. Images are processed locally in your browser and are not uploaded to a server. Use the desktop app for the system tray, global shortcuts, persistent clipboard monitoring, and watched folders.
+
+For a LAN deployment, custom domain, or your own service endpoint, run the Docker build:
+
 ```bash
 docker run -d \
   --name piclite \
@@ -39,7 +43,7 @@ docker run -d \
   ghcr.io/amiaoapp/piclite:latest
 ```
 
-Open `http://SERVER_IP:3000`. Browser security restrictions mean that the web app cannot provide a system tray, global shortcuts, or persistent folder monitoring.
+Open `http://SERVER_IP:3000`. Both the GitHub Pages and Docker web builds include the compression workspace; browser security restrictions prevent system-tray, global-shortcut, and persistent folder-monitoring features.
 
 ## Development
 

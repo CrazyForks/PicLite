@@ -3,7 +3,7 @@
 PicLite 图轻：开源跨平台本地图片动图压缩工具，智能择优压缩，本地文件夹监控，强大自定义悬浮窗。自动图片格式转换，批量压缩，添加水印，上传图床。支持 Windows、macOS、Linux 与可自托管 Web 端。
 帮助自媒体工作人员和开发人员提升工作效率
 
-[English](README.en-US.md) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [Web 演示](https://piclite-image-optimiser.ritchiecessac4273.chatgpt.site) · [插件开发](docs/PLUGIN_DEVELOPMENT.md) · [问题反馈](https://github.com/amiaoapp/PicLite/issues)
+[English](README.en-US.md) · [下载桌面版](https://github.com/amiaoapp/PicLite/releases) · [Web 演示](https://amiaoapp.github.io/PicLite/) · [插件开发](docs/PLUGIN_DEVELOPMENT.md) · [问题反馈](https://github.com/amiaoapp/PicLite/issues)
 
 ![PicLite 工作台](public/og.png)
 
@@ -37,6 +37,10 @@ macOS 构建目前为 ad-hoc 签名，首次运行可能需要在“系统设置
 
 ## Web 与 Docker
 
+[GitHub Pages 在线 Demo](https://amiaoapp.github.io/PicLite/) 是无需安装的静态版本，图片直接在浏览器本地处理，不会上传到服务器。系统托盘、全局快捷键、剪贴板持续监听和文件夹监测等系统级功能请使用桌面端。
+
+需要局域网访问、固定域名或自己的服务入口时，可部署 Docker 版本：
+
 ```bash
 docker run -d \
   --name piclite \
@@ -45,7 +49,7 @@ docker run -d \
   ghcr.io/amiaoapp/piclite:latest
 ```
 
-浏览器打开 `http://服务器IP:3000`。Web 端受浏览器权限限制，不提供系统托盘、全局快捷键和持续文件夹监测。
+浏览器打开 `http://服务器IP:3000`。GitHub Pages 与 Docker Web 端都保留压缩工作台；受浏览器权限限制，不提供系统托盘、全局快捷键和持续文件夹监测。
 
 ## 本地开发
 
