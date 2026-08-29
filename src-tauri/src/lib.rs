@@ -3602,6 +3602,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             "about" => {
                 let _ = open_url("https://github.com/amiaoapp/PicLite");
             }
+            "check_updates" => {
+                open_preferences_from_menu(app, Some("preferences_section:about"));
+            }
             "quit" => {
                 app.state::<DesktopState>()
                     .quitting

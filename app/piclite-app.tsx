@@ -27,12 +27,15 @@ type ExportMode = "download" | "overwrite" | "same-folder" | "fixed-folder";
 type WatermarkLayout = "tile" | "single";
 type ThemeMode = "system" | "light" | "dark";
 type ColorTheme = "graphite" | "mist" | "violet" | "green";
+type UpdateCheckFrequency = "startup" | "daily" | "weekly" | "never";
 type UiDensity = "auto" | "comfortable" | "compact";
 type ShortcutPreferenceKey = "shortcutShow" | "shortcutPaste" | "shortcutDock" | "shortcutGallery" | "shortcutUpload";
 type DockLayout = "compact" | "full";
 type PreferenceSection = "general" | "clipboard" | "files" | "images" | "dropzone" | "floating" | "hosting" | "plugins" | "shortcuts" | "about";
 
 const APP_VERSION = packageManifest.version;
+const APP_RELEASE_DATE = packageManifest.releaseDate;
+const LAST_UPDATE_CHECK_KEY = "piclite.update.last-checked.v1";
 const GITHUB_RELEASES_URL = "https://github.com/amiaoapp/PicLite/releases/latest";
 
 type UpdateInfo = {
@@ -267,6 +270,7 @@ type DesktopPreferences = {
   floatingResultSeconds: number;
   clipboardWatcherEnabled: boolean;
   autoCheckUpdates: boolean;
+  updateCheckFrequency: UpdateCheckFrequency;
   language: "zh" | "en";
 };
 
@@ -524,6 +528,7 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   floatingResultSeconds: 10,
   clipboardWatcherEnabled: false,
   autoCheckUpdates: true,
+  updateCheckFrequency: "startup",
   language: "zh",
 };
 
@@ -551,7 +556,10 @@ function loadStoredDesktopPreferences(): DesktopPreferences {
     const colorTheme: ColorTheme = ["graphite", "mist", "violet", "green"].includes(preferences.colorTheme)
       ? preferences.colorTheme
       : "graphite";
-    return { ...preferences, colorTheme, dockLayout: preferences.dockLayout === "full" ? "full" : "compact", language: preferences.language === "en" ? "en" : "zh" };
+    const updateCheckFrequency: UpdateCheckFrequency = ["startup", "daily", "weekly", "never"].includes(preferences.updateCheckFrequency)
+      ? preferences.updateCheckFrequency
+      : preferences.autoCheckUpdates === false ? "never" : "startup";
+    return { ...preferences, colorTheme, updateCheckFrequency, autoCheckUpdates: updateCheckFrequency !== "never", dockLayout: preferences.dockLayout === "full" ? "full" : "compact", language: preferences.language === "en" ? "en" : "zh" };
   } catch {
     return DEFAULT_DESKTOP_PREFERENCES;
   }
@@ -1845,6 +1853,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const [processingAll, setProcessingAll] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(loadStoredDesktopPreferences);
+  const autoUpdateCheckStartedRef = useRef(false);
   const [recordingShortcut, setRecordingShortcut] = useState<ShortcutPreferenceKey | null>(null);
   const [preferenceSection, setPreferenceSection] = useState<PreferenceSection>("general");
   const [workspacePlugins, setWorkspacePlugins] = useState<WorkspacePlugin[]>(loadWorkspacePlugins);
@@ -1993,6 +2002,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     setCheckingUpdate(true);
     try {
       const next = await nativeBridge.checkForUpdates();
+      window.localStorage.setItem(LAST_UPDATE_CHECK_KEY, String(Date.now()));
       setUpdateInfo(next);
       if (next.available) showToast(t(`发现 PicLite ${next.latestVersion}，可以更新了`, `PicLite ${next.latestVersion} is available`));
       else if (manual) showToast(t(`当前 ${APP_VERSION} 已是最新版`, `PicLite ${APP_VERSION} is up to date`));
@@ -2014,10 +2024,19 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   }, []);
 
   useEffect(() => {
-    if (!nativeBridge || !desktopPreferences.autoCheckUpdates) return;
+    if (!nativeBridge || autoUpdateCheckStartedRef.current) return;
+    const frequency = desktopPreferences.updateCheckFrequency;
+    if (frequency === "never") return;
+    const lastChecked = Number(window.localStorage.getItem(LAST_UPDATE_CHECK_KEY) || 0);
+    const elapsed = Date.now() - lastChecked;
+    const due = frequency === "startup"
+      || (frequency === "daily" && elapsed >= 24 * 60 * 60 * 1000)
+      || (frequency === "weekly" && elapsed >= 7 * 24 * 60 * 60 * 1000);
+    if (!due) return;
+    autoUpdateCheckStartedRef.current = true;
     const timer = window.setTimeout(() => void checkForUpdates(false), 1400);
     return () => window.clearTimeout(timer);
-  }, [checkForUpdates, desktopPreferences.autoCheckUpdates, nativeBridge]);
+  }, [checkForUpdates, desktopPreferences.updateCheckFrequency, nativeBridge]);
 
   const refreshGallery = useCallback(async () => {
     try {
@@ -3112,7 +3131,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           {workspacePlugins.filter((plugin) => plugin.kind !== "builtin" && plugin.enabled).map((plugin) => <button key={plugin.id} className={view === `plugin:${plugin.id}` ? "active" : ""} type="button" onClick={() => setView(`plugin:${plugin.id}`)}>{desktopPreferences.language === "zh" ? plugin.nameZh : plugin.nameEn}</button>)}
         </nav>}
         <div className="topbar-actions">
-          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <><span className="privacy-badge"><i /> {nativeBridge ? `${desktopPlatform} · Tauri` : t("本地处理，图片不上传", "Local processing")}</span><span className="topbar-quick-controls">{nativeBridge && <button type="button" className="floating-entry-button" title={t("打开悬浮压缩窗", "Open floating optimiser")} aria-label={t("打开悬浮压缩窗", "Open floating optimiser")} onClick={() => void nativeBridge.showDropzoneWindow()}><span aria-hidden="true">▣</span></button>}<button type="button" title={t("切换浅色 / 深色主题", "Toggle light / dark theme")} aria-label={t("切换主题", "Toggle theme")} onClick={toggleHeaderTheme}>{resolveTheme(desktopPreferences.theme) === "dark" ? "☀" : "☾"}</button><button type="button" title={t("切换中文 / English", "Switch Chinese / English")} aria-label={t("切换语言", "Switch language")} onClick={toggleHeaderLanguage}>{desktopPreferences.language === "zh" ? "EN" : "中"}</button></span></>}
+          {standalonePreferences ? <IconButton label={t("关闭设置窗口", "Close preferences")} symbol="×" onClick={() => void nativeBridge?.hideCurrentWindow()} /> : <>{nativeBridge ? <div className="desktop-settings-entry"><button type="button" onClick={() => void nativeBridge.showPreferencesWindow("general")} title={t("打开外观与通用设置", "Open appearance and general settings")} aria-label={t("打开设置", "Open settings")}><span aria-hidden="true">⚙</span></button><span>v{APP_VERSION}</span></div> : <span className="privacy-badge"><i /> {t("本地处理，图片不上传", "Local processing")}</span>}<span className="topbar-quick-controls">{nativeBridge && <button type="button" className="floating-entry-button" title={t("打开悬浮压缩窗", "Open floating optimiser")} aria-label={t("打开悬浮压缩窗", "Open floating optimiser")} onClick={() => void nativeBridge.showDropzoneWindow()}><span aria-hidden="true">▣</span></button>}<button type="button" title={t("切换浅色 / 深色主题", "Toggle light / dark theme")} aria-label={t("切换主题", "Toggle theme")} onClick={toggleHeaderTheme}>{resolveTheme(desktopPreferences.theme) === "dark" ? "☀" : "☾"}</button><button type="button" title={t("切换中文 / English", "Switch Chinese / English")} aria-label={t("切换语言", "Switch language")} onClick={toggleHeaderLanguage}>{desktopPreferences.language === "zh" ? "EN" : "中"}</button></span></>}
         </div>
       </header>
 
@@ -3640,7 +3659,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               <div className="preference-card-heading"><span>{preferenceSection === "dropzone" ? t("拖放区域", "Drop Zone") : t("系统托盘", "System tray")}</span><small>{t("后台常驻行为", "Background behaviour")}</small></div>
               <div className="preference-row"><div><strong>{t("仅在系统托盘 / 菜单栏显示", "Show only in the system tray / menu bar")}</strong><small>{t("主窗口关闭后仍在后台运行", "Keep running after the main window is closed")}</small></div><span className="always-on-badge">{t("始终开启", "Always on")}</span></div>
               <label className="preference-row clickable"><div><strong>{t("开机自启动", "Launch at login")}</strong><small>{t("登录系统后静默进入托盘", "Start quietly in the tray after login")}</small></div><button className={`switch ${desktopPreferences.launchAtStartup ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.launchAtStartup} onClick={() => void toggleAutostart()}><i /></button></label>
-              <label className="preference-row clickable"><div><strong>{t("自动检查更新", "Automatically check for updates")}</strong><small>{t("发现新 GitHub Release 时在窗口内提醒", "Notify when a new GitHub Release is available")}</small></div><button className={`switch ${desktopPreferences.autoCheckUpdates ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.autoCheckUpdates} onClick={() => setDesktopPreferences((current) => ({ ...current, autoCheckUpdates: !current.autoCheckUpdates }))}><i /></button></label>
+              <div className="preference-row"><div><strong>{t("自动检查更新", "Automatic update checks")}</strong><small>{t("按设定频率检查 GitHub Releases", "Check GitHub Releases at the selected interval")}</small></div><select value={desktopPreferences.updateCheckFrequency} onChange={(event) => { const updateCheckFrequency = event.target.value as UpdateCheckFrequency; setDesktopPreferences((current) => ({ ...current, updateCheckFrequency, autoCheckUpdates: updateCheckFrequency !== "never" })); }}><option value="startup">{t("打开软件时", "When PicLite opens")}</option><option value="daily">{t("每天", "Daily")}</option><option value="weekly">{t("每周", "Weekly")}</option><option value="never">{t("不自动检查", "Never")}</option></select></div>
               <label className="preference-row clickable"><div><strong>{t("最小化时留在托盘", "Keep in tray when minimised")}</strong><small>{t("不占用任务栏；从托盘恢复主窗口", "Stay out of the taskbar and restore from the tray")}</small></div><button className={`switch ${desktopPreferences.minimizeToTray ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.minimizeToTray} onClick={() => setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }))}><i /></button></label>
               <div className="preference-row"><div><strong>{t("全局拖放区与悬浮结果", "Global drop zone and floating results")}</strong><small>{t("把图片拖到右下角热区，优化结果会继续显示可调操作", "Drop images on the bottom-right target and continue editing the result")}</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>{t("立即打开", "Open now")}</button></div>
             </section>}
@@ -3667,7 +3686,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
 
             {preferenceSection === "about" && <section className="preference-card about-card">
               <div className="preference-card-heading"><span>{t("关于 PicLite", "About PicLite")}</span><small>{t("版本与运行环境", "Version and runtime")}</small></div>
-              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><div><strong>PicLite 图轻</strong><small>{APP_VERSION} · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
+              <div className="about-product"><span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span><div><strong>PicLite 图轻 · v{APP_VERSION}</strong><small>{t(`更新日期 ${APP_RELEASE_DATE}`, `Updated ${APP_RELEASE_DATE}`)} · Tauri 2 + Rust</small></div><em>OPEN SOURCE</em></div>
               <p>{t("图片在本机处理，不上传到 PicLite 服务器。桌面端使用系统 WebView，因此安装包不携带完整浏览器内核。", "Images are processed locally and are never uploaded to PicLite. The desktop app uses the system WebView instead of bundling a browser engine.")}</p>
               <p className="license-note">{t("PicLite 以 GPL-3.0-or-later 开源；自动化工作流参考 FuzzyIdeas 的 Clop，PicLite 保留独立品牌和跨平台实现。", "PicLite is open source under GPL-3.0-or-later. Its automation workflow is inspired by FuzzyIdeas' Clop while retaining independent branding and a cross-platform implementation.")}</p>
               <div className="about-links"><button type="button" onClick={() => openReleasePage("https://github.com/amiaoapp/PicLite")}>{t("GitHub 项目", "GitHub project")}</button><button type="button" onClick={() => openReleasePage("https://github.com/amiaoapp/PicLite/blob/main/LICENSE")}>{t("GPLv3 许可", "GPLv3 license")}</button><button type="button" onClick={() => showToast(`PicLite ${APP_VERSION} · Tauri 2 + Rust`)}>{t("版本信息", "Version information")}</button><button type="button" disabled={checkingUpdate} onClick={() => void checkForUpdates(true)}>{checkingUpdate ? t("检查中…", "Checking…") : updateInfo?.available ? t(`更新到 ${updateInfo.latestVersion}`, `Update to ${updateInfo.latestVersion}`) : t("检查更新", "Check for updates")}</button></div>

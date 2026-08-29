@@ -1,4 +1,4 @@
-import type { DesktopSettings, ImageFormat, Language, OptimisationPreset } from "./clop-types";
+import type { Appearance, ColorTheme, DesktopSettings, ImageFormat, Language, OptimisationPreset, UpdateCheckFrequency } from "./clop-types";
 
 const SETTINGS_KEY = "piclite.desktop.clop-settings.v1";
 const MAIN_DESKTOP_PREFERENCES_KEY = "piclite.desktopPreferences.v1";
@@ -7,6 +7,8 @@ const SETTINGS_EVENT = "piclite:settings-changed";
 export const DEFAULT_SETTINGS: DesktopSettings = {
   language: "zh",
   appearance: "system",
+  colorTheme: "graphite",
+  updateCheckFrequency: "startup",
   launchAtLogin: false,
   showMenubarIcon: true,
   clipboardOptimiser: true,
@@ -74,16 +76,35 @@ function validFormat(value: unknown): value is ImageFormat {
   return value === "keep" || value === "jpeg" || value === "png" || value === "webp";
 }
 
+function validAppearance(value: unknown): value is Appearance {
+  return value === "system" || value === "light" || value === "dark";
+}
+
+function validColorTheme(value: unknown): value is ColorTheme {
+  return value === "graphite" || value === "mist" || value === "violet" || value === "green";
+}
+
+function validUpdateCheckFrequency(value: unknown): value is UpdateCheckFrequency {
+  return value === "startup" || value === "daily" || value === "weekly" || value === "never";
+}
+
 export function loadSettings(): DesktopSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Partial<DesktopSettings>;
-    const mainPreferences = JSON.parse(localStorage.getItem(MAIN_DESKTOP_PREFERENCES_KEY) || "{}") as Partial<{ shortcutsEnabled: boolean; shortcutDock: string; shortcutPaste: string; shortcutShow: string; shortcutGallery: string; shortcutUpload: string; renameTemplate: string }>;
+    const mainPreferences = JSON.parse(localStorage.getItem(MAIN_DESKTOP_PREFERENCES_KEY) || "{}") as Partial<{ language: Language; theme: Appearance; colorTheme: ColorTheme; autoCheckUpdates: boolean; updateCheckFrequency: UpdateCheckFrequency; shortcutsEnabled: boolean; shortcutDock: string; shortcutPaste: string; shortcutShow: string; shortcutGallery: string; shortcutUpload: string; renameTemplate: string }>;
     const preset = { ...DEFAULT_SETTINGS.preset, ...(parsed.preset || {}) } as OptimisationPreset;
     if (preset.mode !== "manual") preset.mode = "auto";
     if (!validFormat(preset.format)) preset.format = "keep";
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      appearance: validAppearance(mainPreferences.theme) ? mainPreferences.theme : validAppearance(parsed.appearance) ? parsed.appearance : DEFAULT_SETTINGS.appearance,
+      colorTheme: validColorTheme(mainPreferences.colorTheme) ? mainPreferences.colorTheme : validColorTheme(parsed.colorTheme) ? parsed.colorTheme : DEFAULT_SETTINGS.colorTheme,
+      updateCheckFrequency: validUpdateCheckFrequency(mainPreferences.updateCheckFrequency)
+        ? mainPreferences.updateCheckFrequency
+        : validUpdateCheckFrequency(parsed.updateCheckFrequency)
+          ? parsed.updateCheckFrequency
+          : mainPreferences.autoCheckUpdates === false ? "never" : DEFAULT_SETTINGS.updateCheckFrequency,
       shortcutsEnabled: typeof mainPreferences.shortcutsEnabled === "boolean" ? mainPreferences.shortcutsEnabled : parsed.shortcutsEnabled ?? DEFAULT_SETTINGS.shortcutsEnabled,
       shortcutToggleDropzone: mainPreferences.shortcutDock || parsed.shortcutToggleDropzone || DEFAULT_SETTINGS.shortcutToggleDropzone,
       shortcutOptimiseClipboard: mainPreferences.shortcutPaste || parsed.shortcutOptimiseClipboard || DEFAULT_SETTINGS.shortcutOptimiseClipboard,
@@ -95,7 +116,7 @@ export function loadSettings(): DesktopSettings {
       floatingActions: Array.isArray(parsed.floatingActions) ? parsed.floatingActions.slice(0, 6) : DEFAULT_SETTINGS.floatingActions,
       floatingWatermark: { ...DEFAULT_SETTINGS.floatingWatermark, ...(parsed.floatingWatermark || {}) },
       renameTemplate: mainPreferences.renameTemplate || parsed.renameTemplate || DEFAULT_SETTINGS.renameTemplate,
-      language: parsed.language === "en" ? "en" : "zh",
+      language: mainPreferences.language === "en" || (!mainPreferences.language && parsed.language === "en") ? "en" : "zh",
       preset,
     };
   } catch {
@@ -109,6 +130,11 @@ export function saveSettings(settings: DesktopSettings) {
     const mainPreferences = JSON.parse(localStorage.getItem(MAIN_DESKTOP_PREFERENCES_KEY) || "{}") as Record<string, unknown>;
     localStorage.setItem(MAIN_DESKTOP_PREFERENCES_KEY, JSON.stringify({
       ...mainPreferences,
+      language: settings.language,
+      theme: settings.appearance,
+      colorTheme: settings.colorTheme,
+      autoCheckUpdates: settings.updateCheckFrequency !== "never",
+      updateCheckFrequency: settings.updateCheckFrequency,
       shortcutsEnabled: settings.shortcutsEnabled,
       shortcutDock: settings.shortcutToggleDropzone,
       shortcutPaste: settings.shortcutOptimiseClipboard,

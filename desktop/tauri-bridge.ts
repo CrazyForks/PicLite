@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import packageManifest from "../package.json";
 
 type EncodedImage = { name: string; type: string; path: string; data: string };
 
@@ -261,7 +262,7 @@ if ("__TAURI_INTERNALS__" in window) {
     setAlwaysOnTop: noop,
     hideCurrentWindow: noop,
     quitApplication: noop,
-    checkForUpdates: async () => ({ currentVersion: "1.0.0", latestVersion: "1.0.0", available: false, releaseUrl: "" }),
+    checkForUpdates: async () => ({ currentVersion: packageManifest.version, latestVersion: packageManifest.version, available: false, releaseUrl: "" }),
     fetchPluginSource: async (url) => {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

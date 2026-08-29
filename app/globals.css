@@ -151,6 +151,11 @@ html[data-theme="dark"] .update-notice { border-color: #304039; background: rgba
 }
 
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 12px; }
+.desktop-settings-entry { height: 34px; display: flex; align-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--deep) 15%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--surface) 76%, transparent); box-shadow: inset 0 1px rgba(255,255,255,.62), 0 4px 14px color-mix(in srgb, var(--deep) 6%, transparent); }
+.desktop-settings-entry button { width: 34px; height: 100%; padding: 0; display: grid; place-items: center; border: 0; border-right: 1px solid color-mix(in srgb, var(--deep) 13%, transparent); color: var(--ink); background: transparent; font-size: 11px; font-weight: 800; cursor: pointer; }
+.desktop-settings-entry button:hover { background: color-mix(in srgb, var(--deep) 8%, transparent); }
+.desktop-settings-entry button > span { color: var(--deep); font-size: 13px; }
+.desktop-settings-entry > span { padding: 0 9px; color: var(--muted); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .privacy-badge { font-size: 11px; color: #658075; background: #eef5ef; border: 1px solid #d9e8dd; border-radius: 999px; padding: 7px 11px; font-weight: 650; white-space: nowrap; }
 .privacy-badge i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #4aa071; margin-right: 5px; }
 .icon-button { border: 1px solid var(--line); background: #fff; border-radius: 50%; width: 32px; height: 32px; cursor: pointer; display: grid; place-items: center; font-size: 13px; font-weight: 800; }

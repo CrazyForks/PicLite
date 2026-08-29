@@ -21,6 +21,8 @@ type WorkspacePlugin = { id: string; nameZh: string; nameEn: string; kind: "buil
 const WORKSPACE_PLUGINS_KEY = "piclite.workspacePlugins.v1";
 const REQUESTED_SETTINGS_SECTION_KEY = "piclite.preferences.requested-section";
 const APP_VERSION = packageManifest.version;
+const APP_RELEASE_DATE = packageManifest.releaseDate;
+const LAST_UPDATE_CHECK_KEY = "piclite.update.last-checked.v1";
 const loadedFontFaces = new Set<string>();
 const BUILTIN_WORKSPACE_PLUGINS: WorkspacePlugin[] = [
   { id: "watcher", nameZh: "文件夹监测", nameEn: "Folder watch", kind: "builtin", enabled: true },
@@ -367,6 +369,7 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const resizeTimer = useRef<number | null>(null);
   const swipeStartY = useRef<number | null>(null);
   const wheelLocked = useRef(false);
+  const autoUpdateCheckStartedRef = useRef(false);
   const cleanupRetentionSeconds = cleanupSeconds(settings);
 
   const startEmptyWindowDrag = (event: ReactPointerEvent<HTMLElement>) => {
@@ -423,14 +426,13 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const checkUpdates = useCallback(async (showResult: boolean) => {
     try {
       const info = await api.checkForUpdates();
+      localStorage.setItem(LAST_UPDATE_CHECK_KEY, String(Date.now()));
       setUpdateNotice(info.available
         ? { text: tr(settings.language, `发现 PicLite ${info.latestVersion}`, `PicLite ${info.latestVersion} available`), url: info.releaseUrl }
         : showResult ? { text: tr(settings.language, `PicLite ${info.currentVersion} 已是最新版`, `PicLite ${info.currentVersion} is up to date`) } : null);
-      if (showResult) await api.showDropzoneWindow();
     } catch {
       if (showResult) {
         setUpdateNotice({ text: tr(settings.language, "检查更新失败，请稍后重试", "Update check failed. Try again later.") });
-        await api.showDropzoneWindow();
       }
     }
   }, [api, settings.language]);
@@ -447,9 +449,17 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     } catch (error) { setUpdateNotice({ text: error instanceof Error ? error.message : String(error) }); }
   }, [api, settings.language]);
   useEffect(() => {
+    if (autoUpdateCheckStartedRef.current || settings.updateCheckFrequency === "never") return;
+    const lastChecked = Number(localStorage.getItem(LAST_UPDATE_CHECK_KEY) || 0);
+    const elapsed = Date.now() - lastChecked;
+    const due = settings.updateCheckFrequency === "startup"
+      || (settings.updateCheckFrequency === "daily" && elapsed >= 24 * 60 * 60 * 1000)
+      || (settings.updateCheckFrequency === "weekly" && elapsed >= 7 * 24 * 60 * 60 * 1000);
+    if (!due) return;
+    autoUpdateCheckStartedRef.current = true;
     const timer = window.setTimeout(() => void checkUpdates(false), 0);
     return () => window.clearTimeout(timer);
-  }, [checkUpdates]);
+  }, [checkUpdates, settings.updateCheckFrequency]);
   useEffect(() => api.onTrayAction((action) => {
     if (action === "about") {
       void api.openExternal("https://github.com/amiaoapp/PicLite");
@@ -592,7 +602,7 @@ function requestedSettingsSection(): SettingsSection {
 }
 
 const settingsNav: Array<{ id: SettingsSection; icon: string; zh: string; en: string; group?: string }> = [
-  { id: "general", icon: "gear", zh: "通用", en: "General" },
+  { id: "general", icon: "gear", zh: "外观与通用", en: "Appearance & General" },
   { id: "clipboard", icon: "clipboard", zh: "剪贴板", en: "Clipboard" },
   { id: "files", icon: "folder", zh: "文件处理", en: "File handling" },
   { id: "images", icon: "image", zh: "图片", en: "Images", group: "types" },
@@ -653,6 +663,18 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   const patchPreset = (value: Partial<DesktopSettings["preset"]>) => setSettings((current) => ({ ...current, preset: { ...current.preset, ...value } }));
   useEffect(() => { void isAutostartEnabled().then((value) => patch("launchAtLogin", value)).catch(() => undefined); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { void api.setWindowTheme(settings.appearance); void api.updateDesktopPreferences({ minimizeToTray: true, clipboardWatcherEnabled: settings.clipboardOptimiser }); }, [api, settings.appearance, settings.clipboardOptimiser]);
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyAppearance = () => {
+      const resolved = settings.appearance === "system" ? (media.matches ? "dark" : "light") : settings.appearance;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.palette = settings.colorTheme;
+      document.documentElement.style.colorScheme = resolved;
+    };
+    applyAppearance();
+    media.addEventListener("change", applyAppearance);
+    return () => media.removeEventListener("change", applyAppearance);
+  }, [settings.appearance, settings.colorTheme]);
   useEffect(() => api.onWatcherEvent((event) => setWatchStatus(event.message || event.type)), [api]);
   const refreshFonts = useCallback(async () => {
     setFontStatus(tr(language, "正在读取本地字体…", "Reading local fonts…"));
@@ -761,15 +783,21 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       setCleanupText(error instanceof Error ? error.message : String(error));
     }
   };
-  const checkUpdates = async () => {
+  const checkUpdates = useCallback(async () => {
     setUpdateText(tr(language, "正在检查…", "Checking…"));
     try {
       const info = await api.checkForUpdates();
+      localStorage.setItem(LAST_UPDATE_CHECK_KEY, String(Date.now()));
       setUpdateText(info.available ? tr(language, `发现新版本 ${info.latestVersion}`, `Version ${info.latestVersion} is available`) : tr(language, `已经是最新版 ${info.currentVersion}`, `PicLite ${info.currentVersion} is up to date`));
     } catch (error) {
       setUpdateText(String(error));
     }
-  };
+  }, [api, language]);
+  useEffect(() => {
+    if (section !== "about" || updateText) return;
+    const timer = window.setTimeout(() => void checkUpdates(), 80);
+    return () => window.clearTimeout(timer);
+  }, [checkUpdates, section, updateText]);
   const selectWatermarkFont = async (family: string) => {
     patch("floatingWatermark", { ...settings.floatingWatermark, fontFamily: family });
     setFontStatus(tr(language, `正在载入 ${family}…`, `Loading ${family}…`));
@@ -835,13 +863,20 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         const marker = item.group ? <span className="nav-group" key={`${item.group}-label`}>{item.group === "types" ? tr(language, "文件类型", "File types") : item.group === "results" ? tr(language, "拖放与结果", "Drops & Results") : item.group === "automation" ? tr(language, "快捷键与自动化", "Shortcuts & Automation") : tr(language, "支持", "Support")}</span> : null;
         return <span className="nav-entry" key={item.id}>{marker}<button className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}><Icon name={item.icon} /><span>{tr(language, item.zh, item.en)}</span></button></span>;
       })}</nav>
-      <small className="settings-version">PicLite {APP_VERSION}<br />Tauri 2 · Rust</small>
     </aside>
     <div className="settings-content">
       {section === "general" && <>
-        <SettingsCard title={<T language={language} zh="通用" en="General" />}>
+        <SettingsCard title={<T language={language} zh="外观与配色" en="Appearance & colours" />} note={<T language={language} zh="选择后会立即同步到主窗口、设置和悬浮结果" en="Changes apply immediately to the main window, preferences and floating results" />}>
           <SettingsRow title={<T language={language} zh="语言" en="Language" />}><div className="segmented"><button className={language === "zh" ? "active" : ""} onClick={() => patch("language", "zh")}>中文</button><button className={language === "en" ? "active" : ""} onClick={() => patch("language", "en")}>English</button></div></SettingsRow>
           <SettingsRow title={<T language={language} zh="外观" en="Appearance" />}><Select label={tr(language, "外观", "Appearance")} value={settings.appearance} onChange={(value) => patch("appearance", value)}><option value="system">{tr(language, "跟随系统", "System")}</option><option value="light">{tr(language, "浅色", "Light")}</option><option value="dark">{tr(language, "深色", "Dark")}</option></Select></SettingsRow>
+          <SettingsRow title={<T language={language} zh="界面配色" en="Colour theme" />} note={<T language={language} zh="选择一套你看着舒服的主色调" en="Choose the colour palette you prefer" />}><div className="settings-palette-picker">
+            {([
+              ["graphite", tr(language, "石墨蓝", "Graphite")],
+              ["mist", tr(language, "雾蓝", "Mist blue")],
+              ["violet", tr(language, "紫晶", "Violet")],
+              ["green", tr(language, "经典绿", "Classic green")],
+            ] as const).map(([value, label]) => <button type="button" className={`settings-palette ${value} ${settings.colorTheme === value ? "active" : ""}`} aria-pressed={settings.colorTheme === value} key={value} onClick={() => patch("colorTheme", value)}><span aria-hidden="true"><i /><i /><i /></span><b>{label}</b></button>)}
+          </div></SettingsRow>
           <SettingsRow title={<T language={language} zh="登录时启动" en="Launch at login" />}><Switch label="launch" checked={settings.launchAtLogin} onChange={(value) => void toggleAutostart(value)} /></SettingsRow>
           <SettingsRow title={<T language={language} zh="暂停自动优化" en="Pause automatic optimisations" />} note={<T language={language} zh="保留菜单栏功能，但暂停监测和自动处理" en="Keep PicLite running without automatic processing" />}><Switch label="pause" checked={settings.pauseAutomaticOptimisations} onChange={(value) => patch("pauseAutomaticOptimisations", value)} /></SettingsRow>
         </SettingsCard>
@@ -954,8 +989,12 @@ function Preferences({ api }: { api: PicLiteBridge }) {
         ] as const).map(([key, title]) => <SettingsRow key={key} title={title}><button className={`shortcut-recorder ${recordingShortcut === key ? "recording" : ""}`} aria-pressed={recordingShortcut === key} onClick={() => setRecordingShortcut((current) => current === key ? null : key)}>{recordingShortcut === key ? tr(language, "请按快捷键…", "Press shortcut…") : shortcutLabel(settings[key], api.platform)}</button></SettingsRow>)}
       </SettingsCard>}
       {section === "about" && <>
-        <SettingsCard title={<T language={language} zh="更新" en="Updates" />}><SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="检查更新" en="Check for updates" /></button></SettingsRow></SettingsCard>
-        <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><Brand /><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>
+        <section className="update-about-hero"><Brand /><div><span><T language={language} zh="当前版本" en="Current version" /></span><strong>PicLite v{APP_VERSION}</strong><small><T language={language} zh={`更新时间 ${APP_RELEASE_DATE}`} en={`Updated ${APP_RELEASE_DATE}`} /> · Tauri 2 + Rust</small></div></section>
+        <SettingsCard title={<T language={language} zh="更新" en="Updates" />}>
+          <SettingsRow title={<T language={language} zh="自动检查更新" en="Automatic update checks" />} note={<T language={language} zh="按设定频率检查 GitHub Releases" en="Check GitHub Releases at the selected interval" />}><Select label={tr(language, "自动检查更新", "Automatic update checks")} value={settings.updateCheckFrequency} onChange={(value) => patch("updateCheckFrequency", value)}><option value="startup">{tr(language, "打开软件时", "When PicLite opens")}</option><option value="daily">{tr(language, "每天", "Daily")}</option><option value="weekly">{tr(language, "每周", "Weekly")}</option><option value="never">{tr(language, "不自动检查", "Never")}</option></Select></SettingsRow>
+          <SettingsRow title={<T language={language} zh="检查 GitHub Releases" en="Check GitHub Releases" />} note={updateText}><button className="settings-button" onClick={() => void checkUpdates()}><T language={language} zh="立即检查" en="Check now" /></button></SettingsRow>
+        </SettingsCard>
+        <SettingsCard title={<T language={language} zh="关于 PicLite" en="About PicLite" />}><div className="about-pane"><p><T language={language} zh="面向自媒体工作人员和开发人员的本地优先跨平台媒体优化工具。" en="A local-first, cross-platform media optimiser for content creators and developers." /></p><small>GPL-3.0-or-later · Tauri 2 + Rust</small><p><T language={language} zh="工作流与部分实现基于 GPL 项目 Clop；PicLite 使用独立名称、图标和跨平台实现。" en="Workflow and parts of the implementation are based on the GPL-licensed Clop project. PicLite uses its own name, icons and cross-platform implementation." /></p><button className="settings-button" onClick={() => void api.openExternal("https://github.com/amiaoapp/PicLite")}><T language={language} zh="打开 GitHub" en="Open GitHub" /></button></div></SettingsCard>
       </>}
     </div>
   </main>;

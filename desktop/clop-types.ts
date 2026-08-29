@@ -1,5 +1,7 @@
 export type Language = "zh" | "en";
 export type Appearance = "system" | "light" | "dark";
+export type ColorTheme = "graphite" | "mist" | "violet" | "green";
+export type UpdateCheckFrequency = "startup" | "daily" | "weekly" | "never";
 export type ResultLayout = "compact" | "full";
 export type ResultDisplayMode = "stack" | "list";
 export type FilePlacement = "same-folder" | "fixed-folder";
@@ -47,6 +49,8 @@ export type OptimisationPreset = {
 export type DesktopSettings = {
   language: Language;
   appearance: Appearance;
+  colorTheme: ColorTheme;
+  updateCheckFrequency: UpdateCheckFrequency;
   launchAtLogin: boolean;
   showMenubarIcon: boolean;
   clipboardOptimiser: boolean;
