@@ -3055,7 +3055,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     const action = pendingTrayAction;
     setPendingTrayAction(null);
     if (action === "check_updates") {
-      void checkForUpdates(false);
+      void checkForUpdates(true);
       return;
     }
     if (action === "preferences") {
@@ -3158,7 +3158,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
             <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
             <span><strong>PicLite</strong><small>{desktopPreferences.language === "zh" ? "图轻" : "Image Optimiser"}</small></span>
           </button>
-          {nativeBridge && <button className="brand-version" type="button" title={t("静默检查更新", "Check for updates in the background")} aria-label={t(`当前版本 ${APP_VERSION}，静默检查更新`, `Version ${APP_VERSION}; check for updates in the background`)} disabled={checkingUpdate} onClick={() => void checkForUpdates(false)}>v{APP_VERSION}</button>}
+          {nativeBridge && <button className="brand-version" type="button" title={t("检查更新并显示结果", "Check for updates and show the result")} aria-label={t(`当前版本 ${APP_VERSION}，检查更新`, `Version ${APP_VERSION}; check for updates`)} disabled={checkingUpdate} onClick={() => void checkForUpdates(true)}>v{APP_VERSION}</button>}
         </div>
         {standalonePreferences ? <div className="standalone-window-title"><span className="eyebrow">PREFERENCES</span><strong>{t("应用设置", "Preferences")}</strong></div> : <nav className="main-nav" aria-label={t("主要功能", "Main navigation")}>
           <button className={view === "workspace" ? "active" : ""} type="button" onClick={() => setView("workspace")}>{t(nativeBridge ? "工作台" : "压缩工作台", "Workspace")}</button>
@@ -3631,6 +3631,12 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               </label>
             </section>}
 
+            {preferenceSection === "general" && <section className="preference-card">
+              <div className="preference-card-heading"><span>{t("窗口与系统集成", "Window and system integration")}</span><small>{t("任务栏、Dock 与更新检查", "Taskbar, Dock and update checks")}</small></div>
+              <label className="preference-row clickable"><div><strong>{t("在任务栏 / Dock 显示", "Show in taskbar / Dock")}</strong><small>{desktopPreferences.showInTaskbarDock ? t("已开启：主窗口失去焦点后继续保留，可从任务栏或 Dock 切换回来", "On: keep the main window available after it loses focus") : t("已关闭：不占用任务栏或 Dock；主窗口失去焦点后隐藏到托盘 / 菜单栏", "Off: hide to the tray or menu bar after the main window loses focus")}</small></div><button className={`switch ${desktopPreferences.showInTaskbarDock ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.showInTaskbarDock} onClick={() => setDesktopPreferences((current) => ({ ...current, showInTaskbarDock: !current.showInTaskbarDock }))}><i /></button></label>
+              <div className="preference-row"><div><strong>{t("自动检查更新", "Automatic update checks")}</strong><small>{t("按设定频率检查 GitHub Releases；手动检查始终显示结果", "Check GitHub Releases at the selected interval; manual checks always show a result")}</small></div><select value={desktopPreferences.updateCheckFrequency} onChange={(event) => { const updateCheckFrequency = event.target.value as UpdateCheckFrequency; setDesktopPreferences((current) => ({ ...current, updateCheckFrequency, autoCheckUpdates: updateCheckFrequency !== "never" })); }}><option value="startup">{t("打开软件时", "When PicLite opens")}</option><option value="daily">{t("每天", "Daily")}</option><option value="weekly">{t("每周", "Weekly")}</option><option value="never">{t("不自动检查", "Never")}</option></select></div>
+            </section>}
+
             {(preferenceSection === "general" || preferenceSection === "floating") && <section className="preference-card">
               <div className="preference-card-heading"><span>{preferenceSection === "floating" ? t("悬浮结果", "Floating Results") : t("通用", "General")}</span><small>{t("外观与交互", "Appearance and behaviour")}</small></div>
               <div className="preference-row column">
@@ -3704,9 +3710,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
 
             {(preferenceSection === "general" || preferenceSection === "dropzone") && <section className="preference-card">
               <div className="preference-card-heading"><span>{preferenceSection === "dropzone" ? t("拖放区域", "Drop Zone") : t("系统托盘", "System tray")}</span><small>{t("后台常驻行为", "Background behaviour")}</small></div>
-              <label className="preference-row clickable"><div><strong>{t("在任务栏 / Dock 显示", "Show in taskbar / Dock")}</strong><small>{desktopPreferences.showInTaskbarDock ? t("主窗口失去焦点后继续保留，可从任务栏或 Dock 切换回来", "Keep the main window available after it loses focus") : t("不占用任务栏或 Dock；失去焦点后隐藏到托盘 / 菜单栏", "Hide to the tray or menu bar after the window loses focus")}</small></div><button className={`switch ${desktopPreferences.showInTaskbarDock ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.showInTaskbarDock} onClick={() => setDesktopPreferences((current) => ({ ...current, showInTaskbarDock: !current.showInTaskbarDock }))}><i /></button></label>
               <label className="preference-row clickable"><div><strong>{t("开机自启动", "Launch at login")}</strong><small>{t("登录系统后静默进入托盘", "Start quietly in the tray after login")}</small></div><button className={`switch ${desktopPreferences.launchAtStartup ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.launchAtStartup} onClick={() => void toggleAutostart()}><i /></button></label>
-              <div className="preference-row"><div><strong>{t("自动检查更新", "Automatic update checks")}</strong><small>{t("按设定频率检查 GitHub Releases", "Check GitHub Releases at the selected interval")}</small></div><select value={desktopPreferences.updateCheckFrequency} onChange={(event) => { const updateCheckFrequency = event.target.value as UpdateCheckFrequency; setDesktopPreferences((current) => ({ ...current, updateCheckFrequency, autoCheckUpdates: updateCheckFrequency !== "never" })); }}><option value="startup">{t("打开软件时", "When PicLite opens")}</option><option value="daily">{t("每天", "Daily")}</option><option value="weekly">{t("每周", "Weekly")}</option><option value="never">{t("不自动检查", "Never")}</option></select></div>
               <div className="preference-row"><div><strong>{t("全局拖放区与悬浮结果", "Global drop zone and floating results")}</strong><small>{t("把图片拖到右下角热区，优化结果会继续显示可调操作", "Drop images on the bottom-right target and continue editing the result")}</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>{t("立即打开", "Open now")}</button></div>
             </section>}
 

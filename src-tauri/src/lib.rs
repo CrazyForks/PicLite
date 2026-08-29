@@ -41,7 +41,7 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, Theme, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use url::Url;
 use webp::{AnimEncoder as AnimatedWebPEncoder, AnimFrame as AnimatedWebPFrame};
@@ -3694,6 +3694,46 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "about" => {
                 let _ = open_url("https://github.com/amiaoapp/PicLite");
+            }
+            "check_updates" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    match check_for_updates().await {
+                        Ok(info) if info.available => {
+                            let release_url = info.release_url.clone();
+                            app.dialog()
+                                .message(format!(
+                                    "发现 PicLite {}。\n\n当前版本：{}",
+                                    info.latest_version, info.current_version
+                                ))
+                                .title("PicLite 更新检查")
+                                .kind(MessageDialogKind::Info)
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    "打开下载页面".into(),
+                                    "稍后".into(),
+                                ))
+                                .show(move |open_release| {
+                                    if open_release {
+                                        let _ = open_url(&release_url);
+                                    }
+                                });
+                        }
+                        Ok(info) => {
+                            app.dialog()
+                                .message(format!("PicLite {} 已是最新版。", info.current_version))
+                                .title("PicLite 更新检查")
+                                .kind(MessageDialogKind::Info)
+                                .show(|_| {});
+                        }
+                        Err(error) => {
+                            app.dialog()
+                                .message(format!("检查更新失败。\n\n{error}"))
+                                .title("PicLite 更新检查")
+                                .kind(MessageDialogKind::Error)
+                                .show(|_| {});
+                        }
+                    }
+                });
             }
             "quit" => {
                 app.state::<DesktopState>()
