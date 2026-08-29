@@ -66,6 +66,7 @@ struct DesktopState {
     quitting: AtomicBool,
     tray_available: AtomicBool,
     minimize_to_tray: AtomicBool,
+    show_in_taskbar_dock: AtomicBool,
     clipboard_monitor_enabled: AtomicBool,
     /// Timestamp until which clipboard content was written by PicLite itself.
     /// The monitor must record it but must not feed the result back through the
@@ -89,6 +90,7 @@ impl Default for DesktopState {
             quitting: AtomicBool::new(false),
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
+            show_in_taskbar_dock: AtomicBool::new(false),
             clipboard_monitor_enabled: AtomicBool::new(false),
             clipboard_ignore_until_ms: AtomicU64::new(0),
             shortcut_config_lock: Mutex::new(()),
@@ -101,6 +103,8 @@ impl Default for DesktopState {
 #[serde(rename_all = "camelCase")]
 struct NativeDesktopPreferences {
     minimize_to_tray: bool,
+    #[serde(default)]
+    show_in_taskbar_dock: bool,
     clipboard_watcher_enabled: bool,
 }
 
@@ -787,15 +791,30 @@ fn encode_static(
                     .clamp(64.0, 256.0) as usize;
                 let quantizer = color_quant::NeuQuant::new(10, colors, rgba.as_raw());
                 let color_map = quantizer.color_map_rgba();
-                let mut dithered = rgba.clone();
-                if dithered.width() > 1 && dithered.height() > 1 {
-                    image::imageops::dither(&mut dithered, &quantizer);
+                // Error-diffusion dithering can form regular diagonal worms on
+                // long, smooth gradients. A small tiled stochastic perturbation
+                // breaks those bands without introducing a visible directional
+                // pattern, while keeping the indexed PNG compact.
+                let strength =
+                    (((100_u16 - quality.clamp(1, 99) as u16) + 5) / 6).clamp(2, 12) as i16;
+                let mut indices = Vec::with_capacity((rgba.width() * rgba.height()) as usize);
+                for (position, pixel) in rgba.pixels().enumerate() {
+                    let x = position as u32 % rgba.width();
+                    let y = position as u32 / rgba.width();
+                    let mut adjusted = pixel.0;
+                    for (channel, value) in adjusted[..3].iter_mut().enumerate() {
+                        let mut hash = (x & 63)
+                            .wrapping_mul(374_761_393)
+                            .wrapping_add((y & 63).wrapping_mul(668_265_263))
+                            .wrapping_add((channel as u32).wrapping_mul(2_246_822_519));
+                        hash = (hash ^ (hash >> 13)).wrapping_mul(1_274_126_177);
+                        hash ^= hash >> 16;
+                        let triangular = (hash & 255) as i16 - ((hash >> 8) & 255) as i16;
+                        let offset = triangular * strength / 255;
+                        *value = (*value as i16 + offset).clamp(0, 255) as u8;
+                    }
+                    indices.push(quantizer.index_of(&adjusted) as u8);
                 }
-                let indices = dithered
-                    .as_raw()
-                    .chunks_exact(4)
-                    .map(|pixel| quantizer.index_of(pixel) as u8)
-                    .collect::<Vec<_>>();
                 let mut palette = Vec::with_capacity(colors * 3);
                 let mut transparency = Vec::with_capacity(colors);
                 for color in color_map.chunks_exact(4) {
@@ -1413,14 +1432,30 @@ async fn compress_image_data(
 #[tauri::command]
 async fn update_desktop_preferences(
     preferences: NativeDesktopPreferences,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
     state
         .minimize_to_tray
         .store(preferences.minimize_to_tray, Ordering::Relaxed);
     state
+        .show_in_taskbar_dock
+        .store(preferences.show_in_taskbar_dock, Ordering::Relaxed);
+    state
         .clipboard_monitor_enabled
         .store(preferences.clipboard_watcher_enabled, Ordering::Relaxed);
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_skip_taskbar(!preferences.show_in_taskbar_dock)
+            .map_err(|error| error.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(if preferences.show_in_taskbar_dock {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    })
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -4027,9 +4062,19 @@ pub fn run() {
                     if state.tray_available.load(Ordering::Relaxed)
                         && state.minimize_to_tray.load(Ordering::Relaxed) =>
                 {
-                    if window.is_minimized().unwrap_or(false) {
+                    if !state.show_in_taskbar_dock.load(Ordering::Relaxed)
+                        && window.is_minimized().unwrap_or(false)
+                    {
                         let _ = window.hide();
                     }
+                }
+                WindowEvent::Focused(false)
+                    if window.label() == "main"
+                        && state.tray_available.load(Ordering::Relaxed)
+                        && !state.show_in_taskbar_dock.load(Ordering::Relaxed)
+                        && !state.quitting.load(Ordering::Relaxed) =>
+                {
+                    let _ = window.hide();
                 }
                 _ => {}
             }
@@ -4100,6 +4145,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taskbar_dock_preference_is_backward_compatible() {
+        let legacy: NativeDesktopPreferences = serde_json::from_value(serde_json::json!({
+            "minimizeToTray": true,
+            "clipboardWatcherEnabled": false
+        }))
+        .expect("legacy desktop preferences");
+        assert!(!legacy.show_in_taskbar_dock);
+
+        let visible: NativeDesktopPreferences = serde_json::from_value(serde_json::json!({
+            "minimizeToTray": true,
+            "showInTaskbarDock": true,
+            "clipboardWatcherEnabled": false
+        }))
+        .expect("taskbar desktop preferences");
+        assert!(visible.show_in_taskbar_dock);
+    }
 
     #[test]
     fn rename_template_expands_size_dimensions_and_extension() {

@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { GIFEncoder, quantize } from "gifenc";
+import { applyPalette, GIFEncoder, quantize } from "gifenc";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { isRequestedMimeType, isSmartCompressionWorthwhile, minimumSmartSavingsBytes, smartCandidateOutputFormats } from "./compression-policy";
 import packageManifest from "../package.json";
@@ -156,7 +156,7 @@ type NativeBridge = {
   saveImportedFont: (family: string, data: Uint8Array) => Promise<void>;
   listSystemFonts: () => Promise<SystemFontInfo[]>;
   readSystemFont: (path: string, faceIndex: number) => Promise<{ data: Uint8Array }>;
-  updateDesktopPreferences: (preferences: { minimizeToTray: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
+  updateDesktopPreferences: (preferences: { minimizeToTray: boolean; showInTaskbarDock: boolean; clipboardWatcherEnabled: boolean }) => Promise<void>;
   setWindowTheme: (theme: ThemeMode) => Promise<void>;
   startDragging: () => Promise<void>;
   startResizeDragging: (direction: "East" | "North" | "NorthEast" | "NorthWest" | "South" | "SouthEast" | "SouthWest" | "West") => Promise<void>;
@@ -259,6 +259,7 @@ type DesktopPreferences = {
   dockTheme: ThemeMode;
   density: UiDensity;
   minimizeToTray: boolean;
+  showInTaskbarDock: boolean;
   launchAtStartup: boolean;
   shortcutsEnabled: boolean;
   shortcutShow: string;
@@ -517,6 +518,7 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   dockTheme: "system",
   density: "auto",
   minimizeToTray: true,
+  showInTaskbarDock: false,
   launchAtStartup: false,
   shortcutsEnabled: true,
   shortcutShow: "CommandOrControl+Alt+P",
@@ -1028,7 +1030,7 @@ async function animatedGifCompress(item: ImageItem, settings: CompressionSetting
       applyWatermark(context, width, height, settings.watermark, watermarkLayer);
       const rgba = context.getImageData(0, 0, width, height).data;
       const palette = quantize(rgba, colors, { format: "rgba4444", oneBitAlpha: true });
-      const indexed = ditherToPalette(rgba, palette, width, height);
+      const indexed = stochasticDitherToPalette(rgba, palette, width, height, settings.quality);
       const transparentIndex = palette.findIndex((color) => color[3] === 0);
       encoder.writeFrame(indexed, width, height, {
         palette,
@@ -1098,71 +1100,28 @@ function pngPaletteSize(quality: number) {
   return Math.max(64, Math.min(256, Math.round(64 + 192 * normalized ** 1.35)));
 }
 
-function ditherToPalette(
+function stochasticDitherToPalette(
   rgba: Uint8ClampedArray,
   palette: number[][],
   width: number,
   height: number,
+  quality: number,
 ) {
-  const indices = new Uint8Array(width * height);
-  const cache = new Int16Array(65_536);
-  cache.fill(-1);
-  let currentError = new Float32Array((width + 2) * 3);
-  let nextError = new Float32Array((width + 2) * 3);
-  const clampByte = (value: number) => Math.max(0, Math.min(255, Math.round(value)));
-  const paletteIndex = (red: number, green: number, blue: number, alpha: number) => {
-    const key = (red >> 4) | ((green >> 4) << 4) | ((blue >> 4) << 8) | ((alpha >> 4) << 12);
-    const cached = cache[key];
-    if (cached >= 0) return cached;
-    let best = 0;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    for (let index = 0; index < palette.length; index += 1) {
-      const color = palette[index];
-      const redError = red - color[0];
-      const greenError = green - color[1];
-      const blueError = blue - color[2];
-      const alphaError = alpha - (color[3] ?? 255);
-      const distance = redError ** 2 + greenError ** 2 + blueError ** 2 + alphaError ** 2 * 2;
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = index;
-      }
-    }
-    cache[key] = best;
-    return best;
-  };
-
+  const dithered = new Uint8ClampedArray(rgba);
+  const strength = Math.max(2, Math.min(12, Math.ceil((100 - Math.max(1, Math.min(99, quality))) / 6)));
   for (let y = 0; y < height; y += 1) {
-    const direction = y % 2 === 0 ? 1 : -1;
-    const start = direction === 1 ? 0 : width - 1;
-    const end = direction === 1 ? width : -1;
-    for (let x = start; x !== end; x += direction) {
+    for (let x = 0; x < width; x += 1) {
       const pixelOffset = (y * width + x) * 4;
-      const errorOffset = (x + 1) * 3;
-      const red = clampByte(rgba[pixelOffset] + currentError[errorOffset]);
-      const green = clampByte(rgba[pixelOffset + 1] + currentError[errorOffset + 1]);
-      const blue = clampByte(rgba[pixelOffset + 2] + currentError[errorOffset + 2]);
-      const alpha = rgba[pixelOffset + 3];
-      const index = paletteIndex(red, green, blue, alpha);
-      indices[y * width + x] = index;
-      if (alpha === 0) continue;
-      const color = palette[index];
-      const errors = [red - color[0], green - color[1], blue - color[2]];
-      const rightOffset = (x + 1 + direction) * 3;
-      const downLeftOffset = (x + 1 - direction) * 3;
-      const downOffset = (x + 1) * 3;
-      const downRightOffset = (x + 1 + direction) * 3;
       for (let channel = 0; channel < 3; channel += 1) {
-        currentError[rightOffset + channel] += errors[channel] * 7 / 16;
-        nextError[downLeftOffset + channel] += errors[channel] * 3 / 16;
-        nextError[downOffset + channel] += errors[channel] * 5 / 16;
-        nextError[downRightOffset + channel] += errors[channel] * 1 / 16;
+        let hash = (Math.imul(x & 63, 374761393) + Math.imul(y & 63, 668265263) + Math.imul(channel, -2048144777)) >>> 0;
+        hash = Math.imul(hash ^ (hash >>> 13), 1274126177) >>> 0;
+        hash ^= hash >>> 16;
+        const triangular = (hash & 255) - ((hash >>> 8) & 255);
+        dithered[pixelOffset + channel] = Math.max(0, Math.min(255, rgba[pixelOffset + channel] + triangular * strength / 255));
       }
     }
-    currentError = nextError;
-    nextError = new Float32Array((width + 2) * 3);
   }
-  return indices;
+  return applyPalette(dithered, palette, "rgba4444");
 }
 
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -1195,7 +1154,7 @@ async function encodeIndexedPng(context: CanvasRenderingContext2D, width: number
   }
   const rgba = context.getImageData(0, 0, width, height).data;
   const palette = quantize(rgba, pngPaletteSize(quality), { format: "rgba4444", oneBitAlpha: false });
-  const indexed = ditherToPalette(rgba, palette, width, height);
+  const indexed = stochasticDitherToPalette(rgba, palette, width, height, quality);
   const scanlines = new Uint8Array((width + 1) * height);
   for (let row = 0; row < height; row += 1) scanlines.set(indexed.subarray(row * width, (row + 1) * width), row * (width + 1) + 1);
 
@@ -2267,9 +2226,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     if (!nativeBridge || !desktopPreferencesReadyRef.current) return;
     void nativeBridge.updateDesktopPreferences({
       minimizeToTray: desktopPreferences.minimizeToTray,
+      showInTaskbarDock: desktopPreferences.showInTaskbarDock,
       clipboardWatcherEnabled: desktopPreferences.clipboardWatcherEnabled,
     });
-  }, [desktopPreferences.clipboardWatcherEnabled, desktopPreferences.minimizeToTray, nativeBridge]);
+  }, [desktopPreferences.clipboardWatcherEnabled, desktopPreferences.minimizeToTray, desktopPreferences.showInTaskbarDock, nativeBridge]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -3744,10 +3704,9 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
 
             {(preferenceSection === "general" || preferenceSection === "dropzone") && <section className="preference-card">
               <div className="preference-card-heading"><span>{preferenceSection === "dropzone" ? t("拖放区域", "Drop Zone") : t("系统托盘", "System tray")}</span><small>{t("后台常驻行为", "Background behaviour")}</small></div>
-              <div className="preference-row"><div><strong>{t("仅在系统托盘 / 菜单栏显示", "Show only in the system tray / menu bar")}</strong><small>{t("主窗口关闭后仍在后台运行", "Keep running after the main window is closed")}</small></div><span className="always-on-badge">{t("始终开启", "Always on")}</span></div>
+              <label className="preference-row clickable"><div><strong>{t("在任务栏 / Dock 显示", "Show in taskbar / Dock")}</strong><small>{desktopPreferences.showInTaskbarDock ? t("主窗口失去焦点后继续保留，可从任务栏或 Dock 切换回来", "Keep the main window available after it loses focus") : t("不占用任务栏或 Dock；失去焦点后隐藏到托盘 / 菜单栏", "Hide to the tray or menu bar after the window loses focus")}</small></div><button className={`switch ${desktopPreferences.showInTaskbarDock ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.showInTaskbarDock} onClick={() => setDesktopPreferences((current) => ({ ...current, showInTaskbarDock: !current.showInTaskbarDock }))}><i /></button></label>
               <label className="preference-row clickable"><div><strong>{t("开机自启动", "Launch at login")}</strong><small>{t("登录系统后静默进入托盘", "Start quietly in the tray after login")}</small></div><button className={`switch ${desktopPreferences.launchAtStartup ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.launchAtStartup} onClick={() => void toggleAutostart()}><i /></button></label>
               <div className="preference-row"><div><strong>{t("自动检查更新", "Automatic update checks")}</strong><small>{t("按设定频率检查 GitHub Releases", "Check GitHub Releases at the selected interval")}</small></div><select value={desktopPreferences.updateCheckFrequency} onChange={(event) => { const updateCheckFrequency = event.target.value as UpdateCheckFrequency; setDesktopPreferences((current) => ({ ...current, updateCheckFrequency, autoCheckUpdates: updateCheckFrequency !== "never" })); }}><option value="startup">{t("打开软件时", "When PicLite opens")}</option><option value="daily">{t("每天", "Daily")}</option><option value="weekly">{t("每周", "Weekly")}</option><option value="never">{t("不自动检查", "Never")}</option></select></div>
-              <label className="preference-row clickable"><div><strong>{t("最小化时留在托盘", "Keep in tray when minimised")}</strong><small>{t("不占用任务栏；从托盘恢复主窗口", "Stay out of the taskbar and restore from the tray")}</small></div><button className={`switch ${desktopPreferences.minimizeToTray ? "on" : ""}`} type="button" role="switch" aria-checked={desktopPreferences.minimizeToTray} onClick={() => setDesktopPreferences((current) => ({ ...current, minimizeToTray: !current.minimizeToTray }))}><i /></button></label>
               <div className="preference-row"><div><strong>{t("全局拖放区与悬浮结果", "Global drop zone and floating results")}</strong><small>{t("把图片拖到右下角热区，优化结果会继续显示可调操作", "Drop images on the bottom-right target and continue editing the result")}</small></div><button className="preference-action" type="button" onClick={() => void nativeBridge?.showDropzoneWindow()}>{t("立即打开", "Open now")}</button></div>
             </section>}
 
