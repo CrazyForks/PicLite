@@ -44,12 +44,12 @@ macOS 构建目前为 ad-hoc 签名，首次运行可能需要在“系统设置
 ```bash
 docker run -d \
   --name piclite \
-  -p 3000:3000 \
+  -p 3456:3456 \
   --restart unless-stopped \
   ghcr.io/amiaoapp/piclite:latest
 ```
 
-浏览器打开 `http://服务器IP:3000`。GitHub Pages 与 Docker Web 端都保留压缩工作台；受浏览器权限限制，不提供系统托盘、全局快捷键和持续文件夹监测。
+浏览器打开 `http://服务器IP:3456`。GitHub Pages 与 Docker Web 端都保留压缩工作台；受浏览器权限限制，不提供系统托盘、全局快捷键和持续文件夹监测。
 
 ## 本地开发
 

@@ -38,12 +38,12 @@ For a LAN deployment, custom domain, or your own service endpoint, run the Docke
 ```bash
 docker run -d \
   --name piclite \
-  -p 3000:3000 \
+  -p 3456:3456 \
   --restart unless-stopped \
   ghcr.io/amiaoapp/piclite:latest
 ```
 
-Open `http://SERVER_IP:3000`. Both the GitHub Pages and Docker web builds include the compression workspace; browser security restrictions prevent system-tray, global-shortcut, and persistent folder-monitoring features.
+Open `http://SERVER_IP:3456`. Both the GitHub Pages and Docker web builds include the compression workspace; browser security restrictions prevent system-tray, global-shortcut, and persistent folder-monitoring features.
 
 ## Development
 

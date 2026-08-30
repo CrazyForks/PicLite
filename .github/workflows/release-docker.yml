@@ -18,7 +18,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: docker-${{ github.ref }}
+  group: docker-publish
   cancel-in-progress: true
 
 jobs:
