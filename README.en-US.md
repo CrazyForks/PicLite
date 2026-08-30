@@ -19,6 +19,10 @@ A local-first image optimiser for content creators and developers, available on 
 - Load local HTML/JavaScript or URL workbench plugins; the library and folder watcher can also be toggled independently
 - Tauri 2 + Rust desktop apps; images stay on your device by default
 
+### Floating-window workflow
+
+The desktop app can open its floating window from a global shortcut, copied image, dropped file, or the local image picker, without opening the full workbench first. After the smart first pass, hover over the preview to copy, preview, reveal, undo, downscale again, switch formats, add a watermark, or upload. Floating results are draggable and resizable, support cycling stacks and expanded lists, result limits and automatic dismissal, and let you choose up to six action buttons in Settings.
+
 ## Download
 
 Get the latest installers from [GitHub Releases](https://github.com/amiaoapp/PicLite/releases):
@@ -33,7 +37,41 @@ The current macOS builds use ad-hoc signing. On first launch, macOS may require 
 
 The [GitHub Pages demo](https://amiaoapp.github.io/PicLite/) is a static, install-free build. Images are processed locally in your browser and are not uploaded to a server. Use the desktop app for the system tray, global shortcuts, persistent clipboard monitoring, and watched folders.
 
-For a LAN deployment, custom domain, or your own service endpoint, run the Docker build:
+For a LAN deployment, custom domain, or your own service endpoint, use the GHCR image. The default service port is `3456`.
+
+### Docker Compose (recommended)
+
+```bash
+git clone https://github.com/amiaoapp/PicLite.git
+cd PicLite
+docker compose pull
+docker compose up -d
+```
+
+Upgrade, inspect status, and follow logs:
+
+```bash
+docker compose pull
+docker compose up -d --remove-orphans
+docker compose ps
+docker compose logs -f piclite
+```
+
+Create a `.env` file in the project directory to change the bind address, host port, or image tag:
+
+```dotenv
+PICLITE_BIND=0.0.0.0
+PICLITE_PORT=3456
+PICLITE_TAG=1.2.0
+```
+
+To build from the current source tree instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+### Docker Run
 
 ```bash
 docker run -d \
@@ -44,6 +82,14 @@ docker run -d \
 ```
 
 Open `http://SERVER_IP:3456`. Both the GitHub Pages and Docker web builds include the compression workspace; browser security restrictions prevent system-tray, global-shortcut, and persistent folder-monitoring features.
+
+For a reverse proxy, forward your domain to `http://127.0.0.1:3456`. Caddy example:
+
+```caddyfile
+piclite.example.com {
+  reverse_proxy 127.0.0.1:3456
+}
+```
 
 ## Development
 

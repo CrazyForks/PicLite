@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   updateCheckFrequency: "startup",
   launchAtLogin: false,
   showMenubarIcon: true,
+  showInTaskbarDock: false,
   clipboardOptimiser: true,
   clipboardImageData: true,
   clipboardImageFiles: true,
@@ -91,7 +92,7 @@ function validUpdateCheckFrequency(value: unknown): value is UpdateCheckFrequenc
 export function loadSettings(): DesktopSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Partial<DesktopSettings>;
-    const mainPreferences = JSON.parse(localStorage.getItem(MAIN_DESKTOP_PREFERENCES_KEY) || "{}") as Partial<{ language: Language; theme: Appearance; colorTheme: ColorTheme; autoCheckUpdates: boolean; updateCheckFrequency: UpdateCheckFrequency; shortcutsEnabled: boolean; shortcutDock: string; shortcutPaste: string; shortcutShow: string; shortcutGallery: string; shortcutUpload: string; renameTemplate: string }>;
+    const mainPreferences = JSON.parse(localStorage.getItem(MAIN_DESKTOP_PREFERENCES_KEY) || "{}") as Partial<{ language: Language; theme: Appearance; colorTheme: ColorTheme; autoCheckUpdates: boolean; updateCheckFrequency: UpdateCheckFrequency; showInTaskbarDock: boolean; shortcutsEnabled: boolean; shortcutDock: string; shortcutPaste: string; shortcutShow: string; shortcutGallery: string; shortcutUpload: string; renameTemplate: string }>;
     const preset = { ...DEFAULT_SETTINGS.preset, ...(parsed.preset || {}) } as OptimisationPreset;
     if (preset.mode !== "manual") preset.mode = "auto";
     if (!validFormat(preset.format)) preset.format = "keep";
@@ -100,6 +101,7 @@ export function loadSettings(): DesktopSettings {
       ...parsed,
       appearance: validAppearance(mainPreferences.theme) ? mainPreferences.theme : validAppearance(parsed.appearance) ? parsed.appearance : DEFAULT_SETTINGS.appearance,
       colorTheme: validColorTheme(mainPreferences.colorTheme) ? mainPreferences.colorTheme : validColorTheme(parsed.colorTheme) ? parsed.colorTheme : DEFAULT_SETTINGS.colorTheme,
+      showInTaskbarDock: typeof mainPreferences.showInTaskbarDock === "boolean" ? mainPreferences.showInTaskbarDock : parsed.showInTaskbarDock ?? DEFAULT_SETTINGS.showInTaskbarDock,
       updateCheckFrequency: validUpdateCheckFrequency(mainPreferences.updateCheckFrequency)
         ? mainPreferences.updateCheckFrequency
         : validUpdateCheckFrequency(parsed.updateCheckFrequency)
@@ -135,6 +137,7 @@ export function saveSettings(settings: DesktopSettings) {
       colorTheme: settings.colorTheme,
       autoCheckUpdates: settings.updateCheckFrequency !== "never",
       updateCheckFrequency: settings.updateCheckFrequency,
+      showInTaskbarDock: settings.showInTaskbarDock,
       shortcutsEnabled: settings.shortcutsEnabled,
       shortcutDock: settings.shortcutToggleDropzone,
       shortcutPaste: settings.shortcutOptimiseClipboard,

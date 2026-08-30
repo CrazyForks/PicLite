@@ -20,6 +20,10 @@ PicLite 图轻：开源跨平台本地图片动图压缩工具，智能择优压
 - 可加载本地 HTML/JavaScript 或 URL 工作台插件；图库与文件夹监测也可独立启停
 - Tauri 2 + Rust 桌面端；图片默认只在本机处理
 
+### 悬浮窗工作流
+
+桌面端可通过全局快捷键、复制图片、拖放文件或“选择本地图片”唤出悬浮窗，无需先打开完整工作台。图片完成自动择优后，把鼠标移到预览图上即可复制、预览、定位文件、撤销、继续缩小、切换格式、加水印或上传图床。悬浮结果支持拖动和缩放、堆叠循环与展开布局、数量上限和自动隐藏，并可在设置中自由选择最多 6 个操作按钮。
+
 ## 截图
 
 <img width="2924" height="1602" alt="image" src="https://github.com/user-attachments/assets/2379e6d7-e1ef-444d-890f-e2ea7942abe9" />
@@ -39,7 +43,41 @@ macOS 构建目前为 ad-hoc 签名，首次运行可能需要在“系统设置
 
 [GitHub Pages 在线 Demo](https://amiaoapp.github.io/PicLite/) 是无需安装的静态版本，图片直接在浏览器本地处理，不会上传到服务器。系统托盘、全局快捷键、剪贴板持续监听和文件夹监测等系统级功能请使用桌面端。
 
-需要局域网访问、固定域名或自己的服务入口时，可部署 Docker 版本：
+需要局域网访问、固定域名或自己的服务入口时，可使用 GHCR 镜像部署 Docker 版本。默认服务端口为 `3456`。
+
+### Docker Compose（推荐）
+
+```bash
+git clone https://github.com/amiaoapp/PicLite.git
+cd PicLite
+docker compose pull
+docker compose up -d
+```
+
+升级、查看状态和日志：
+
+```bash
+docker compose pull
+docker compose up -d --remove-orphans
+docker compose ps
+docker compose logs -f piclite
+```
+
+可在项目目录创建 `.env` 修改监听地址、宿主机端口或版本：
+
+```dotenv
+PICLITE_BIND=0.0.0.0
+PICLITE_PORT=3456
+PICLITE_TAG=1.2.0
+```
+
+如需从当前源码本地构建：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+### Docker Run
 
 ```bash
 docker run -d \
@@ -50,6 +88,14 @@ docker run -d \
 ```
 
 浏览器打开 `http://服务器IP:3456`。GitHub Pages 与 Docker Web 端都保留压缩工作台；受浏览器权限限制，不提供系统托盘、全局快捷键和持续文件夹监测。
+
+反向代理时将域名转发至 `http://127.0.0.1:3456`。例如 Caddy：
+
+```caddyfile
+piclite.example.com {
+  reverse_proxy 127.0.0.1:3456
+}
+```
 
 ## 本地开发
 

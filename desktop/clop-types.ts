@@ -53,6 +53,7 @@ export type DesktopSettings = {
   updateCheckFrequency: UpdateCheckFrequency;
   launchAtLogin: boolean;
   showMenubarIcon: boolean;
+  showInTaskbarDock: boolean;
   clipboardOptimiser: boolean;
   clipboardImageData: boolean;
   clipboardImageFiles: boolean;

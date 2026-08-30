@@ -658,7 +658,14 @@ function Preferences({ api }: { api: PicLiteBridge }) {
   const patch = <K extends keyof DesktopSettings>(key: K, value: DesktopSettings[K]) => setSettings((current) => ({ ...current, [key]: value }));
   const patchPreset = (value: Partial<DesktopSettings["preset"]>) => setSettings((current) => ({ ...current, preset: { ...current.preset, ...value } }));
   useEffect(() => { void isAutostartEnabled().then((value) => patch("launchAtLogin", value)).catch(() => undefined); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { void api.setWindowTheme(settings.appearance); void api.updateDesktopPreferences({ minimizeToTray: true, clipboardWatcherEnabled: settings.clipboardOptimiser }); }, [api, settings.appearance, settings.clipboardOptimiser]);
+  useEffect(() => {
+    void api.setWindowTheme(settings.appearance);
+    void api.updateDesktopPreferences({
+      minimizeToTray: true,
+      showInTaskbarDock: settings.showInTaskbarDock,
+      clipboardWatcherEnabled: settings.clipboardOptimiser,
+    });
+  }, [api, settings.appearance, settings.clipboardOptimiser, settings.showInTaskbarDock]);
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const applyAppearance = () => {
@@ -875,6 +882,7 @@ function Preferences({ api }: { api: PicLiteBridge }) {
           </div></SettingsRow>
           <SettingsRow title={<T language={language} zh="登录时启动" en="Launch at login" />}><Switch label="launch" checked={settings.launchAtLogin} onChange={(value) => void toggleAutostart(value)} /></SettingsRow>
           <SettingsRow title={<T language={language} zh="暂停自动优化" en="Pause automatic optimisations" />} note={<T language={language} zh="保留菜单栏功能，但暂停监测和自动处理" en="Keep PicLite running without automatic processing" />}><Switch label="pause" checked={settings.pauseAutomaticOptimisations} onChange={(value) => patch("pauseAutomaticOptimisations", value)} /></SettingsRow>
+          <SettingsRow title={<T language={language} zh="在任务栏 / Dock 显示" en="Show in taskbar / Dock" />} note={settings.showInTaskbarDock ? <T language={language} zh="主窗口失焦后保持显示，可从任务栏或 Dock 随时切换回来" en="Keep the main window available from the taskbar or Dock when it loses focus" /> : <T language={language} zh="不占用任务栏或 Dock，主窗口失焦后隐藏到托盘或菜单栏" en="Hide the main window to the tray or menu bar when it loses focus" />}><Switch label="taskbar dock" checked={settings.showInTaskbarDock} onChange={(value) => patch("showInTaskbarDock", value)} /></SettingsRow>
         </SettingsCard>
         <SettingsCard title={<T language={language} zh="优化" en="Optimisation" />}>
           <SettingsRow title={<T language={language} zh="移除 EXIF 元数据" en="Strip EXIF metadata" />} note={<T language={language} zh="移除位置、相机、日期等可识别信息" en="Remove location, camera, date and other identifiable metadata" />}><Switch label="metadata" checked={settings.stripMetadata} onChange={(value) => { patch("stripMetadata", value); patchPreset({ stripMetadata: value }); }} /></SettingsRow>
