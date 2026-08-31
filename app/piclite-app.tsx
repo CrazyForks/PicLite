@@ -64,6 +64,16 @@ type DirectoryHandleLike = {
 };
 
 type NativeImage = { name: string; type: string; path: string; data: Uint8Array };
+type NativeImageEntry = {
+  name: string;
+  type: string;
+  path: string;
+  originalBytes: number;
+  width: number;
+  height: number;
+  thumbnailType: string;
+  thumbnailData: Uint8Array;
+};
 type NativeExportItem = { sourcePath?: string; outputName: string; data: Uint8Array };
 type ImageSourceInput = { file: File; fileHandle?: FileHandleLike; sourcePath?: string };
 type UploadProvider = "webdav" | "s3" | "r2" | "oss" | "ftp" | "sftp";
@@ -133,7 +143,9 @@ type NativeBridge = {
   copyImagePath: (path: string) => Promise<void>;
   copyText: (text: string) => Promise<void>;
   selectImages: () => Promise<NativeImage[]>;
+  selectImageEntries: () => Promise<NativeImageEntry[]>;
   readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
+  readImageEntriesFromPaths: (paths: string[]) => Promise<NativeImageEntry[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
   suggestScreenshotFolder: () => Promise<string | null>;
   exportImages: (payload: { mode: Exclude<ExportMode, "download">; suffix: string; fixedFolder?: string; items: NativeExportItem[] }) => Promise<{ ok: boolean; paths?: string[]; error?: string }>;
@@ -214,6 +226,7 @@ type ImageItem = {
   strategy?: string;
   fileHandle?: FileHandleLike;
   sourcePath?: string;
+  sourceIsThumbnail?: boolean;
 };
 
 type WatermarkSettings = {
@@ -810,7 +823,7 @@ function cleanSuffix(value: string) {
 }
 
 async function getDimensions(file: File) {
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   const size = { width: bitmap.width, height: bitmap.height };
   bitmap.close();
   return size;
@@ -1213,6 +1226,13 @@ function strategyLabel(settings: CompressionSettings) {
 }
 
 async function compressImage(item: ImageItem, settings: CompressionSettings, nativeBridge?: NativeBridge): Promise<CompressionResult> {
+  if (item.sourceIsThumbnail) {
+    if (!nativeBridge || !item.sourcePath) throw new Error("无法读取原始图片");
+    const [source] = await nativeBridge.readImagesFromPaths([item.sourcePath]);
+    if (!source) throw new Error("原始图片已移动或无法读取");
+    const file = new File([new Uint8Array(source.data)], source.name || item.name, { type: source.type || item.type });
+    return compressImage({ ...item, file, sourceIsThumbnail: false }, settings, nativeBridge);
+  }
   if (item.type === "image/gif" && nativeBridge && (settings.format === "keep" || settings.format === "image/webp")) {
     const result = await nativeBridge.compressAnimationData(
       new Uint8Array(await item.file.arrayBuffer()),
@@ -2175,18 +2195,56 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       showToast(t("没有找到可处理的图片", "No supported images were found"));
       return;
     }
-    const nextItems = await Promise.all(imageSources.map(async ({ file, fileHandle, sourcePath }): Promise<ImageItem | null> => {
-      try {
-        const dimensions = await getDimensions(file);
-        return { id: uid(), file, name: file.name || `clipboard-${Date.now()}.png`, type: file.type || mimeFromName(file.name), width: dimensions.width, height: dimensions.height, originalBytes: file.size, sourceUrl: URL.createObjectURL(file), status: "ready", fileHandle, sourcePath };
-      } catch {
-        return null;
+    const nextItems: Array<ImageItem | null> = new Array(imageSources.length).fill(null);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(3, imageSources.length) }, async () => {
+      while (cursor < imageSources.length) {
+        const index = cursor++;
+        const { file, fileHandle, sourcePath } = imageSources[index];
+        try {
+          const dimensions = await getDimensions(file);
+          nextItems[index] = { id: uid(), file, name: file.name || `clipboard-${Date.now()}.png`, type: file.type || mimeFromName(file.name), width: dimensions.width, height: dimensions.height, originalBytes: file.size, sourceUrl: URL.createObjectURL(file), status: "ready", fileHandle, sourcePath };
+        } catch {
+          nextItems[index] = null;
+        }
       }
-    }));
+    });
+    await Promise.all(workers);
     const validItems = nextItems.filter((item): item is ImageItem => Boolean(item));
     setItems((current) => [...current, ...validItems]);
     if (!selectedId && validItems[0]) setSelectedId(validItems[0].id);
     showToast(t(`已加入 ${validItems.length} 张图片`, `Added ${validItems.length} images`));
+  }, [selectedId, showToast, t]);
+
+  const addNativeEntries = useCallback((entries: NativeImageEntry[]) => {
+    const validEntries = entries.filter((entry) => entry.type.startsWith("image/") || /\.(?:jpe?g|png|webp|avif|gif)$/i.test(entry.name));
+    if (!validEntries.length) {
+      showToast(t("没有找到可处理的图片", "No supported images were found"));
+      return;
+    }
+    const nextItems = validEntries.map((entry): ImageItem => {
+      const previewBytes = entry.thumbnailData.length
+        ? new Uint8Array(entry.thumbnailData)
+        : new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg" width="360" height="240"><rect width="100%" height="100%" fill="#e7ece8"/><path d="M125 155l38-44 29 32 20-22 34 34z" fill="#91a99b"/><circle cx="220" cy="84" r="14" fill="#c8ff5a"/></svg>`);
+      const previewType = entry.thumbnailData.length ? entry.thumbnailType || "image/webp" : "image/svg+xml";
+      const previewFile = new File([previewBytes], entry.name, { type: previewType });
+      return {
+        id: uid(),
+        file: previewFile,
+        name: entry.name,
+        type: entry.type || mimeFromName(entry.name),
+        width: entry.width,
+        height: entry.height,
+        originalBytes: entry.originalBytes,
+        sourceUrl: URL.createObjectURL(previewFile),
+        sourcePath: entry.path,
+        sourceIsThumbnail: true,
+        status: "ready",
+      };
+    });
+    setItems((current) => [...current, ...nextItems]);
+    if (!selectedId && nextItems[0]) setSelectedId(nextItems[0].id);
+    showToast(t(`已加入 ${nextItems.length} 张图片`, `Added ${nextItems.length} images`));
   }, [selectedId, showToast, t]);
 
   const addFiles = useCallback((files: File[]) => addSources(files.map((file) => ({ file }))), [addSources]);
@@ -2317,12 +2375,9 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       }
       setDragging(event.type === "over");
       if (event.type !== "drop" || !event.paths?.length) return;
-      void nativeBridge.readImagesFromPaths(event.paths).then((nativeImages) => addSources(nativeImages.map((image) => ({
-        file: new File([new Uint8Array(image.data)], image.name, { type: image.type || mimeFromName(image.name) }),
-        sourcePath: image.path,
-      }))));
+      void nativeBridge.readImageEntriesFromPaths(event.paths).then(addNativeEntries);
     });
-  }, [addSources, nativeBridge, showToast, t]);
+  }, [addNativeEntries, nativeBridge, showToast, t]);
 
   useEffect(() => nativeBridge?.onTrayAction(setPendingTrayAction), [nativeBridge]);
 
@@ -2833,11 +2888,8 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const importImages = useCallback(async () => {
     try {
       if (nativeBridge) {
-        const nativeImages = await nativeBridge.selectImages();
-        await addSources(nativeImages.map((image) => ({
-          file: new File([new Uint8Array(image.data)], image.name, { type: image.type || mimeFromName(image.name) }),
-          sourcePath: image.path,
-        })));
+        const nativeImages = await nativeBridge.selectImageEntries();
+        addNativeEntries(nativeImages);
         return;
       }
       if (window.showOpenFilePicker) {
@@ -2854,7 +2906,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       if (error instanceof DOMException && error.name === "AbortError") return;
       fileInputRef.current?.click();
     }
-  }, [addSources, nativeBridge]);
+  }, [addNativeEntries, addSources, nativeBridge]);
 
   const loadSystemFonts = useCallback(async (silent = false) => {
     try {

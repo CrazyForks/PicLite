@@ -5,6 +5,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import packageManifest from "../package.json";
 
 type EncodedImage = { name: string; type: string; path: string; data: string };
+type EncodedImageEntry = {
+  name: string;
+  type: string;
+  path: string;
+  originalBytes: number;
+  width: number;
+  height: number;
+  thumbnailType: string;
+  thumbnailData: string;
+};
 
 function decodeBase64(value: string) {
   const binary = window.atob(value);
@@ -47,9 +57,23 @@ if ("__TAURI_INTERNALS__" in window) {
       const images = await invoke<EncodedImage[]>("select_images");
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
     },
+    selectImageEntries: async () => {
+      const images = await invoke<EncodedImageEntry[]>("select_image_entries");
+      return images.map((image) => ({
+        ...image,
+        thumbnailData: image.thumbnailData ? decodeBase64(image.thumbnailData) : new Uint8Array(),
+      }));
+    },
     readImagesFromPaths: async (paths) => {
       const images = await invoke<EncodedImage[]>("read_images_from_paths", { paths });
       return images.map((image) => ({ ...image, data: decodeBase64(image.data) }));
+    },
+    readImageEntriesFromPaths: async (paths) => {
+      const images = await invoke<EncodedImageEntry[]>("read_image_entries_from_paths", { paths });
+      return images.map((image) => ({
+        ...image,
+        thumbnailData: image.thumbnailData ? decodeBase64(image.thumbnailData) : new Uint8Array(),
+      }));
     },
     selectFolder: (kind) => invoke<string | null>("select_folder", { kind }),
     suggestScreenshotFolder: () => invoke<string | null>("suggest_screenshot_folder"),

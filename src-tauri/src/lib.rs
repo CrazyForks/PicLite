@@ -113,10 +113,7 @@ fn user_facing_path(path: &Path) -> String {
     if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
-    value
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&value)
-        .to_string()
+    value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
 }
 
 /// UI preferences live in the native application config directory instead of
@@ -277,6 +274,20 @@ struct NativeImage {
     mime_type: String,
     path: String,
     data: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeImageEntry {
+    name: String,
+    #[serde(rename = "type")]
+    mime_type: String,
+    path: String,
+    original_bytes: u64,
+    width: u32,
+    height: u32,
+    thumbnail_type: String,
+    thumbnail_data: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -878,6 +889,21 @@ struct OptimizedImage {
     extension: String,
 }
 
+/// Decode static images with their embedded EXIF orientation applied exactly
+/// once. WebKit applies that orientation to the source preview automatically;
+/// the native encoder previously ignored it, which made portrait JPEG results
+/// appear rotated/sliced when overlaid with their originals.
+fn decode_static_oriented(data: &[u8]) -> Result<DynamicImage, String> {
+    let reader = image::ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    let mut decoder = reader.into_decoder().map_err(|error| error.to_string())?;
+    let orientation = decoder.orientation().map_err(|error| error.to_string())?;
+    let mut decoded = DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
+    decoded.apply_orientation(orientation);
+    Ok(decoded)
+}
+
 fn optimize_image_data(
     original: Vec<u8>,
     source_extension: String,
@@ -887,7 +913,7 @@ fn optimize_image_data(
         return optimize_gif_animation(&original, settings);
     }
 
-    let decoded = image::load_from_memory(&original).map_err(|error| error.to_string())?;
+    let decoded = decode_static_oriented(&original)?;
     let (width, height) = decoded.dimensions();
     if matches!(settings.mode.as_str(), "balanced" | "small") {
         // The desktop auto modes mirror the workbench: encode a short ladder
@@ -1094,6 +1120,75 @@ fn native_images_from_paths(
     Ok(images)
 }
 
+fn native_image_entries_from_paths(
+    paths: Vec<PathBuf>,
+    state: &DesktopState,
+) -> Result<Vec<NativeImageEntry>, String> {
+    let mut entries = Vec::new();
+    let mut authorized = state
+        .source_files
+        .lock()
+        .map_err(|_| "文件授权状态不可用".to_string())?;
+
+    for (index, requested) in paths.into_iter().enumerate() {
+        if !is_image(&requested) || !requested.is_file() {
+            continue;
+        }
+        let canonical = fs::canonicalize(&requested).unwrap_or(requested);
+        let metadata = fs::metadata(&canonical).map_err(|error| error.to_string())?;
+        let reader = image::ImageReader::open(&canonical)
+            .map_err(|error| error.to_string())?
+            .with_guessed_format()
+            .map_err(|error| error.to_string())?;
+        let mut decoder = reader.into_decoder().map_err(|error| error.to_string())?;
+        let orientation = decoder.orientation().map_err(|error| error.to_string())?;
+        let (raw_width, raw_height) = decoder.dimensions();
+        let swaps_axes = matches!(
+            orientation,
+            image::metadata::Orientation::Rotate90
+                | image::metadata::Orientation::Rotate270
+                | image::metadata::Orientation::Rotate90FlipH
+                | image::metadata::Orientation::Rotate270FlipH
+        );
+        let (width, height) = if swaps_axes {
+            (raw_height, raw_width)
+        } else {
+            (raw_width, raw_height)
+        };
+
+        // Only decode thumbnails that can be visible in the initial queue.
+        // Hundreds of camera originals therefore remain path-backed and use
+        // only a few KiB each until the worker processes them.
+        let (thumbnail_type, thumbnail_data) = if index < 24 {
+            let original = fs::read(&canonical).map_err(|error| error.to_string())?;
+            let decoded = decode_static_oriented(&original)?;
+            let edge = if index == 0 { 1400 } else { 420 };
+            let thumbnail = decoded.thumbnail(edge, edge);
+            let bytes = encode_static(thumbnail, "webp", 74)?;
+            ("image/webp".to_string(), BASE64.encode(bytes))
+        } else {
+            (String::new(), String::new())
+        };
+
+        authorized.insert(canonical.clone());
+        entries.push(NativeImageEntry {
+            name: canonical
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image")
+                .to_string(),
+            mime_type: mime_for(&canonical).to_string(),
+            path: canonical.to_string_lossy().to_string(),
+            original_bytes: metadata.len(),
+            width,
+            height,
+            thumbnail_type,
+            thumbnail_data,
+        });
+    }
+    Ok(entries)
+}
+
 fn show_window(app: &AppHandle, label: &str) {
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.unminimize();
@@ -1259,6 +1354,14 @@ async fn read_images_from_paths(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<NativeImage>, String> {
     native_images_from_paths(paths, &state)
+}
+
+#[tauri::command]
+async fn read_image_entries_from_paths(
+    paths: Vec<String>,
+    state: State<'_, DesktopState>,
+) -> Result<Vec<NativeImageEntry>, String> {
+    native_image_entries_from_paths(paths.into_iter().map(PathBuf::from).collect(), &state)
 }
 
 #[tauri::command]
@@ -1939,6 +2042,26 @@ async fn select_images(
         });
     }
     Ok(images)
+}
+
+#[tauri::command]
+async fn select_image_entries(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Vec<NativeImageEntry>, String> {
+    let Some(files) = app
+        .dialog()
+        .file()
+        .add_filter("图片", IMAGE_EXTENSIONS)
+        .blocking_pick_files()
+    else {
+        return Ok(Vec::new());
+    };
+    let paths = files
+        .into_iter()
+        .filter_map(|selected| selected.into_path().ok())
+        .collect();
+    native_image_entries_from_paths(paths, &state)
 }
 
 fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
@@ -4134,7 +4257,9 @@ pub fn run() {
             select_folder,
             suggest_screenshot_folder,
             select_images,
+            select_image_entries,
             read_images_from_paths,
+            read_image_entries_from_paths,
             read_clipboard_image,
             read_clipboard_paths,
             copy_image_data,
@@ -4196,6 +4321,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_static_decode_applies_exif_orientation_once() {
+        let pixels = image::RgbImage::from_fn(2, 3, |x, y| {
+            image::Rgb([(x * 80) as u8, (y * 70) as u8, 120])
+        });
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 92)
+            .encode(&pixels, 2, 3, image::ExtendedColorType::Rgb8)
+            .expect("encode JPEG fixture");
+
+        // EXIF orientation 6 means rotate the stored 2×3 pixels 90° clockwise.
+        let exif_payload = [
+            b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0,
+            0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut oriented = Vec::with_capacity(jpeg.len() + exif_payload.len() + 4);
+        oriented.extend_from_slice(&jpeg[..2]);
+        oriented.extend_from_slice(&[0xff, 0xe1, 0, 34]);
+        oriented.extend_from_slice(&exif_payload);
+        oriented.extend_from_slice(&jpeg[2..]);
+
+        let decoded = decode_static_oriented(&oriented).expect("decode oriented JPEG");
+        assert_eq!(decoded.dimensions(), (3, 2));
+    }
 
     #[test]
     fn taskbar_dock_preference_is_backward_compatible() {
