@@ -20,6 +20,7 @@ test("renders the PicLite product shell", async () => {
   assert.match(html, /压缩工作台/);
   assert.match(html, /文件夹监测/);
   assert.match(html, /导入文件夹/);
+  assert.match(html, /目标文件大小/);
   assert.match(html, /本地处理，图片不上传/);
   assert.match(html, /画质 \/ 编码质量/);
   assert.match(html, /等比例尺寸/);

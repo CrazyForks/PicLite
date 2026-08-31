@@ -192,6 +192,7 @@ export type PicLiteBridge = {
   quitApplication: () => Promise<void>;
   onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
+  onImageImportProgress: (callback: (progress: { current: number; total: number }) => void) => () => void;
   onClipboardImage: (callback: (data: Uint8Array) => void) => () => void;
   onClipboardPaths: (callback: (paths: string[]) => void) => () => void;
   onWatcherEvent: (callback: (event: { type: string; message?: string; file?: string; output?: string; originalBytes?: number; outputBytes?: number; time: number }) => void) => () => void;

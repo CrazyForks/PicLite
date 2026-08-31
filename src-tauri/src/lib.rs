@@ -291,6 +291,13 @@ struct NativeImageEntry {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageImportProgress {
+    current: usize,
+    total: usize,
+}
+
+#[derive(Clone, Serialize)]
 struct ClipboardImage {
     data: String,
 }
@@ -1150,10 +1157,13 @@ fn native_images_from_paths(
     Ok(images)
 }
 
-fn native_image_entries_from_paths(
+fn native_image_entries_from_paths_with_progress(
     paths: Vec<PathBuf>,
     state: &DesktopState,
+    mut on_progress: impl FnMut(usize, usize),
 ) -> Result<Vec<NativeImageEntry>, String> {
+    let total = paths.len();
+    on_progress(0, total);
     let mut entries = Vec::new();
     let mut authorized = state
         .source_files
@@ -1162,6 +1172,7 @@ fn native_image_entries_from_paths(
 
     for (index, requested) in paths.into_iter().enumerate() {
         if !is_image(&requested) || !requested.is_file() {
+            on_progress(index + 1, total);
             continue;
         }
         let canonical = fs::canonicalize(&requested).unwrap_or(requested);
@@ -1215,8 +1226,16 @@ fn native_image_entries_from_paths(
             thumbnail_type,
             thumbnail_data,
         });
+        on_progress(index + 1, total);
     }
     Ok(entries)
+}
+
+fn emit_image_import_progress(app: &AppHandle, current: usize, total: usize) {
+    let _ = app.emit(
+        "image-import:progress",
+        ImageImportProgress { current, total },
+    );
 }
 
 fn show_window(app: &AppHandle, label: &str) {
@@ -1437,9 +1456,14 @@ async fn read_images_from_paths(
 #[tauri::command]
 async fn read_image_entries_from_paths(
     paths: Vec<String>,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<Vec<NativeImageEntry>, String> {
-    native_image_entries_from_paths(paths.into_iter().map(PathBuf::from).collect(), &state)
+    native_image_entries_from_paths_with_progress(
+        paths.into_iter().map(PathBuf::from).collect(),
+        &state,
+        |current, total| emit_image_import_progress(&app, current, total),
+    )
 }
 
 #[tauri::command]
@@ -2137,7 +2161,9 @@ async fn select_image_entries(
         .into_iter()
         .filter_map(|selected| selected.into_path().ok())
         .collect();
-    native_image_entries_from_paths(paths, &state)
+    native_image_entries_from_paths_with_progress(paths, &state, |current, total| {
+        emit_image_import_progress(&app, current, total)
+    })
 }
 
 #[tauri::command]
@@ -2150,7 +2176,11 @@ async fn select_image_folder_entries(
     };
     let folder = selected.into_path().map_err(|error| error.to_string())?;
     let folder = fs::canonicalize(&folder).unwrap_or(folder);
-    native_image_entries_from_paths(collect_image_paths(&folder), &state)
+    native_image_entries_from_paths_with_progress(
+        collect_image_paths(&folder),
+        &state,
+        |current, total| emit_image_import_progress(&app, current, total),
+    )
 }
 
 fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
@@ -4402,8 +4432,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building PicLite");
 
-    app.run(|app_handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
             let state = app_handle.state::<DesktopState>();
             if state.tray_available.load(Ordering::Relaxed)
                 && !state.quitting.load(Ordering::Relaxed)
@@ -4411,6 +4441,15 @@ pub fn run() {
                 api.prevent_exit();
             }
         }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => {
+            // The red traffic-light button hides the main window so clipboard
+            // and folder automation can keep running. A click on PicLite's
+            // Dock icon must therefore restore that existing window, just as
+            // reopening a normal document-style macOS app would.
+            show_window(app_handle, "main");
+        }
+        _ => {}
     });
 }
 
@@ -4951,6 +4990,37 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove test folders");
+    }
+
+    #[test]
+    fn image_entry_import_reports_total_and_incremental_progress() {
+        let root = std::env::temp_dir().join(format!(
+            "piclite-import-progress-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).expect("create progress test folder");
+        let first = root.join("first.png");
+        let second = root.join("second.png");
+        image::RgbImage::new(3, 2)
+            .save(&first)
+            .expect("save first image");
+        image::RgbImage::new(2, 3)
+            .save(&second)
+            .expect("save second image");
+
+        let state = DesktopState::default();
+        let mut progress = Vec::new();
+        let entries = native_image_entries_from_paths_with_progress(
+            vec![first, second],
+            &state,
+            |current, total| progress.push((current, total)),
+        )
+        .expect("read image entries");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(progress, vec![(0, 2), (1, 2), (2, 2)]);
+        fs::remove_dir_all(root).expect("remove progress test folder");
     }
 
     #[test]

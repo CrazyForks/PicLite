@@ -180,6 +180,18 @@ if ("__TAURI_INTERNALS__" in window) {
         unlisten?.();
       };
     },
+    onImageImportProgress: (callback) => {
+      let unlisten: (() => void) | undefined;
+      let disposed = false;
+      void listen<{ current: number; total: number }>("image-import:progress", (event) => callback(event.payload)).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+      return () => {
+        disposed = true;
+        unlisten?.();
+      };
+    },
     onClipboardImage: (callback) => {
       let unlisten: (() => void) | undefined;
       let disposed = false;
@@ -303,6 +315,7 @@ if ("__TAURI_INTERNALS__" in window) {
     openExternal: noop,
     onFileDrop: () => () => undefined,
     onTrayAction: () => () => undefined,
+    onImageImportProgress: () => () => undefined,
     onClipboardImage: () => () => undefined,
     onClipboardPaths: () => () => undefined,
     onCornerDrop: () => () => undefined,

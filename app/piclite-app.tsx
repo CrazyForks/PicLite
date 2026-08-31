@@ -187,6 +187,7 @@ type NativeBridge = {
   onFileDrop: (callback: (event: { type: "over" | "drop" | "leave" | "error"; paths?: string[]; error?: string }) => void) => () => void;
   onCornerDrop: (callback: () => void) => () => void;
   onTrayAction: (callback: (action: string) => void) => () => void;
+  onImageImportProgress: (callback: (progress: { current: number; total: number }) => void) => () => void;
   onWatcherEvent: (callback: (event: WatcherEvent) => void) => () => void;
   onClipboardImage: (callback: (data: Uint8Array) => void) => () => void;
   onClipboardPaths: (callback: (paths: string[]) => void) => () => void;
@@ -251,6 +252,7 @@ type CompressionSettings = {
   mode: CompressionMode;
   quality: number;
   scale: number;
+  targetSizeKb: number;
   format: OutputFormat;
   resize: boolean;
   width: number;
@@ -495,6 +497,7 @@ const DEFAULT_SETTINGS: CompressionSettings = {
   mode: "lossless",
   quality: 100,
   scale: 100,
+  targetSizeKb: 0,
   format: "keep",
   resize: false,
   width: 1920,
@@ -1226,14 +1229,7 @@ function strategyLabel(settings: CompressionSettings) {
   return `${format} · ${Math.round(settings.quality)}% · ${formatScale(settings.scale)} 尺寸`;
 }
 
-async function compressImage(item: ImageItem, settings: CompressionSettings, nativeBridge?: NativeBridge): Promise<CompressionResult> {
-  if (item.sourceIsThumbnail) {
-    if (!nativeBridge || !item.sourcePath) throw new Error("无法读取原始图片");
-    const [source] = await nativeBridge.readImagesFromPaths([item.sourcePath]);
-    if (!source) throw new Error("原始图片已移动或无法读取");
-    const file = new File([new Uint8Array(source.data)], source.name || item.name, { type: source.type || item.type });
-    return compressImage({ ...item, file, sourceIsThumbnail: false }, settings, nativeBridge);
-  }
+async function compressImageBase(item: ImageItem, settings: CompressionSettings, nativeBridge?: NativeBridge): Promise<CompressionResult> {
   if (item.type === "image/gif" && nativeBridge && (settings.format === "keep" || settings.format === "image/webp")) {
     const result = await nativeBridge.compressAnimationData(
       new Uint8Array(await item.file.arrayBuffer()),
@@ -1353,6 +1349,82 @@ async function compressImage(item: ImageItem, settings: CompressionSettings, nat
     return { blob: item.file, width: item.width, height: item.height, keptOriginal: true };
   }
   return candidate;
+}
+
+async function compressImage(item: ImageItem, settings: CompressionSettings, nativeBridge?: NativeBridge): Promise<CompressionResult> {
+  if (item.sourceIsThumbnail) {
+    if (!nativeBridge || !item.sourcePath) throw new Error("无法读取原始图片");
+    const [source] = await nativeBridge.readImagesFromPaths([item.sourcePath]);
+    if (!source) throw new Error("原始图片已移动或无法读取");
+    const file = new File([new Uint8Array(source.data)], source.name || item.name, { type: source.type || item.type });
+    return compressImage({ ...item, file, sourceIsThumbnail: false }, settings, nativeBridge);
+  }
+
+  const targetSizeKb = Math.max(0, Math.round(settings.targetSizeKb || 0));
+  if (!targetSizeKb) return compressImageBase(item, settings, nativeBridge);
+
+  // Use decimal kilobytes and a small safety margin because many application
+  // portals reject a file at exactly their documented limit.
+  const targetBytes = Math.max(1000, Math.floor(targetSizeKb * 1000 * .98));
+  const hasExplicitTransform = settings.format !== "keep"
+    || settings.scale < 100
+    || settings.resize
+    || settings.watermark.enabled;
+  if (item.originalBytes <= targetBytes && !hasExplicitTransform) {
+    return {
+      blob: item.file,
+      width: item.width,
+      height: item.height,
+      keptOriginal: true,
+      strategy: `原图已低于 ${targetSizeKb} KB`,
+    };
+  }
+
+  let quality = Math.max(1, Math.min(88, Math.round(settings.quality)));
+  let scale = Math.max(.1, Math.min(100, settings.scale));
+  let best: (CompressionResult & { quality: number; scale: number }) | null = null;
+
+  // A bounded adaptive search avoids running a large fixed candidate ladder
+  // for every image in a batch. It first spends quality, then reduces pixels
+  // while restoring a sensible quality level. Every pass is measured using
+  // the real encoder, so the result is not an estimate.
+  for (let pass = 0; pass < 9; pass += 1) {
+    const attemptSettings: CompressionSettings = {
+      ...settings,
+      targetSizeKb: 0,
+      mode: "manual",
+      quality,
+      scale,
+      preventLarger: false,
+    };
+    const result = await compressImageBase(item, attemptSettings, nativeBridge);
+    if (!best || result.blob.size < best.blob.size) best = { ...result, quality, scale };
+    if (result.blob.size <= targetBytes) {
+      return {
+        ...result,
+        strategy: `≤ ${targetSizeKb} KB · ${quality}% · ${formatScale(scale)} 尺寸`,
+      };
+    }
+
+    const ratio = targetBytes / Math.max(1, result.blob.size);
+    if (pass < 3 && quality > 38) {
+      const adaptiveQuality = Math.max(38, Math.floor(quality * Math.max(.58, Math.min(.86, ratio * 1.15))));
+      quality = adaptiveQuality < quality ? adaptiveQuality : Math.max(38, quality - 8);
+    } else {
+      const reduction = Math.max(.42, Math.min(.86, Math.sqrt(ratio) * .96));
+      const nextScale = Math.max(.1, Math.round(scale * reduction * 10) / 10);
+      scale = nextScale < scale ? nextScale : Math.max(.1, Math.round((scale - .1) * 10) / 10);
+      quality = Math.min(70, Math.max(46, quality + 14));
+    }
+  }
+
+  if (!best) throw new Error("未生成可用的目标体积结果");
+  return {
+    blob: best.blob,
+    width: best.width,
+    height: best.height,
+    strategy: `最接近 ${targetSizeKb} KB · ${best.quality}% · ${formatScale(best.scale)} 尺寸`,
+  };
 }
 
 async function createDemoFile() {
@@ -1900,6 +1972,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [processingAll, setProcessingAll] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ current: number; total: number } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [desktopPreferences, setDesktopPreferences] = useState<DesktopPreferences>(loadStoredDesktopPreferences);
   const autoUpdateCheckStartedRef = useRef(false);
@@ -2191,14 +2264,16 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     setGalleryRevision((current) => current + 1);
   }, [desktopPreferences.renameTemplate, exportSuffix]);
 
-  const addSources = useCallback(async (sources: ImageSourceInput[]) => {
+  const addSources = useCallback(async (sources: ImageSourceInput[], onProgress?: (current: number, total: number) => void) => {
     const imageSources = sources.filter(({ file }) => file.type.startsWith("image/") || /\.(?:jpe?g|png|webp|avif|gif)$/i.test(file.name));
     if (!imageSources.length) {
       showToast(t("没有找到可处理的图片", "No supported images were found"));
       return;
     }
+    onProgress?.(0, imageSources.length);
     const nextItems: Array<ImageItem | null> = new Array(imageSources.length).fill(null);
     let cursor = 0;
+    let completed = 0;
     const workers = Array.from({ length: Math.min(3, imageSources.length) }, async () => {
       while (cursor < imageSources.length) {
         const index = cursor++;
@@ -2208,6 +2283,9 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           nextItems[index] = { id: uid(), file, name: file.name || `clipboard-${Date.now()}.png`, type: file.type || mimeFromName(file.name), width: dimensions.width, height: dimensions.height, originalBytes: file.size, sourceUrl: URL.createObjectURL(file), status: "ready", fileHandle, sourcePath };
         } catch {
           nextItems[index] = null;
+        } finally {
+          completed += 1;
+          onProgress?.(completed, imageSources.length);
         }
       }
     });
@@ -2249,7 +2327,18 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     showToast(t(`已加入 ${nextItems.length} 张图片`, `Added ${nextItems.length} images`));
   }, [selectedId, showToast, t]);
 
-  const addFiles = useCallback((files: File[]) => addSources(files.map((file) => ({ file }))), [addSources]);
+  const addFiles = useCallback((files: File[], onProgress?: (current: number, total: number) => void) => addSources(files.map((file) => ({ file })), onProgress), [addSources]);
+
+  const runImport = useCallback(async (operation: (onProgress: (current: number, total: number) => void) => Promise<void>) => {
+    setImportProgress({ current: 0, total: 0 });
+    try {
+      await operation((current, total) => setImportProgress({ current, total }));
+    } finally {
+      setImportProgress(null);
+    }
+  }, []);
+
+  useEffect(() => nativeBridge?.onImageImportProgress(setImportProgress), [nativeBridge]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -2890,8 +2979,10 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const importImages = useCallback(async () => {
     try {
       if (nativeBridge) {
-        const nativeImages = await nativeBridge.selectImageEntries();
-        addNativeEntries(nativeImages);
+        await runImport(async () => {
+          const nativeImages = await nativeBridge.selectImageEntries();
+          addNativeEntries(nativeImages);
+        });
         return;
       }
       if (window.showOpenFilePicker) {
@@ -2899,8 +2990,11 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
           multiple: true,
           types: [{ description: "图片", accept: { "image/*": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"] } }],
         });
-        const sources = await Promise.all(handles.map(async (fileHandle) => ({ file: await fileHandle.getFile(), fileHandle })));
-        await addSources(sources);
+        await runImport(async (onProgress) => {
+          onProgress(0, handles.length);
+          const sources = await Promise.all(handles.map(async (fileHandle) => ({ file: await fileHandle.getFile(), fileHandle })));
+          await addSources(sources, onProgress);
+        });
         return;
       }
       fileInputRef.current?.click();
@@ -2908,20 +3002,22 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       if (error instanceof DOMException && error.name === "AbortError") return;
       fileInputRef.current?.click();
     }
-  }, [addNativeEntries, addSources, nativeBridge]);
+  }, [addNativeEntries, addSources, nativeBridge, runImport]);
 
   const importImageFolder = useCallback(async () => {
     try {
       if (nativeBridge) {
-        const nativeImages = await nativeBridge.selectImageFolderEntries();
-        addNativeEntries(nativeImages);
+        await runImport(async () => {
+          const nativeImages = await nativeBridge.selectImageFolderEntries();
+          addNativeEntries(nativeImages);
+        });
         return;
       }
       folderInputRef.current?.click();
     } catch (error) {
       showToast(error instanceof Error ? error.message : String(error));
     }
-  }, [addNativeEntries, nativeBridge, showToast]);
+  }, [addNativeEntries, nativeBridge, runImport, showToast]);
 
   const loadSystemFonts = useCallback(async (silent = false) => {
     try {
@@ -3163,18 +3259,21 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const onDrop = useCallback((event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setDragging(false);
-    void addFiles(Array.from(event.dataTransfer.files));
-  }, [addFiles]);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length) void runImport((onProgress) => addFiles(files, onProgress));
+  }, [addFiles, runImport]);
 
   const onFilesSelected = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    void addFiles(Array.from(event.target.files || []));
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-  }, [addFiles]);
+    if (files.length) void runImport((onProgress) => addFiles(files, onProgress));
+  }, [addFiles, runImport]);
 
   const onFolderFilesSelected = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    void addFiles(Array.from(event.target.files || []));
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-  }, [addFiles]);
+    if (files.length) void runImport((onProgress) => addFiles(files, onProgress));
+  }, [addFiles, runImport]);
 
   const importPlugin = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -3261,13 +3360,13 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         <section className="workspace" aria-label={t("图片压缩工作台", "Image compression workspace")}>
           <aside className="queue-panel">
             <div className="panel-heading">
-              <div><span className="eyebrow">{t("任务队列", "QUEUE")}</span><strong>{items.length ? t(`${items.length} 张图片`, `${items.length} images`) : t("等待导入", "Ready to import")}</strong></div>
+              <div><span className="eyebrow">{t("任务队列", "QUEUE")}</span><strong>{importProgress ? (importProgress.total ? t(`正在导入 ${importProgress.current} / ${importProgress.total}`, `Importing ${importProgress.current} / ${importProgress.total}`) : t("正在扫描图片…", "Scanning images…")) : items.length ? t(`${items.length} 张图片`, `${items.length} images`) : t("等待导入", "Ready to import")}</strong></div>
               {items.length > 0 && <button className="text-button" type="button" onClick={clearAll}>{t("清空", "Clear")}</button>}
             </div>
 
             <div className="import-actions">
-              <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> {t("添加图片", "Add images")}</button>
-              <button className="folder-import-button" type="button" onClick={importImageFolder}><span aria-hidden="true">▱</span> {t("导入文件夹", "Import folder")}</button>
+              <button className="import-button" type="button" disabled={Boolean(importProgress)} onClick={importImages}><span aria-hidden="true">＋</span> {t("添加图片", "Add images")}</button>
+              <button className="folder-import-button" type="button" disabled={Boolean(importProgress)} onClick={importImageFolder}><span aria-hidden="true">▱</span> {t("导入文件夹", "Import folder")}</button>
             </div>
 
             <div className="queue-list">
@@ -3450,6 +3549,15 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               <p className="setting-hint"><i /> {t("智能平衡会实测多档画质/尺寸并选择较小结果。PNG 在 100% 时保持真彩无损，低于 100% 时通过调色板减色压缩；JPG / WebP 调整编码质量，GIF 调整每帧色板。", "Smart balance measures several quality/scale candidates and chooses a smaller result. PNG is true-colour lossless at 100%; below 100% it uses palette reduction. JPG/WebP use encoding quality and GIF adjusts its frame palette.")}</p>
             </div>
 
+            <div className="setting-section target-size-section">
+              <div className="slider-heading"><label className="setting-label" htmlFor="target-size-input">{t("目标文件大小", "Target file size")}</label><output htmlFor="target-size-input">{settings.targetSizeKb > 0 ? `≤ ${settings.targetSizeKb} KB` : t("不限", "Unlimited")}</output></div>
+              <div className="target-size-presets" aria-label={t("目标文件大小预设", "Target size presets")}>
+                {[0, 200, 100, 50].map((size) => <button className={settings.targetSizeKb === size ? "active" : ""} type="button" key={size} onClick={() => setSettings((current) => ({ ...current, targetSizeKb: size }))}>{size ? `${size} KB` : t("不限", "Unlimited")}</button>)}
+              </div>
+              <label className="target-size-custom" htmlFor="target-size-input"><span>{t("自定义上限", "Custom limit")}</span><input id="target-size-input" type="number" inputMode="numeric" min="1" max="102400" step="1" value={settings.targetSizeKb || ""} placeholder={t("输入大小", "Enter size")} onChange={(event) => setSettings((current) => ({ ...current, targetSizeKb: event.target.value ? Math.max(1, Math.min(102400, Math.round(Number(event.target.value)))) : 0 }))} /><b>KB</b></label>
+              <p className="setting-hint"><i /> {t("会按真实编码结果逐步调整画质；仍超出上限时再等比例缩小尺寸。原图已符合上限且没有其他改动时会直接保留。", "PicLite measures real encoded output and adjusts quality first, then scales dimensions only if needed. An already-compliant original is kept when no other changes are requested.")}</p>
+            </div>
+
             <div className="setting-section slider-section">
               <div className="slider-heading"><label className="setting-label" htmlFor="scale-range">{t("等比例尺寸", "Scale")}</label><output htmlFor="scale-range">{formatScale(settings.scale)}</output></div>
               <input
@@ -3532,7 +3640,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
             </div>
 
             <div className="settings-spacer" />
-            <div className="action-summary"><div><span>{t("当前选中", "Selected")}</span><strong>{selected?.outputBytes ? formatBytes(selected.outputBytes) : "—"}</strong></div><div><span>{t("输出参数", "Output settings")}</span><strong>{settings.quality}% · {formatScale(settings.scale)}</strong></div></div>
+            <div className="action-summary"><div><span>{t("当前选中", "Selected")}</span><strong>{selected?.outputBytes ? formatBytes(selected.outputBytes) : "—"}</strong></div><div><span>{t("输出参数", "Output settings")}</span><strong>{settings.quality}% · {formatScale(settings.scale)}{settings.targetSizeKb > 0 ? ` · ≤ ${settings.targetSizeKb} KB` : ""}</strong></div></div>
             <button className="compress-button" type="button" disabled={!items.length || processingAll} onClick={processAll}><span>{processingAll ? "···" : "✦"}</span>{processingAll ? t("正在应用到全部", "Applying to all…") : t(`按此参数应用到全部${items.length ? ` · ${items.length} 张` : ""}`, `Apply these settings to all${items.length ? ` · ${items.length}` : ""}`)}</button>
           </aside>
         </section>
@@ -3819,7 +3927,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
         </section>
       )}
 
-      {presetDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPresetDialogOpen(false); }}><form className="preset-dialog" onSubmit={(event) => { event.preventDefault(); saveCustomPreset(); }}><span className="eyebrow">SAVE PRESET</span><h2>{t("保存当前压缩参数", "Save current compression settings")}</h2><p>{t("画质、尺寸、格式、元数据和水印会一起保存，下次启动仍然可用。", "Quality, size, format, metadata and watermark settings are saved for future launches.")}</p><input autoFocus value={presetName} maxLength={24} placeholder={t("例如：公众号封面", "For example: social cover")} onChange={(event) => setPresetName(event.target.value)} /><div><button type="button" onClick={() => setPresetDialogOpen(false)}>{t("取消", "Cancel")}</button><button className="primary" type="submit" disabled={!presetName.trim()}>{t("保存预设", "Save preset")}</button></div></form></div>}
+      {presetDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPresetDialogOpen(false); }}><form className="preset-dialog" onSubmit={(event) => { event.preventDefault(); saveCustomPreset(); }}><span className="eyebrow">SAVE PRESET</span><h2>{t("保存当前压缩参数", "Save current compression settings")}</h2><p>{t("目标大小、画质、尺寸、格式、元数据和水印会一起保存，下次启动仍然可用。", "Target size, quality, dimensions, format, metadata and watermark settings are saved for future launches.")}</p><input autoFocus value={presetName} maxLength={24} placeholder={t("例如：报名照 200 KB", "For example: application photo 200 KB")} onChange={(event) => setPresetName(event.target.value)} /><div><button type="button" onClick={() => setPresetDialogOpen(false)}>{t("取消", "Cancel")}</button><button className="primary" type="submit" disabled={!presetName.trim()}>{t("保存预设", "Save preset")}</button></div></form></div>}
       {galleryPreview && <div className="gallery-lightbox" role="dialog" aria-modal="true" aria-label={`预览 ${galleryPreview.name}`} onMouseDown={(event) => { if (event.target === event.currentTarget) setGalleryPreviewId(null); }}>
         <header><div><span>QUICK LOOK</span><strong title={galleryPreview.name}>{galleryPreview.name}</strong></div><button type="button" aria-label={t("关闭预览", "Close preview")} title={t("关闭（Esc）", "Close (Esc)")} onClick={() => setGalleryPreviewId(null)}>×</button></header>
         <div className="gallery-lightbox-image"><img src={galleryPreview.previewUrl} alt={galleryPreview.name} /></div>
