@@ -144,6 +144,7 @@ type NativeBridge = {
   copyText: (text: string) => Promise<void>;
   selectImages: () => Promise<NativeImage[]>;
   selectImageEntries: () => Promise<NativeImageEntry[]>;
+  selectImageFolderEntries: () => Promise<NativeImageEntry[]>;
   readImagesFromPaths: (paths: string[]) => Promise<NativeImage[]>;
   readImageEntriesFromPaths: (paths: string[]) => Promise<NativeImageEntry[]>;
   selectFolder: (kind: "input" | "output" | "export") => Promise<string | null>;
@@ -1939,6 +1940,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
   const [browserPlatform, setBrowserPlatform] = useState<BrowserPlatform>("generic");
   const [nativeProfileReady, setNativeProfileReady] = useState(() => !nativeBridge);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
   const pluginInputRef = useRef<HTMLInputElement>(null);
   const exportDirectoryRef = useRef<DirectoryHandleLike | null>(null);
@@ -2908,6 +2910,19 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     }
   }, [addNativeEntries, addSources, nativeBridge]);
 
+  const importImageFolder = useCallback(async () => {
+    try {
+      if (nativeBridge) {
+        const nativeImages = await nativeBridge.selectImageFolderEntries();
+        addNativeEntries(nativeImages);
+        return;
+      }
+      folderInputRef.current?.click();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error));
+    }
+  }, [addNativeEntries, nativeBridge, showToast]);
+
   const loadSystemFonts = useCallback(async (silent = false) => {
     try {
       let families: string[] = [];
@@ -3156,6 +3171,11 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
     event.target.value = "";
   }, [addFiles]);
 
+  const onFolderFilesSelected = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    void addFiles(Array.from(event.target.files || []));
+    event.target.value = "";
+  }, [addFiles]);
+
   const importPlugin = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -3201,6 +3221,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
       onDrop={onDrop}
     >
       <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={onFilesSelected} />
+      <input ref={(node) => { folderInputRef.current = node; node?.setAttribute("webkitdirectory", ""); }} className="visually-hidden" type="file" accept="image/*" multiple onChange={onFolderFilesSelected} />
       <input ref={fontInputRef} className="visually-hidden" type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" onChange={onFontSelected} />
       <input ref={pluginInputRef} className="visually-hidden" type="file" accept=".html,.htm,.js,.json,text/html,text/javascript,application/json" onChange={importPlugin} />
 
@@ -3244,14 +3265,17 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               {items.length > 0 && <button className="text-button" type="button" onClick={clearAll}>{t("清空", "Clear")}</button>}
             </div>
 
-            <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> {t("添加图片", "Add images")}</button>
+            <div className="import-actions">
+              <button className="import-button" type="button" onClick={importImages}><span aria-hidden="true">＋</span> {t("添加图片", "Add images")}</button>
+              <button className="folder-import-button" type="button" onClick={importImageFolder}><span aria-hidden="true">▱</span> {t("导入文件夹", "Import folder")}</button>
+            </div>
 
             <div className="queue-list">
               {items.length === 0 ? (
                 <div className="queue-empty">
                   <div className="empty-stack" aria-hidden="true"><i /><i /><i /></div>
                   <strong>{t("队列还是空的", "Your queue is empty")}</strong>
-                  <p>{t("拖入图片，或从剪贴板粘贴", "Drop images here or paste from the clipboard")}</p>
+                  <p>{t("拖入图片、导入文件夹，或从剪贴板粘贴", "Drop images, import a folder, or paste from the clipboard")}</p>
                   <button type="button" onClick={addDemo}>{t("载入演示图片", "Load a sample image")}</button>
                 </div>
               ) : items.map((item) => (
@@ -3344,7 +3368,7 @@ function PicLiteWorkbench({ nativeBridge, initialView = "workspace", standaloneP
               ) : (
                 <button className="hero-dropzone" type="button" onClick={importImages}>
                   <span className="drop-visual" aria-hidden="true"><i className="drop-card one" /><i className="drop-card two" /><i className="drop-card three" /><b>＋</b></span>
-                  <span className="hero-copy"><span className="hero-kicker">DROP · PASTE · COMPRESS</span><strong>{t("把图片放轻一点", "Make images lighter")}</strong><p>{t("拖入图片，或点击选择本地文件", "Drop images or choose local files")}</p></span>
+                  <span className="hero-copy"><span className="hero-kicker">DROP · PASTE · COMPRESS</span><strong>{t("把图片放轻一点", "Make images lighter")}</strong><p>{t("拖入图片，或从左侧选择图片或文件夹", "Drop images, or choose images or a folder on the left")}</p></span>
                   <span className="supported-formats">JPG&nbsp;&nbsp; PNG&nbsp;&nbsp; WebP&nbsp;&nbsp; GIF</span>
                 </button>
               )}

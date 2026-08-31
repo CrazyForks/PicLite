@@ -11,6 +11,7 @@ A local-first image optimiser for content creators and developers, available on 
 - Import, convert, optimise, and proportionally resize JPEG, PNG, WebP, and GIF files
 - Automatically compare candidate formats and choose a smaller result with limited visual loss
 - Before/after preview, actual output size, continuous quality and scale controls, and text watermarks
+- Import an entire folder recursively; large batches use the same low-memory queue
 - Clipboard monitoring, global shortcuts, watched folders, and a local result library
 - Clop-inspired floating results with copy, preview, undo, further downscaling, and format switching
 - Configurable result limit, stacked/list layouts, and automatic dismissal
@@ -62,7 +63,7 @@ Create a `.env` file in the project directory to change the bind address, host p
 ```dotenv
 PICLITE_BIND=0.0.0.0
 PICLITE_PORT=3456
-PICLITE_TAG=1.3.0
+PICLITE_TAG=1.3.1
 ```
 
 To build from the current source tree instead:

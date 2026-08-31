@@ -432,6 +432,36 @@ fn is_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Collect supported images from a folder tree without following symlinked
+/// directories. Sorting keeps the queue stable across platforms and makes a
+/// folder import predictable for the user.
+fn collect_image_paths(root: &Path) -> Vec<PathBuf> {
+    let mut folders = vec![root.to_path_buf()];
+    let mut images = Vec::new();
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                folders.push(path);
+            } else if file_type.is_file() && is_image(&path) {
+                images.push(path);
+            }
+        }
+    }
+    images.sort_by(|left, right| {
+        left.to_string_lossy()
+            .to_lowercase()
+            .cmp(&right.to_string_lossy().to_lowercase())
+    });
+    images
+}
+
 fn mime_for(path: &Path) -> &'static str {
     match path
         .extension()
@@ -1242,6 +1272,54 @@ fn open_preferences_from_menu(app: &AppHandle, action: Option<&'static str>) {
     });
 }
 
+/// The floating result window is also created lazily. Keeping its transparent
+/// WKWebView alive from launch costs roughly another renderer process on macOS
+/// even when the user never opens the floating window.
+fn ensure_dropzone_window(app: &AppHandle) -> Result<bool, String> {
+    if app.get_webview_window("dropzone").is_some() {
+        return Ok(false);
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "dropzone",
+        WebviewUrl::App("index.html?window=dropzone".into()),
+    )
+    .title("PicLite Results")
+    .inner_size(282.0, 202.0)
+    .min_inner_size(246.0, 188.0)
+    .resizable(true)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .transparent(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn show_dropzone_ready(app: &AppHandle, state: &DesktopState) -> Result<bool, String> {
+    let created = ensure_dropzone_window(app)?;
+    ensure_dropzone_positioned(app, state);
+    show_window(app, "dropzone");
+    Ok(created)
+}
+
+fn open_dropzone_from_callback(app: &AppHandle, action: Option<&'static str>) {
+    let app = app.clone();
+    thread::spawn(move || {
+        let state = app.state::<DesktopState>();
+        let created = show_dropzone_ready(&app, &state).unwrap_or(false);
+        if let Some(action) = action {
+            if created {
+                thread::sleep(Duration::from_millis(250));
+            }
+            let _ = app.emit("tray:action", action);
+        }
+    });
+}
+
 fn position_dropzone(window: &tauri::WebviewWindow, logical_width: f64, logical_height: f64) {
     let Ok(Some(monitor)) = window.current_monitor() else {
         return;
@@ -1624,13 +1702,12 @@ async fn configure_global_shortcuts(
                                 ensure_dropzone_positioned(app, &state);
                                 show_window(app, "dropzone");
                             }
+                        } else {
+                            open_dropzone_from_callback(app, None);
                         }
                     }
                     "optimise_clipboard" => {
-                        let state = app.state::<DesktopState>();
-                        ensure_dropzone_positioned(app, &state);
-                        show_window(app, "dropzone");
-                        let _ = app.emit("tray:action", "optimise_clipboard");
+                        open_dropzone_from_callback(app, Some("optimise_clipboard"));
                     }
                     "show_main" => show_window(app, "main"),
                     "show_gallery" => {
@@ -1638,10 +1715,7 @@ async fn configure_global_shortcuts(
                         let _ = app.emit("tray:action", "gallery");
                     }
                     "upload_current" => {
-                        let state = app.state::<DesktopState>();
-                        ensure_dropzone_positioned(app, &state);
-                        show_window(app, "dropzone");
-                        let _ = app.emit("tray:action", "upload_current");
+                        open_dropzone_from_callback(app, Some("upload_current"));
                     }
                     _ => {}
                 }
@@ -1781,8 +1855,10 @@ async fn submit_corner_drop(
         .pending_corner_drop
         .lock()
         .map_err(|_| "拖放队列不可用".to_string())? = valid;
-    ensure_dropzone_positioned(&app, &state);
-    show_window(&app, "dropzone");
+    let created = show_dropzone_ready(&app, &state)?;
+    if created {
+        thread::sleep(Duration::from_millis(250));
+    }
     app.emit("corner:drop", ())
         .map_err(|error| error.to_string())
 }
@@ -1825,8 +1901,7 @@ async fn show_dropzone_window(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
-    ensure_dropzone_positioned(&app, &state);
-    show_window(&app, "dropzone");
+    show_dropzone_ready(&app, &state)?;
     Ok(())
 }
 
@@ -1926,12 +2001,13 @@ fn process_watched_file(
             event.output = Some(output_path.to_string_lossy().to_string());
             event.original_bytes = Some(original_bytes);
             event.output_bytes = Some(output_bytes);
-            emit_event(&app, event);
             let state = app.state::<DesktopState>();
-            configure_dropzone_dimensions(&app, &state, 420.0, 320.0);
-            if let Some(window) = app.get_webview_window("dropzone") {
-                let _ = window.show();
+            let created = show_dropzone_ready(&app, &state).unwrap_or(false);
+            if created {
+                thread::sleep(Duration::from_millis(250));
             }
+            emit_event(&app, event);
+            configure_dropzone_dimensions(&app, &state, 420.0, 320.0);
         }
         Err(error) => {
             let mut event = watcher_event("error", Some(error));
@@ -2062,6 +2138,19 @@ async fn select_image_entries(
         .filter_map(|selected| selected.into_path().ok())
         .collect();
     native_image_entries_from_paths(paths, &state)
+}
+
+#[tauri::command]
+async fn select_image_folder_entries(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Vec<NativeImageEntry>, String> {
+    let Some(selected) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(Vec::new());
+    };
+    let folder = selected.into_path().map_err(|error| error.to_string())?;
+    let folder = fs::canonicalize(&folder).unwrap_or(folder);
+    native_image_entries_from_paths(collect_image_paths(&folder), &state)
 }
 
 fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
@@ -3822,9 +3911,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
                 open_preferences_from_menu(app, Some("image_host_settings"));
             }
             "dropzone" => {
-                let state = app.state::<DesktopState>();
-                ensure_dropzone_positioned(app, &state);
-                show_window(app, "dropzone");
+                open_dropzone_from_callback(app, None);
             }
             "about" => {
                 let _ = open_url("https://github.com/amiaoapp/PicLite");
@@ -3883,9 +3970,17 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
                         | "downscale_clipboard"
                         | "upload_current"
                 ) {
-                    show_window(app, "dropzone");
+                    let action = match action {
+                        "optimise_clipboard" => "optimise_clipboard",
+                        "optimise_clipboard_aggressive" => "optimise_clipboard_aggressive",
+                        "downscale_clipboard" => "downscale_clipboard",
+                        "upload_current" => "upload_current",
+                        _ => unreachable!(),
+                    };
+                    open_dropzone_from_callback(app, Some(action));
+                } else {
+                    let _ = app.emit("tray:action", action.to_string());
                 }
-                let _ = app.emit("tray:action", action.to_string());
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -4258,6 +4353,7 @@ pub fn run() {
             suggest_screenshot_folder,
             select_images,
             select_image_entries,
+            select_image_folder_entries,
             read_images_from_paths,
             read_image_entries_from_paths,
             read_clipboard_image,
@@ -4826,6 +4922,35 @@ mod tests {
         ] {
             assert!(!is_image(Path::new(name)), "{name} must be rejected");
         }
+    }
+
+    #[test]
+    fn folder_import_collects_supported_images_recursively_in_stable_order() {
+        let root = std::env::temp_dir().join(format!(
+            "piclite-folder-import-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create test folders");
+        fs::write(root.join("b.PNG"), b"image name only").expect("write image name");
+        fs::write(root.join("notes.pdf"), b"document").expect("write document");
+        fs::write(nested.join("a.jpg"), b"image name only").expect("write image name");
+
+        let collected = collect_image_paths(&root)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .expect("relative path")
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            collected,
+            vec![PathBuf::from("b.PNG"), PathBuf::from("nested/a.jpg")]
+        );
+
+        fs::remove_dir_all(root).expect("remove test folders");
     }
 
     #[test]

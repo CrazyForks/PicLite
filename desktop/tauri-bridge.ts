@@ -39,6 +39,7 @@ function imagePathsOnly(paths: string[]) {
 if ("__TAURI_INTERNALS__" in window) {
   const currentWindow = getCurrentWindow();
   const currentWebview = getCurrentWebview();
+  document.documentElement.dataset.platform = platformName();
   document.documentElement.classList.add(currentWindow.label === "dropzone" ? "dropzone-root" : "desktop-root");
   window.picLite = {
     platform: platformName(),
@@ -59,6 +60,13 @@ if ("__TAURI_INTERNALS__" in window) {
     },
     selectImageEntries: async () => {
       const images = await invoke<EncodedImageEntry[]>("select_image_entries");
+      return images.map((image) => ({
+        ...image,
+        thumbnailData: image.thumbnailData ? decodeBase64(image.thumbnailData) : new Uint8Array(),
+      }));
+    },
+    selectImageFolderEntries: async () => {
+      const images = await invoke<EncodedImageEntry[]>("select_image_folder_entries");
       return images.map((image) => ({
         ...image,
         thumbnailData: image.thumbnailData ? decodeBase64(image.thumbnailData) : new Uint8Array(),
