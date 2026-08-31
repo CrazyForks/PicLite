@@ -982,11 +982,14 @@ html[data-theme="dark"] .desktop-app .topbar { background: rgba(19,26,22,.84); b
 html[data-theme="dark"] .desktop-app .queue-panel,
 html[data-theme="dark"] .desktop-app .settings-panel,
 html[data-theme="dark"] .desktop-app .preview-panel { border-color: #29362f; box-shadow: 0 18px 50px rgba(0,0,0,.24); }
+html[data-theme="dark"] .preview-panel,
 html[data-theme="dark"] .desktop-app .preview-panel { background: #111714; }
+html[data-theme="dark"] .preview-stage,
 html[data-theme="dark"] .desktop-app .preview-stage { background: radial-gradient(circle at 50% 40%, #212b25, #111714 68%), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px); background-size: auto, 18px 18px, 18px 18px; }
 html[data-theme="dark"] .hero-dropzone,
 html[data-theme="dark"] .compare-canvas,
-html[data-theme="dark"] .image-inspector { background-color: #1a221e; border-color: #34453b; }
+html[data-theme="dark"] .image-inspector { background: #1a221e; border-color: #34453b; }
+html[data-theme="dark"] .hero-dropzone { box-shadow: inset 0 0 0 8px rgba(255,255,255,.04); }
 html[data-theme="dark"] .main-nav button { color: #83948a; }
 html[data-theme="dark"] .main-nav button.active,
 html[data-theme="dark"] .main-nav button:hover { color: #f1f7f3; border-bottom-color: var(--accent); }
@@ -1105,7 +1108,7 @@ html[data-theme="dark"] .compression-range::-moz-range-thumb { border-color: #17
 html[data-theme="dark"] .export-button { background: #91aa68; color: #101812; }
 html[data-theme="dark"] .export-button:disabled,
 html[data-theme="dark"] .compress-button:disabled { background: #28332d; color: #69776f; }
-html[data-theme="dark"] .hero-dropzone:hover { background: #202923; border-color: #667a6c; }
+html[data-theme="dark"] .hero-dropzone:hover { background: #202923; border-color: #667a6c; box-shadow: inset 0 0 0 8px rgba(255,255,255,.055); }
 html[data-theme="dark"] .drop-card.one { background: #486455; }
 html[data-theme="dark"] .drop-card.two { background: #879f67; }
 html[data-theme="dark"] .drop-visual b { border-color: #1a221e; }
@@ -1441,6 +1444,7 @@ html[data-theme="dark"] .desktop-app { background: radial-gradient(circle at 15%
 html[data-theme="dark"] .topbar,
 html[data-theme="dark"] .desktop-app .topbar,
 html[data-theme="dark"] .desktop-app .queue-panel,
+html[data-theme="dark"] .preview-panel,
 html[data-theme="dark"] .desktop-app .preview-panel,
 html[data-theme="dark"] .desktop-app .settings-panel,
 html[data-theme="dark"] .watcher-log,
@@ -1450,6 +1454,13 @@ html[data-theme="dark"] .gallery-card,
 html[data-theme="dark"] .gallery-empty { border-color: rgba(173,208,181,.14); background: linear-gradient(145deg, rgba(27,38,32,.82), rgba(15,22,18,.70)); box-shadow: 0 18px 54px rgba(0,0,0,.27), inset 0 1px rgba(255,255,255,.045); }
 html[data-theme="dark"] .desktop-app .settings-panel > .panel-heading { background: rgba(20,29,24,.76); }
 html[data-theme="dark"] .watcher-console { border-color: rgba(179,218,184,.16); background: radial-gradient(circle at 100% 0, rgba(182,240,102,.12), transparent 34%), linear-gradient(145deg, rgba(31,46,38,.88), rgba(12,20,15,.83)); backdrop-filter: blur(30px) saturate(1.15); -webkit-backdrop-filter: blur(30px) saturate(1.15); }
+html[data-theme="dark"] .preview-stage {
+  background:
+    radial-gradient(circle at 50% 40%, #212b25, #111714 68%),
+    linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+    linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px);
+  background-size: auto, 18px 18px, 18px 18px;
+}
 
 /* v0.13.4 layout correction: the workbench has six footer controls, and the
    floating result card must use its actual compact height rather than a large
