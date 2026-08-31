@@ -11,7 +11,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   updateCheckFrequency: "startup",
   launchAtLogin: false,
   showMenubarIcon: true,
-  showInTaskbarDock: false,
+  showInTaskbarDock: true,
   clipboardOptimiser: true,
   clipboardImageData: true,
   clipboardImageFiles: true,
@@ -89,6 +89,12 @@ function validUpdateCheckFrequency(value: unknown): value is UpdateCheckFrequenc
   return value === "startup" || value === "daily" || value === "weekly" || value === "never";
 }
 
+function userFacingPath(value: string) {
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice(4);
+  return value;
+}
+
 export function loadSettings(): DesktopSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as Partial<DesktopSettings>;
@@ -117,6 +123,7 @@ export function loadSettings(): DesktopSettings {
       floatingHeight: Math.max(220, Number(parsed.floatingHeight) || DEFAULT_SETTINGS.floatingHeight),
       floatingActions: Array.isArray(parsed.floatingActions) ? parsed.floatingActions.slice(0, 6) : DEFAULT_SETTINGS.floatingActions,
       floatingWatermark: { ...DEFAULT_SETTINGS.floatingWatermark, ...(parsed.floatingWatermark || {}) },
+      watchFolders: Array.isArray(parsed.watchFolders) ? parsed.watchFolders.map(userFacingPath) : DEFAULT_SETTINGS.watchFolders,
       renameTemplate: mainPreferences.renameTemplate || parsed.renameTemplate || DEFAULT_SETTINGS.renameTemplate,
       language: mainPreferences.language === "en" || (!mainPreferences.language && parsed.language === "en") ? "en" : "zh",
       preset,

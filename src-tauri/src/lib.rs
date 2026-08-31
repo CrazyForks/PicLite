@@ -90,7 +90,7 @@ impl Default for DesktopState {
             quitting: AtomicBool::new(false),
             tray_available: AtomicBool::new(false),
             minimize_to_tray: AtomicBool::new(true),
-            show_in_taskbar_dock: AtomicBool::new(false),
+            show_in_taskbar_dock: AtomicBool::new(true),
             clipboard_monitor_enabled: AtomicBool::new(false),
             clipboard_ignore_until_ms: AtomicU64::new(0),
             shortcut_config_lock: Mutex::new(()),
@@ -103,9 +103,20 @@ impl Default for DesktopState {
 #[serde(rename_all = "camelCase")]
 struct NativeDesktopPreferences {
     minimize_to_tray: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     show_in_taskbar_dock: bool,
     clipboard_watcher_enabled: bool,
+}
+
+fn user_facing_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    value
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&value)
+        .to_string()
 }
 
 /// UI preferences live in the native application config directory instead of
@@ -1860,7 +1871,7 @@ async fn select_folder(
         "export" => folders.export = Some(path.clone()),
         _ => return Err("不支持的文件夹类型".to_string()),
     }
-    Ok(Some(path.to_string_lossy().to_string()))
+    Ok(Some(user_facing_path(&path)))
 }
 
 /// Returns the OS convention for screenshots when it exists, so the folder
@@ -1887,7 +1898,7 @@ fn suggest_screenshot_folder() -> Option<String> {
     candidates
         .into_iter()
         .find(|path| path.is_dir())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| user_facing_path(&path))
 }
 
 #[tauri::command]
@@ -4072,7 +4083,7 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             app.handle()
-                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+                .set_activation_policy(tauri::ActivationPolicy::Regular)?;
 
             start_clipboard_monitor(app.handle().clone());
             if std::env::args().any(|argument| argument == "--minimized") {
@@ -4193,7 +4204,7 @@ mod tests {
             "clipboardWatcherEnabled": false
         }))
         .expect("legacy desktop preferences");
-        assert!(!legacy.show_in_taskbar_dock);
+        assert!(legacy.show_in_taskbar_dock);
 
         let visible: NativeDesktopPreferences = serde_json::from_value(serde_json::json!({
             "minimizeToTray": true,
@@ -4202,6 +4213,15 @@ mod tests {
         }))
         .expect("taskbar desktop preferences");
         assert!(visible.show_in_taskbar_dock);
+    }
+
+    #[test]
+    fn windows_extended_paths_are_presented_without_device_prefixes() {
+        assert_eq!(user_facing_path(Path::new(r"\\?\C:\HPRT")), r"C:\HPRT");
+        assert_eq!(
+            user_facing_path(Path::new(r"\\?\UNC\server\pictures")),
+            r"\\server\pictures"
+        );
     }
 
     #[test]

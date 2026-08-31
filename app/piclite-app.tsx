@@ -518,7 +518,7 @@ const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferences = {
   dockTheme: "system",
   density: "auto",
   minimizeToTray: true,
-  showInTaskbarDock: false,
+  showInTaskbarDock: true,
   launchAtStartup: false,
   shortcutsEnabled: true,
   shortcutShow: "CommandOrControl+Alt+P",
