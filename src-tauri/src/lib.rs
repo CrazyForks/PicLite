@@ -1239,6 +1239,18 @@ fn emit_image_import_progress(app: &AppHandle, current: usize, total: usize) {
 }
 
 fn show_window(app: &AppHandle, label: &str) {
+    #[cfg(target_os = "macos")]
+    if label == "main"
+        && app
+            .state::<DesktopState>()
+            .show_in_taskbar_dock
+            .load(Ordering::Relaxed)
+    {
+        // Closing the main window moves PicLite back to accessory mode so its
+        // running icon leaves the Dock. Restore normal app activation only
+        // when the user explicitly opens the main window again.
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    }
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.unminimize();
         let _ = window.show();
@@ -1666,12 +1678,22 @@ async fn update_desktop_preferences(
             .map_err(|error| error.to_string())?;
     }
     #[cfg(target_os = "macos")]
-    app.set_activation_policy(if preferences.show_in_taskbar_dock {
-        tauri::ActivationPolicy::Regular
-    } else {
-        tauri::ActivationPolicy::Accessory
-    })
-    .map_err(|error| error.to_string())?;
+    {
+        // "Show in Dock" applies while the main window is open. The red
+        // close button deliberately returns PicLite to menu-bar-only mode;
+        // receiving a later preferences sync must not put the closed app back
+        // in the Dock.
+        let main_is_visible = app
+            .get_webview_window("main")
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false);
+        app.set_activation_policy(if preferences.show_in_taskbar_dock && main_is_visible {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        })
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -4253,6 +4275,14 @@ fn start_clipboard_monitor(app: AppHandle) {
                         } else if last_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                             last_fingerprint = Some(fingerprint);
                             if !ignored {
+                                // The floating renderer is intentionally lazy
+                                // to keep idle memory low. Create it on the
+                                // first real clipboard event, then give its
+                                // event listeners a moment to mount before
+                                // delivering the payload.
+                                if ensure_dropzone_window(&app).unwrap_or(false) {
+                                    thread::sleep(Duration::from_millis(250));
+                                }
                                 let _ = app.emit("clipboard:paths", paths);
                             }
                         }
@@ -4277,6 +4307,9 @@ fn start_clipboard_monitor(app: AppHandle) {
                                 last_fingerprint = Some(fingerprint);
                                 if !ignored {
                                     if let Ok(encoded) = encode_clipboard_bitmap(&image) {
+                                        if ensure_dropzone_window(&app).unwrap_or(false) {
+                                            thread::sleep(Duration::from_millis(250));
+                                        }
                                         let _ = app.emit("clipboard:image", encoded);
                                     }
                                 }
@@ -4351,6 +4384,16 @@ pub fn run() {
                 {
                     api.prevent_close();
                     let _ = window.hide();
+                    #[cfg(target_os = "macos")]
+                    if window.label() == "main" {
+                        // Red close means "leave the main-window app mode".
+                        // Automation and the menu-bar process stay alive, but
+                        // the running Dock icon disappears until main is shown
+                        // again from a PicLite entry point.
+                        let _ = window
+                            .app_handle()
+                            .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
                 }
                 WindowEvent::CloseRequested { .. } if window.label() == "preferences" => {
                     // Do not keep the settings renderer hidden in memory.
