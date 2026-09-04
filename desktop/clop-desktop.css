@@ -179,6 +179,7 @@ svg { width: 18px; height: 18px; }
 .result-actions { display: grid; grid-template-columns: repeat(3, 42px); justify-content: center; gap: 9px 11px; pointer-events: auto; }
 .result-actions button { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.34); border-radius: 50%; color: #242321; background: rgba(250,247,243,.9); box-shadow: 0 4px 12px rgba(0,0,0,.18); backdrop-filter: blur(12px); transition: transform .15s, background .15s; }
 .result-actions button:hover { transform: translateY(-1px) scale(1.04); background: white; }
+.result-actions button:active { transform: scale(.9); background: #fff; }
 .result-actions button:disabled { opacity: .35; transform: none; cursor: default; }
 .result-actions svg { width: 17px; height: 17px; }
 .floating-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding: 4px 22px 4px 10px; border-top: 1px solid var(--line); }
@@ -189,6 +190,10 @@ svg { width: 18px; height: 18px; }
 .floating-footer .automatic-badge { width: auto; max-width: calc(100% - 112px); display: flex; grid-template-columns: none; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 4px; color: var(--muted); font-size: 9px; font-weight: 700; }
 .automatic-badge span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .automatic-badge.has-update { color: var(--accent); }
+.automatic-badge.operation-success { color: #2f8e56; }
+.automatic-badge.operation-error { color: #c84b4b; }
+.automatic-badge.operation-success svg { color: #2f9c5c; }
+.automatic-badge.operation-error svg { color: #d95c57; }
 .automatic-badge svg { width: 12px; height: 12px; color: #6ca947; }
 .floating-resize-handle { position: absolute; z-index: 12; right: 2px; bottom: 2px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 0 0 13px 0; background: transparent; cursor: nwse-resize; }
 .floating-resize-handle::before, .floating-resize-handle::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); opacity: .7; }

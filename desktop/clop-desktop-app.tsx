@@ -1,6 +1,8 @@
 import { PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { Icon } from "./clop-icons";
+import { copyImageWithFeedback } from "./operation-feedback";
+import type { OperationFeedbackTone } from "./operation-feedback";
 import { fileName, formatBytes, loadSettings, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
 import type { DesktopSettings, FloatingAction, FloatingWatermark, ImageFormat, Language, OptimisationPreset, PicLiteBridge, QuickCompressResult, QuickCompressSettings, StoredUploadProfile } from "./clop-types";
 import packageManifest from "../package.json";
@@ -269,19 +271,36 @@ function DropSurface({ language, active, compact = false }: { language: Language
   </div>;
 }
 
-function ResultActions({ item, api, settings, onDownscale, onWatermark, onUndo, onUpload }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; onDownscale: () => void; onWatermark: () => void; onUndo: () => void; onUpload: () => void }) {
+function ResultActions({ item, api, settings, notify, onDownscale, onWatermark, onUndo, onUpload }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; notify: (text: string, tone?: OperationFeedbackTone) => void; onDownscale: () => void; onWatermark: () => void; onUndo: () => void; onUpload: () => void }) {
   const language = settings.language;
-  const copy = async () => {
-    if (item.output) await api.copyImagePath(item.output);
+  const copy = () => copyImageWithFeedback(api.copyImagePath, item.output, language, notify);
+  const runWithNotice = async (operation: () => Promise<unknown>, success: string) => {
+    try {
+      await operation();
+      notify(success);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      notify(detail, "error");
+    }
+  };
+  const preview = async () => {
+    const output = item.output;
+    if (!output) return;
+    await runWithNotice(() => api.openImage(output), tr(language, "已打开预览", "Preview opened"));
+  };
+  const reveal = async () => {
+    const output = item.output;
+    if (!output) return;
+    await runWithNotice(() => api.revealPath(output), tr(language, "已在文件夹中定位", "Shown in folder"));
   };
   const actions: Record<FloatingAction, { title: string; icon: string; disabled?: boolean; run: () => void }> = {
     downscale: { title: tr(language, "再缩小一半", "Downscale by half again"), icon: "minus", run: onDownscale },
     watermark: { title: tr(language, "按已保存参数添加水印", "Apply the saved watermark"), icon: "watermark", run: onWatermark },
     undo: { title: tr(language, "撤销上一次处理", "Undo last operation"), icon: "undo", disabled: !item.history?.length, run: onUndo },
     copy: { title: tr(language, "复制优化结果", "Copy optimised result"), icon: "copy", run: () => void copy() },
-    preview: { title: tr(language, "在新窗口预览", "Open image in a new window"), icon: "eye", run: () => item.output && void api.openImage(item.output) },
-    reveal: { title: tr(language, "在文件夹中显示", "Show in folder"), icon: "folder", run: () => item.output && void api.revealPath(item.output) },
-    gallery: { title: tr(language, "打开图库", "Open library"), icon: "gallery", run: () => void api.showGalleryWindow() },
+    preview: { title: tr(language, "在新窗口预览", "Open image in a new window"), icon: "eye", run: () => void preview() },
+    reveal: { title: tr(language, "在文件夹中显示", "Show in folder"), icon: "folder", run: () => void reveal() },
+    gallery: { title: tr(language, "打开图库", "Open library"), icon: "gallery", run: () => void runWithNotice(() => api.showGalleryWindow(), tr(language, "已打开图库", "Library opened")) },
     upload: { title: tr(language, "上传图床并复制链接", "Upload and copy URL"), icon: "upload", run: onUpload },
   };
   return <div className="result-actions">{settings.floatingActions.slice(0, 6).map((id) => { const action = actions[id]; return <button key={id} disabled={action.disabled} title={action.title} onClick={action.run}><Icon name={action.icon} /></button>; })}</div>;
@@ -332,7 +351,7 @@ function FormatBar({ value, update }: { value?: string; update: (format: ImageFo
   </div>;
 }
 
-function ResultCard({ item, api, settings, active, allowWindowDrag = true, remove, select, downscale, watermark, undo, upload, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; allowWindowDrag?: boolean; remove: () => void; select: () => void; downscale: () => void; watermark: () => void; undo: () => void; upload: () => void; updateFormat: (format: ImageFormat) => void }) {
+function ResultCard({ item, api, settings, active, allowWindowDrag = true, notify, remove, select, downscale, watermark, undo, upload, updateFormat }: { item: ResultItem; api: PicLiteBridge; settings: DesktopSettings; active: boolean; allowWindowDrag?: boolean; notify?: (text: string, tone?: OperationFeedbackTone) => void; remove: () => void; select: () => void; downscale: () => void; watermark: () => void; undo: () => void; upload: () => void; updateFormat: (format: ImageFormat) => void }) {
   const saved = percentage(item);
   const format = resultFormat(item);
   const startWindowDrag = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -352,7 +371,7 @@ function ResultCard({ item, api, settings, active, allowWindowDrag = true, remov
         </>}
       </div>
       {item.status === "done" && <div className="result-hover-actions" onClick={(event) => event.stopPropagation()}>
-        <ResultActions item={item} api={api} settings={settings} onDownscale={downscale} onWatermark={watermark} onUndo={undo} onUpload={upload} />
+        <ResultActions item={item} api={api} settings={settings} notify={notify || (() => undefined)} onDownscale={downscale} onWatermark={watermark} onUndo={undo} onUpload={upload} />
       </div>}
     </div>
     <button className="result-close" title={tr(settings.language, "移除", "Dismiss")} onClick={(event) => { event.stopPropagation(); remove(); }}><Icon name="close" /></button>
@@ -365,12 +384,27 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   const [dragging, setDragging] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [updateNotice, setUpdateNotice] = useState<{ text: string; url?: string } | null>(null);
+  const [operationNotice, setOperationNotice] = useState<{ text: string; tone: OperationFeedbackTone } | null>(null);
   const timer = useRef<number | null>(null);
+  const operationNoticeTimer = useRef<number | null>(null);
   const resizeTimer = useRef<number | null>(null);
   const swipeStartY = useRef<number | null>(null);
   const wheelLocked = useRef(false);
   const autoUpdateCheckStartedRef = useRef(false);
   const cleanupRetentionSeconds = cleanupSeconds(settings);
+
+  const showOperationNotice = useCallback((text: string, tone: OperationFeedbackTone = "success") => {
+    if (operationNoticeTimer.current) window.clearTimeout(operationNoticeTimer.current);
+    setOperationNotice({ text, tone });
+    operationNoticeTimer.current = window.setTimeout(() => {
+      setOperationNotice(null);
+      operationNoticeTimer.current = null;
+    }, 2400);
+  }, []);
+
+  useEffect(() => () => {
+    if (operationNoticeTimer.current) window.clearTimeout(operationNoticeTimer.current);
+  }, []);
 
   const startEmptyWindowDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a")) return;
@@ -542,10 +576,10 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     </section> : <>
       <div className={`floating-list ${settings.floatingDisplayMode}`} onClick={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) rotateResults(1); }} onWheel={(event) => { if (settings.floatingDisplayMode !== "stack" || Math.abs(event.deltaY) < 4 || wheelLocked.current) return; event.preventDefault(); wheelLocked.current = true; rotateResults(event.deltaY > 0 ? 1 : -1); window.setTimeout(() => { wheelLocked.current = false; }, 180); }} onPointerDown={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) swipeStartY.current = event.clientY; }} onPointerUp={(event) => { if (swipeStartY.current == null) return; const delta = event.clientY - swipeStartY.current; swipeStartY.current = null; if (Math.abs(delta) > 28) rotateResults(delta < 0 ? 1 : -1); }}>{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
-        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} allowWindowDrag={settings.floatingDisplayMode !== "stack"} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => undo(item)} updateFormat={(format) => void updateFormat(item, format)} /></div>;
+        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} allowWindowDrag={settings.floatingDisplayMode !== "stack"} notify={showOperationNotice} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => { undo(item); showOperationNotice(tr(settings.language, "已撤销上一次处理", "Last operation undone")); }} updateFormat={(format) => void updateFormat(item, format)} /></div>;
       })}</div>
       <footer className="floating-footer" onPointerDown={startEmptyWindowDrag}>
-        <button className={`automatic-badge ${updateNotice?.url ? "has-update" : ""}`} title={updateNotice?.text} onClick={() => updateNotice?.url && void api.openExternal(updateNotice.url)}><Icon name="spark" /><span>{updateNotice?.text || <T language={settings.language} zh="首次自动择优" en="Smart first pass" />}</span></button>
+        <button className={`automatic-badge ${operationNotice ? `operation-${operationNotice.tone}` : updateNotice?.url ? "has-update" : ""}`} title={operationNotice?.text || updateNotice?.text} aria-live="polite" onClick={() => !operationNotice && updateNotice?.url && void api.openExternal(updateNotice.url)}><Icon name={operationNotice ? operationNotice.tone === "success" ? "check" : "info" : "spark"} /><span>{operationNotice?.text || updateNotice?.text || <T language={settings.language} zh="首次自动择优" en="Smart first pass" />}</span></button>
         <div><button title={tr(settings.language, settings.floatingDisplayMode === "stack" ? "展开结果" : "堆叠结果", settings.floatingDisplayMode === "stack" ? "Expand results" : "Stack results")} onClick={() => setSettings((current) => ({ ...current, floatingDisplayMode: current.floatingDisplayMode === "stack" ? "list" : "stack" }))}><Icon name="results" /></button><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="clear" /></button>}<button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button></div>
       </footer>
     </>}

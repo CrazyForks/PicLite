@@ -14,7 +14,7 @@ A local-first image optimiser for content creators and developers, available on 
 - Limit output to 200 KB, 100 KB, 50 KB, or a custom size using measured quality and dimension adjustments
 - Import an entire folder recursively; large batches use the same low-memory queue
 - Clipboard monitoring, global shortcuts, watched folders, and a local result library
-- Clop-inspired floating results with copy, preview, undo, further downscaling, and format switching
+- Clop-inspired floating results with copy, preview, undo, further downscaling, and format switching, plus clear success or failure feedback in the lower-left status area
 - Configurable result limit, stacked/list layouts, and automatic dismissal
 - Replace, rename beside the source, or export to a fixed folder with scheduled cleanup
 - Upload to WebDAV, S3/R2, OSS, FTP, or SFTP image hosts
@@ -64,7 +64,7 @@ Create a `.env` file in the project directory to change the bind address, host p
 ```dotenv
 PICLITE_BIND=0.0.0.0
 PICLITE_PORT=3456
-PICLITE_TAG=1.4.1
+PICLITE_TAG=1.5.0
 ```
 
 To build from the current source tree instead:
