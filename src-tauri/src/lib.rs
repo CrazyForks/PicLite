@@ -290,6 +290,8 @@ struct QuickCompressResult {
     output: Option<String>,
     original_bytes: Option<u64>,
     output_bytes: Option<u64>,
+    width: Option<u32>,
+    height: Option<u32>,
     kept_original: bool,
     error: Option<String>,
 }
@@ -579,10 +581,15 @@ fn batch_rename_name(
     } else {
         template.trim()
     };
+    let separated_base = if word_separator.is_empty() {
+        base.to_string()
+    } else {
+        words_with_separator(base, word_separator)
+    };
     let mut value = template
         .replace("{name:words}", &words_with_separator(base, word_separator))
         .replace("{name:initials}", &word_initials(base, word_separator))
-        .replace("{name}", base)
+        .replace("{name}", &separated_base)
         .replace("{ext}", extension)
         .replace("{folder}", folder)
         .replace("{match}", matched)
@@ -2471,7 +2478,7 @@ async fn quick_compress_paths(
     let mut results = Vec::new();
     for requested in paths {
         let source = PathBuf::from(&requested);
-        let result = (|| -> Result<(PathBuf, u64, u64, bool), String> {
+        let result = (|| -> Result<(PathBuf, u64, u64, u32, u32, bool), String> {
             if !source.is_file() || !is_image(&source) {
                 return Err("不是支持的图片文件".to_string());
             }
@@ -2524,16 +2531,20 @@ async fn quick_compress_paths(
                 output,
                 original_bytes,
                 optimized.bytes.len() as u64,
+                width,
+                height,
                 optimized.bytes.len() as u64 == original_bytes,
             ))
         })();
         match result {
-            Ok((output, original_bytes, output_bytes, kept_original)) => {
+            Ok((output, original_bytes, output_bytes, width, height, kept_original)) => {
                 results.push(QuickCompressResult {
                     source: requested,
                     output: Some(output.to_string_lossy().to_string()),
                     original_bytes: Some(original_bytes),
                     output_bytes: Some(output_bytes),
+                    width: Some(width),
+                    height: Some(height),
                     kept_original,
                     error: None,
                 });
@@ -2543,6 +2554,8 @@ async fn quick_compress_paths(
                 output: None,
                 original_bytes: None,
                 output_bytes: None,
+                width: None,
+                height: None,
                 kept_original: false,
                 error: Some(error),
             }),
@@ -7471,6 +7484,34 @@ mod tests {
                 1,
             ),
             "N-Y-C_Front-cover-final.png"
+        );
+        assert_eq!(
+            batch_rename_name(
+                "{code}_{name}",
+                "Front cover_final-draft",
+                "png",
+                "",
+                "",
+                &[],
+                "0101",
+                "_",
+                1,
+            ),
+            "0101_Front_cover_final_draft.png"
+        );
+        assert_eq!(
+            batch_rename_name(
+                "{name}",
+                "Front cover_final-draft",
+                "png",
+                "",
+                "",
+                &[],
+                "",
+                "",
+                1,
+            ),
+            "Front cover_final-draft.png"
         );
     }
 

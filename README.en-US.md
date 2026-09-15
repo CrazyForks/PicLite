@@ -28,7 +28,7 @@ Batch rename lives on its own plugin page. It extracts regex captures from ances
 
 ### Floating-window workflow
 
-The desktop app can open its floating window from a global shortcut, copied image, dropped file, or the local image picker, without opening the full workbench first. After the smart first pass, hover over the preview to copy, preview, reveal, undo, downscale again, switch formats, add a watermark, or upload. Floating results are draggable and resizable, support cycling stacks and expanded lists, result limits and automatic dismissal, and let you choose up to six action buttons in Settings.
+The desktop app can open its floating window from a global shortcut, copied image, dropped file, or the local image picker, without opening the full workbench first. Smart compression can stay enabled for every imported image, or you can switch to your custom compression settings from the floating window footer. Hover over the preview to copy, preview, reveal, undo, downscale again, switch formats, add a watermark, or upload. Floating results are draggable and resizable, support cycling stacks and expanded lists, result limits and automatic dismissal, and let you choose up to six action buttons in Settings.
 
 ### Multi-task folder monitoring
 

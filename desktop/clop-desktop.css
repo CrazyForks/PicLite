@@ -204,8 +204,12 @@ svg { width: 18px; height: 18px; }
 .floating-footer button:hover { background: var(--card); }
 .floating-footer svg { width: 14px; height: 14px; }
 .floating-footer .automatic-badge { width: auto; max-width: calc(100% - 112px); display: flex; grid-template-columns: none; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 4px; color: var(--muted); font-size: 9px; font-weight: 700; }
+.floating-footer .automatic-badge:not([aria-disabled="true"]) { cursor: pointer; }
+.floating-footer .automatic-badge[aria-disabled="true"] { cursor: default; }
+.floating-footer .automatic-badge[aria-disabled="true"]:hover { background: transparent; }
 .automatic-badge span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.automatic-badge.has-update { color: var(--accent); }
+.automatic-badge.has-notice { color: var(--accent); }
+.automatic-badge.mode-custom:not(.has-notice):not(.operation-success):not(.operation-error) svg { color: var(--muted); }
 .automatic-badge.operation-success { color: #2f8e56; }
 .automatic-badge.operation-error { color: #c84b4b; }
 .automatic-badge.operation-success svg { color: #2f9c5c; }

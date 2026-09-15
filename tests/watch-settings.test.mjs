@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSettings, saveSettings } from '../desktop/clop-store.ts';
+import { loadSettings, resolveOptimisationPreset, saveSettings } from '../desktop/clop-store.ts';
 const values = new Map();
 globalThis.localStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
 globalThis.window = { dispatchEvent() {} };
@@ -40,4 +40,16 @@ test('Windows clipboard repair re-enables old disabled monitor settings once', (
     if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
     else delete globalThis.navigator;
   }
+});
+
+test('smart compression uses multi-format defaults while custom compression keeps its settings', () => {
+  const shared = { stripMetadata: true, preventLarger: true };
+  assert.deepEqual(
+    resolveOptimisationPreset({ mode: 'auto', quality: 35, scale: 45, format: 'jpeg', ...shared }),
+    { mode: 'auto', quality: 86, scale: 100, format: 'keep', ...shared },
+  );
+  assert.deepEqual(
+    resolveOptimisationPreset({ mode: 'manual', quality: 35, scale: 45, format: 'jpeg', ...shared }),
+    { mode: 'manual', quality: 35, scale: 45, format: 'jpeg', ...shared },
+  );
 });

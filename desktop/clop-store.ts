@@ -92,6 +92,12 @@ function validUpdateCheckFrequency(value: unknown): value is UpdateCheckFrequenc
   return value === "startup" || value === "daily" || value === "weekly" || value === "never";
 }
 
+export function resolveOptimisationPreset(preset: OptimisationPreset): OptimisationPreset {
+  return preset.mode === "auto"
+    ? { ...preset, quality: 86, scale: 100, format: "keep" }
+    : { ...preset };
+}
+
 function userFacingPath(value: string) {
   if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
   if (value.startsWith("\\\\?\\")) return value.slice(4);

@@ -3,7 +3,7 @@ import { disable as disableAutostart, enable as enableAutostart, isEnabled as is
 import { Icon } from "./clop-icons";
 import { copyImageWithFeedback } from "./operation-feedback";
 import type { OperationFeedbackTone } from "./operation-feedback";
-import { fileName, formatBytes, loadSettings, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
+import { fileName, formatBytes, loadSettings, resolveOptimisationPreset, saveSettings, subscribeSettings, toNativeFormat, tr } from "./clop-store";
 import type { DesktopSettings, FloatingAction, FloatingWatermark, ImageFormat, Language, OptimisationPreset, PicLiteBridge, QuickCompressResult, QuickCompressSettings, StoredUploadProfile } from "./clop-types";
 import packageManifest from "../package.json";
 
@@ -15,6 +15,8 @@ type ResultItem = QuickCompressResult & {
   width?: number;
   height?: number;
   history?: ResultItem[];
+  smartCompression?: boolean;
+  formatChoice?: ImageFormat | "auto";
   status: "working" | "done" | "error";
 };
 
@@ -108,8 +110,8 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (che
   return <button type="button" className={`clop-switch ${checked ? "on" : ""}`} role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)}><i /></button>;
 }
 
-function Select<T extends string>({ value, onChange, children, label }: { value: T; onChange: (value: T) => void; children: React.ReactNode; label: string }) {
-  return <select aria-label={label} value={value} onChange={(event) => onChange(event.target.value as T)}>{children}</select>;
+function Select<T extends string>({ value, onChange, children, label, disabled = false }: { value: T; onChange: (value: T) => void; children: React.ReactNode; label: string; disabled?: boolean }) {
+  return <select aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value as T)}>{children}</select>;
 }
 
 function percentage(item: QuickCompressResult) {
@@ -151,14 +153,14 @@ function cleanupSeconds(settings: DesktopSettings) {
 }
 
 function nativeSettings(settings: DesktopSettings): QuickCompressSettings {
-  const automatic = settings.preset.mode === "auto";
+  const preset = resolveOptimisationPreset(settings.preset);
   return {
-    mode: automatic ? "auto" : "manual",
-    quality: automatic ? 86 : settings.preset.quality,
-    scale: automatic ? 100 : settings.preset.scale,
-    format: toNativeFormat(settings.preset.format),
-    stripMetadata: settings.preset.stripMetadata,
-    preventLarger: settings.preset.preventLarger,
+    mode: preset.mode,
+    quality: preset.quality,
+    scale: preset.scale,
+    format: toNativeFormat(preset.format),
+    stripMetadata: preset.stripMetadata,
+    preventLarger: preset.preventLarger,
     exportMode: settings.filePlacement,
     exportSuffix: settings.outputSuffix,
     renameTemplate: settings.renameTemplate,
@@ -219,7 +221,8 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     const effectiveSettings = { ...settings, preset: { ...settings.preset, ...overrides } };
     const unique = imagePaths;
     setWorking(true);
-    const placeholders: ResultItem[] = unique.map((source) => ({ id: `${source}-${Date.now()}-${Math.random()}`, source, keptOriginal: false, status: "working" }));
+    const smartCompression = effectiveSettings.preset.mode === "auto";
+    const placeholders: ResultItem[] = unique.map((source) => ({ id: `${source}-${Date.now()}-${Math.random()}`, source, keptOriginal: false, smartCompression, formatChoice: smartCompression ? "auto" : undefined, status: "working" }));
     setResults((current) => {
       const next = (replace ? placeholders : [...placeholders, ...current]).slice(0, resultLimit);
       if (!replace) current.filter((item) => !next.some((candidate) => candidate.id === item.id)).forEach((item) => item.preview && URL.revokeObjectURL(item.preview));
@@ -227,7 +230,7 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     });
     try {
       const output = await api.quickCompressPaths(unique, nativeSettings(effectiveSettings));
-      const finished = await attachPreviews(output.map((item, index) => ({ ...item, originalSource: item.source, id: placeholders[index].id, status: item.error ? "error" : "done" })), api);
+      const finished = await attachPreviews(output.map((item, index) => ({ ...item, originalSource: item.source, id: placeholders[index].id, smartCompression, formatChoice: smartCompression ? "auto" : undefined, status: item.error ? "error" : "done" })), api);
       setResults((current) => current.map((item) => finished.find((candidate) => candidate.id === item.id) || item));
       return finished;
     } catch (error) {
@@ -244,24 +247,46 @@ function useOptimiser(api: PicLiteBridge | undefined, settings: DesktopSettings)
     const originalSource = item.originalSource || item.source;
     const source = sourceOverride || item.reencodeSource || originalSource;
     const effectiveSettings = { ...settings, preset: { ...settings.preset, ...overrides } };
+    const smartCompression = effectiveSettings.preset.mode === "auto";
     setWorking(true);
-    setResults((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "working", error: undefined } : candidate));
+    setResults((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, smartCompression, status: "working", error: undefined } : candidate));
     try {
       const [output] = await api.quickCompressPaths([source], nativeSettings(effectiveSettings));
       if (!output) throw new Error(tr(settings.language, "没有生成压缩结果", "No optimised result was created"));
       const snapshot: ResultItem = { ...item, history: undefined };
-      const [next] = await attachPreviews([{
+      const history = [...(item.history || []), snapshot];
+      const provisional: ResultItem = {
+        ...item,
         ...output,
         source: originalSource,
         originalSource,
         reencodeSource: sourceOverride || item.reencodeSource,
         originalBytes: item.originalBytes ?? output.originalBytes,
+        smartCompression,
+        formatChoice: smartCompression ? "auto" : undefined,
         id: item.id,
         status: output.error ? "error" : "done",
+        history,
+      };
+      // Native compression already knows the exact byte size. Publish those
+      // metrics immediately instead of keeping the old result visible while
+      // the new preview image is read and decoded.
+      setResults((current) => current.map((candidate) => candidate.id === item.id ? provisional : candidate));
+      const [previewed] = await attachPreviews([{
+        ...provisional,
+        preview: undefined,
+        width: undefined,
+        height: undefined,
       }], api);
-      const finished = { ...next, history: [...(item.history || []), snapshot] };
+      const finished: ResultItem = {
+        ...previewed,
+        preview: previewed.preview || provisional.preview,
+        width: previewed.width ?? provisional.width,
+        height: previewed.height ?? provisional.height,
+        history,
+      };
       setResults((current) => current.map((candidate) => {
-        if (candidate.id !== item.id) return candidate;
+        if (candidate.id !== item.id || candidate.output !== provisional.output) return candidate;
         return finished;
       }));
     } catch (error) {
@@ -390,10 +415,10 @@ function ResultCard({ item, api, settings, active, allowWindowDrag = true, notif
       {item.preview ? <img src={item.preview} alt={fileName(item.source)} /> : <Icon name={item.status === "working" ? "spark" : "image"} />}
       <div className="result-overlay">
         <strong className="result-name" title={fileName(item.source)}>{fileName(item.source)}</strong>
-        {item.status === "working" ? <><span className="result-state"><T language={settings.language} zh="正在自动选择最优结果…" en="Choosing the best result…" /></span><div className="progress"><i /></div></> : item.error ? <span className="result-error">{item.error}</span> : <>
+        {item.status === "working" ? <><span className="result-state">{item.smartCompression ? <T language={settings.language} zh="正在智能选择最优结果…" en="Choosing the best result…" /> : <T language={settings.language} zh="正在按自定义设置压缩…" en="Compressing with custom settings…" />}</span><div className="progress"><i /></div></> : item.error ? <span className="result-error">{item.error}</span> : <>
           <div className="result-metrics"><b>{formatBytes(item.originalBytes)}</b><span>→</span><b>{formatBytes(item.outputBytes)}</b>{saved != null && <em className={saved < 0 ? "bad" : ""}>{saved > 0 ? `−${saved}%` : saved === 0 ? "0%" : `+${Math.abs(saved)}%`}</em>}</div>
           {(item.width && item.height) ? <small className="result-dimensions"><Icon name="image" /> {item.width.toLocaleString()} × {item.height.toLocaleString()}</small> : null}
-          <FormatBar value={settings.preset.mode === "auto" && settings.preset.format === "keep" ? "auto" : format} update={updateFormat} />
+          <FormatBar value={item.formatChoice === "auto" ? "auto" : format} update={updateFormat} />
         </>}
       </div>
       {item.status === "done" && <div className="result-hover-actions" onClick={(event) => event.stopPropagation()}>
@@ -431,6 +456,11 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   useEffect(() => () => {
     if (operationNoticeTimer.current) window.clearTimeout(operationNoticeTimer.current);
   }, []);
+  useEffect(() => {
+    if (!updateNotice) return;
+    const noticeTimer = window.setTimeout(() => setUpdateNotice(null), 4000);
+    return () => window.clearTimeout(noticeTimer);
+  }, [updateNotice]);
 
   const startEmptyWindowDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a")) return;
@@ -568,10 +598,12 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
   }, [api, results.length, settings.autoHideResults, settings.autoHideSeconds, working]);
 
   const updateFormat = async (item: ResultItem, format: ImageFormat) => {
-    const mode = format === "keep" ? "auto" : settings.preset.mode;
-    const nextScale = format === "keep" ? 100 : settings.preset.scale;
-    setSettings((current) => ({ ...current, preset: { ...current.preset, mode, format, scale: nextScale } }));
-    await reoptimise(item, { mode, format, scale: nextScale });
+    const smartCompression = format === "keep";
+    await reoptimise(item, {
+      mode: smartCompression ? "auto" : "manual",
+      format,
+      scale: smartCompression ? 100 : settings.preset.scale,
+    });
   };
   const undo = (item: ResultItem) => setResults((current) => current.map((candidate) => {
     if (candidate.id !== item.id || !candidate.history?.length) return candidate;
@@ -603,6 +635,15 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     setSelectedId(next[0].id);
     return next;
   });
+  const compressionNotice = operationNotice?.text || updateNotice?.text;
+  const smartCompressionEnabled = settings.preset.mode === "auto";
+  const toggleCompressionMode = () => {
+    if (compressionNotice) return;
+    setSettings((current) => ({
+      ...current,
+      preset: { ...current.preset, mode: current.preset.mode === "auto" ? "manual" : "auto" },
+    }));
+  };
   return <main className={`floating-results ${settings.floatingLayout} display-${settings.floatingDisplayMode}`} onMouseEnter={() => timer.current && window.clearTimeout(timer.current)}>
     {!results.length ? <section className="floating-empty" onPointerDown={startEmptyWindowDrag}>
       <DropSurface language={settings.language} active={dragging} />
@@ -617,11 +658,11 @@ function FloatingResults({ api }: { api: PicLiteBridge }) {
     </section> : <>
       <div className={`floating-list ${settings.floatingDisplayMode}`} onClick={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) rotateResults(1); }} onWheel={(event) => { if (settings.floatingDisplayMode !== "stack" || Math.abs(event.deltaY) < 4 || wheelLocked.current) return; event.preventDefault(); wheelLocked.current = true; rotateResults(event.deltaY > 0 ? 1 : -1); window.setTimeout(() => { wheelLocked.current = false; }, 180); }} onPointerDown={(event) => { if (settings.floatingDisplayMode === "stack" && !(event.target as HTMLElement).closest("button, input, select, a")) swipeStartY.current = event.clientY; }} onPointerUp={(event) => { if (swipeStartY.current == null) return; const delta = event.clientY - swipeStartY.current; swipeStartY.current = null; if (Math.abs(delta) > 28) rotateResults(delta < 0 ? 1 : -1); }}>{results.map((item, index) => {
         const active = selectedId ? selectedId === item.id : index === 0;
-        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} allowWindowDrag={settings.floatingDisplayMode !== "stack"} notify={showOperationNotice} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false })} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => { undo(item); showOperationNotice(tr(settings.language, "已撤销上一次处理", "Last operation undone")); }} updateFormat={(format) => void updateFormat(item, format)} /></div>;
+        return <div className="floating-result-slot" key={item.id} style={{ "--stack-index": index } as React.CSSProperties}><ResultCard item={item} api={api} settings={settings} active={active} allowWindowDrag={settings.floatingDisplayMode !== "stack"} notify={showOperationNotice} select={() => setSelectedId(item.id)} remove={() => remove(item.id)} downscale={() => void reoptimise(item, { mode: "manual", scale: 50, preventLarger: false }, item.output || item.source)} watermark={() => void applySavedWatermark(item)} upload={() => void uploadResult(item)} undo={() => { undo(item); showOperationNotice(tr(settings.language, "已撤销上一次处理", "Last operation undone")); }} updateFormat={(format) => void updateFormat(item, format)} /></div>;
       })}</div>
       <footer className="floating-footer" onPointerDown={startEmptyWindowDrag}>
-        <button className={`automatic-badge ${operationNotice ? `operation-${operationNotice.tone}` : updateNotice?.url ? "has-update" : ""}`} title={operationNotice?.text || updateNotice?.text} aria-live="polite" onClick={() => !operationNotice && updateNotice?.url && void api.openExternal(updateNotice.url)}><Icon name={operationNotice ? operationNotice.tone === "success" ? "check" : "info" : "spark"} /><span>{operationNotice?.text || updateNotice?.text || <T language={settings.language} zh="首次自动择优" en="Smart first pass" />}</span></button>
-        <div><button title={tr(settings.language, settings.floatingDisplayMode === "stack" ? "展开结果" : "堆叠结果", settings.floatingDisplayMode === "stack" ? "Expand results" : "Stack results")} onClick={() => setSettings((current) => ({ ...current, floatingDisplayMode: current.floatingDisplayMode === "stack" ? "list" : "stack" }))}><Icon name="results" /></button><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="clear" /></button>}<button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button></div>
+        <button className={`automatic-badge mode-${smartCompressionEnabled ? "auto" : "custom"} ${operationNotice ? `operation-${operationNotice.tone}` : updateNotice ? "has-notice" : ""}`} title={compressionNotice || tr(settings.language, smartCompressionEnabled ? "点击切换为自定义压缩" : "点击切换为智能压缩", smartCompressionEnabled ? "Switch to custom compression" : "Switch to smart compression")} aria-live="polite" aria-pressed={smartCompressionEnabled} aria-disabled={Boolean(compressionNotice)} onClick={toggleCompressionMode}><Icon name={operationNotice ? operationNotice.tone === "success" ? "check" : "info" : updateNotice ? "info" : smartCompressionEnabled ? "spark" : "sliders"} /><span>{compressionNotice || (smartCompressionEnabled ? <T language={settings.language} zh="智能压缩" en="Smart compression" /> : <T language={settings.language} zh="自定义压缩" en="Custom compression" />)}</span></button>
+        <div><button title={tr(settings.language, "打开完整工作台", "Open full workbench")} onClick={() => void api.showMainWindow()}><Icon name="results" /></button><button title={tr(settings.language, settings.floatingDisplayMode === "stack" ? "展开结果" : "堆叠结果", settings.floatingDisplayMode === "stack" ? "Expand results" : "Stack results")} onClick={() => setSettings((current) => ({ ...current, floatingDisplayMode: current.floatingDisplayMode === "stack" ? "list" : "stack" }))}><Icon name="menu" /></button>{settings.showCopyClearButtons && <button title={tr(settings.language, "清空", "Clear all")} onClick={clear}><Icon name="clear" /></button>}<button title={tr(settings.language, "关闭悬浮窗", "Close floating window")} onClick={() => void api.hideCurrentWindow()}><Icon name="close" /></button></div>
       </footer>
     </>}
     <button className="floating-resize-handle" aria-label={tr(settings.language, "调整悬浮窗大小", "Resize floating window")} title={tr(settings.language, "拖动调整大小", "Drag to resize")} onPointerDown={(event) => { event.preventDefault(); void api.startResizeDragging("SouthEast"); }} />
@@ -958,10 +999,10 @@ function Preferences({ api }: { api: PicLiteBridge }) {
       </SettingsCard></>}
       {section === "images" && <>
         <SettingsCard title={<T language={language} zh="图片优化规则" en="Image optimisation rules" />}>
-          <SettingsRow title={<T language={language} zh="智能首次优化" en="Smart first pass" />} note={<T language={language} zh="保持原尺寸，实测 JPEG、WebP、PNG 三种高质量结果，有透明像素时跳过 JPEG，再采用收益最好的格式" en="Keep the original dimensions, measure high-quality JPEG, WebP and PNG results, skip JPEG when transparency is present, then use the format with the best savings" />}><Switch label="automatic optimisation" checked={settings.preset.mode === "auto"} onChange={(value) => patchPreset({ mode: value ? "auto" : "manual", scale: value ? 100 : settings.preset.scale })} /></SettingsRow>
+          <SettingsRow title={<T language={language} zh="智能压缩" en="Smart compression" />} note={<T language={language} zh="开启后每次都保持原尺寸，实测 JPEG、WebP、PNG 三种高质量结果，有透明像素时跳过 JPEG，再采用收益最好的格式；关闭后按下方参数压缩" en="When enabled, every image keeps its dimensions while high-quality JPEG, WebP and PNG results are measured; JPEG is skipped for transparency and the best saving is used. When disabled, the custom settings below are used" />}><Switch label="smart compression" checked={settings.preset.mode === "auto"} onChange={(value) => patchPreset({ mode: value ? "auto" : "manual" })} /></SettingsRow>
           <SettingsRow title={<T language={language} zh="压缩质量" en="Compression quality" />} note={settings.preset.mode === "auto" ? tr(language, "自动", "Automatic") : `${settings.preset.quality}%`}><input disabled={settings.preset.mode === "auto"} type="range" min="5" max="100" value={settings.preset.quality} onChange={(event) => patchPreset({ mode: "manual", quality: Number(event.target.value) })} /></SettingsRow>
           <SettingsRow title={<T language={language} zh="缩放" en="Downscale" />} note={settings.preset.mode === "auto" ? "100%" : `${settings.preset.scale}%`}><input disabled={settings.preset.mode === "auto"} type="range" min="5" max="100" value={settings.preset.scale} onChange={(event) => patchPreset({ mode: "manual", scale: Number(event.target.value) })} /></SettingsRow>
-          <SettingsRow title={<T language={language} zh="输出格式" en="Output format" />}><Select label="format" value={settings.preset.format} onChange={(value) => patchPreset({ format: value })}><option value="keep">{tr(language, settings.preset.mode === "auto" ? "自动择优（JPEG / WebP / PNG）" : "保持原格式", settings.preset.mode === "auto" ? "Auto-select (JPEG / WebP / PNG)" : "Keep original format")}</option><option value="jpeg">JPEG</option><option value="webp">WebP</option><option value="png">PNG</option></Select></SettingsRow>
+          <SettingsRow title={<T language={language} zh="输出格式" en="Output format" />}><Select label="format" disabled={settings.preset.mode === "auto"} value={settings.preset.mode === "auto" ? "keep" : settings.preset.format} onChange={(value) => patchPreset({ format: value })}><option value="keep">{tr(language, settings.preset.mode === "auto" ? "自动择优（JPEG / WebP / PNG）" : "保持原格式", settings.preset.mode === "auto" ? "Auto-select (JPEG / WebP / PNG)" : "Keep original format")}</option><option value="jpeg">JPEG</option><option value="webp">WebP</option><option value="png">PNG</option></Select></SettingsRow>
         </SettingsCard>
       </>}
       {section === "dropzone" && <SettingsCard title={<T language={language} zh="拖放区" en="Drop zone" />} note={<T language={language} zh="把图片拖入悬浮结果窗口即可优化" en="Drop images into the floating results window to optimise them" />}>

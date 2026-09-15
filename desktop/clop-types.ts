@@ -117,6 +117,8 @@ export type QuickCompressResult = {
   output?: string;
   originalBytes?: number;
   outputBytes?: number;
+  width?: number;
+  height?: number;
   keptOriginal: boolean;
   error?: string;
 };
